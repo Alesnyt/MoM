@@ -13,7 +13,7 @@ sudo apt-get update
 sudo apt-get install -y git
 git clone <URL-этого-репозитория> MoM
 cd MoM
-chmod +x install.sh start.sh
+chmod +x install.sh start.sh update.sh
 ./install.sh
 ./start.sh
 ```
@@ -56,6 +56,21 @@ chmod +x install.sh start.sh
 Если порт занят: остановите другой процесс или `MOM_KILL_PORT=1 ./start.sh`.
 
 Не запускайте несколько worker-процессов uvicorn: модель Whisper живёт в памяти одного процесса. Сессии после рестарта сохраняются в SQLite.
+
+## Обновление с GitHub
+
+После правок в репозитории на уже установленной ВМ:
+
+```bash
+cd MoM
+git pull
+chmod +x update.sh
+./update.sh
+```
+
+Дальше достаточно `./update.sh`: он делает `git pull`, ставит Python-зависимости, пересобирает интерфейс и перезапускает `mom.service`, если сервис установлен. Файл `.env`, база и записи не трогаются. Новые переменные из `.env.example` дописываются, уже заданные значения не перезаписываются.
+
+Если процесс запущен через `./start.sh`, после обновления остановите его и запустите снова.
 
 ## Разработка на своей машине
 
