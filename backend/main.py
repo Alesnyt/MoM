@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +22,8 @@ from .pipeline import format_duration, process_meeting
 
 ALLOWED_SUFFIXES = {".webm", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+_setup_lock = threading.Lock()
+_LOOPBACK = {"127.0.0.1", "::1", "testclient", "localhost"}
 
 
 class SettingsIn(BaseModel):
@@ -35,6 +38,7 @@ class ModelsIn(BaseModel):
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=200)
+    setup_token: str = ""
 
 
 class UserLoginIn(BaseModel):
@@ -49,6 +53,43 @@ class UserCreateIn(BaseModel):
 
 class UserLimitIn(BaseModel):
     archive_limit: int = Field(ge=1, le=100)
+
+
+def _client_ip(request: Request) -> str:
+    return (request.client.host if request.client else "") or "unknown"
+
+
+def _cookie_kw(request: Request) -> dict:
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    secure = request.url.scheme == "https" or proto == "https"
+    return {
+        "httponly": True,
+        "samesite": "lax",
+        "max_age": auth.SESSION_SECONDS,
+        "path": "/",
+        "secure": secure,
+    }
+
+
+def _rate_or_429(request: Request, action: str) -> None:
+    if not auth.rate_allow(f"{action}:{_client_ip(request)}"):
+        raise HTTPException(status_code=429, detail="Слишком много попыток, подождите минуту")
+
+
+def _assert_setup_allowed(request: Request, token: str) -> None:
+    expected = config.get_setup_token()
+    if expected:
+        if not auth.tokens_match(token, expected):
+            raise HTTPException(
+                status_code=403,
+                detail="Нужен токен установки SETUP_TOKEN из файла .env",
+            )
+        return
+    if _client_ip(request) not in _LOOPBACK:
+        raise HTTPException(
+            status_code=403,
+            detail="Задайте SETUP_TOKEN в .env или создайте администратора с localhost",
+        )
 
 
 def require_admin(mom_admin: str | None = Cookie(default=None)) -> dict:
@@ -103,6 +144,7 @@ def _health(*, full: bool = False) -> dict:
 async def lifespan(_app: FastAPI):
     ensure_dirs()
     store.init_db()
+    store.fail_interrupted_meetings()
     config.migrate_token_plan_asr()
     if config.get_api_key():
         try:
@@ -140,45 +182,35 @@ def auth_status(mom_admin: str | None = Cookie(default=None)) -> dict:
 
 
 @app.post("/api/auth/setup")
-def auth_setup(payload: LoginIn, response: Response) -> dict:
-    if config.admin_configured():
-        raise HTTPException(status_code=409, detail="Учётная запись администратора уже создана")
-    username = payload.username.strip()
-    password = payload.password
-    if len(username) < 3:
-        raise HTTPException(status_code=400, detail="Логин должен быть не короче 3 символов")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
-    config.set_admin_credentials(username, auth.hash_password(password))
-    token = auth.create_session(username)
-    response.set_cookie(
-        auth.COOKIE_NAME,
-        token,
-        httponly=True,
-        samesite="lax",
-        max_age=auth.SESSION_SECONDS,
-        path="/",
-    )
-    return {"configured": True, "authenticated": True, "username": username}
+def auth_setup(payload: LoginIn, request: Request, response: Response) -> dict:
+    _rate_or_429(request, "setup")
+    with _setup_lock:
+        if config.admin_configured():
+            raise HTTPException(status_code=409, detail="Учётная запись администратора уже создана")
+        _assert_setup_allowed(request, payload.setup_token)
+        username = payload.username.strip()
+        password = payload.password
+        if len(username) < 3:
+            raise HTTPException(status_code=400, detail="Логин должен быть не короче 3 символов")
+        if len(password) < 8:
+            raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
+        config.set_admin_credentials(username, auth.hash_password(password))
+        token = auth.create_session(username)
+    response.set_cookie(auth.COOKIE_NAME, token, **_cookie_kw(request))
+    return {"configured": True, "authenticated": True, "username": username, "setup_token_required": False}
 
 
 @app.post("/api/auth/login")
-def auth_login(payload: LoginIn, response: Response) -> dict:
+def auth_login(payload: LoginIn, request: Request, response: Response) -> dict:
+    _rate_or_429(request, "admin")
     if not config.admin_configured():
         raise HTTPException(status_code=400, detail="Сначала создайте учётную запись администратора")
     username = payload.username.strip()
     if not auth.check_credentials(username, payload.password):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     token = auth.create_session(username)
-    response.set_cookie(
-        auth.COOKIE_NAME,
-        token,
-        httponly=True,
-        samesite="lax",
-        max_age=auth.SESSION_SECONDS,
-        path="/",
-    )
-    return {"configured": True, "authenticated": True, "username": username}
+    response.set_cookie(auth.COOKIE_NAME, token, **_cookie_kw(request))
+    return {"configured": True, "authenticated": True, "username": username, "setup_token_required": False}
 
 
 @app.post("/api/auth/logout")
@@ -206,20 +238,16 @@ def user_session(mom_user: str | None = Cookie(default=None)) -> dict:
 
 
 @app.post("/api/session/login")
-def user_login(payload: UserLoginIn, response: Response) -> dict:
+def user_login(payload: UserLoginIn, request: Request, response: Response) -> dict:
+    _rate_or_429(request, "user")
     email = _normalize_email(payload.email)
     record = store.get_user_auth(email)
-    if not record or not auth.verify_password(payload.password, record["password_hash"]):
+    stored = record["password_hash"] if record else auth.dummy_hash()
+    ok = auth.verify_password(payload.password, stored)
+    if not record or not ok:
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
     token = auth.create_user_session(record["id"], record["email"])
-    response.set_cookie(
-        auth.USER_COOKIE,
-        token,
-        httponly=True,
-        samesite="lax",
-        max_age=auth.SESSION_SECONDS,
-        path="/",
-    )
+    response.set_cookie(auth.USER_COOKIE, token, **_cookie_kw(request))
     user = store.get_user(record["id"])
     return {
         "authenticated": True,

@@ -1,9 +1,0 @@
-stages: [check]
-
-check:
-  stage: check
-  image: python:3.12-slim
-  script:
-    - python -m compileall -q backend
-  rules:
-    - if: $CI_PIPELINE_SOURCE

@@ -73,6 +73,7 @@ export type AuthStatus = {
   configured: boolean;
   authenticated: boolean;
   username?: string | null;
+  setup_token_required?: boolean;
 };
 
 export type UserSession = {

@@ -25,8 +25,6 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-python -m pip install -q -r requirements.txt
-
 if [[ ! -f backend/static/index.html ]]; then
   if ! command -v npm >/dev/null 2>&1; then
     echo "Интерфейс не собран и нет Node.js. Выполните ./install.sh" >&2
@@ -77,5 +75,6 @@ fi
 echo "MoM: http://${HOST}:${PORT}"
 if [[ "$HOST" == "0.0.0.0" ]]; then
   echo "С другой машины откройте http://<IP-этой-ВМ>:${PORT}"
+  echo "Первый вход администратора требует SETUP_TOKEN из .env"
 fi
-exec python -m uvicorn backend.main:app --host "$HOST" --port "$PORT"
+exec python -m backend

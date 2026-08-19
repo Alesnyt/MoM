@@ -7,7 +7,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from .config import DB_PATH, ensure_dirs
+import stat
+import time
+
+from .config import DB_PATH, ensure_dirs, restrict_path
 
 STATUSES = (
     "queued",
@@ -37,6 +40,7 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.commit()
     finally:
         conn.close()
+    restrict_path(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def init_db() -> None:
@@ -76,6 +80,19 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                username TEXT,
+                user_id TEXT,
+                email TEXT,
+                expires REAL NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires)")
 
 
 
@@ -164,18 +181,40 @@ def list_meetings(user_id: str | None = None) -> list[dict[str, Any]]:
     return [_serialize(row) for row in rows]
 
 
+ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
+
+
 def prune_user_meetings(user_id: str) -> list[str]:
     user = get_user(user_id)
     if not user:
         return []
     limit = max(1, int(user["archive_limit"]))
     meetings = list_meetings(user_id)
-    extra = meetings[limit:]
+    over = len(meetings) - limit
     removed: list[str] = []
-    for item in extra:
+    for item in reversed(meetings):
+        if over <= 0:
+            break
+        if item.get("status") in ACTIVE_STATUSES:
+            continue
         if delete_meeting(item["id"]):
             removed.append(item["id"])
+            over -= 1
     return removed
+
+
+def fail_interrupted_meetings() -> int:
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE meetings
+            SET status = 'error',
+                status_message = 'Обработка прервана перезапуском сервера',
+                error = 'Повторите обработку'
+            WHERE status IN ('queued', 'extracting', 'transcribing', 'analyzing')
+            """
+        )
+        return cursor.rowcount
 
 
 def delete_meeting(meeting_id: str) -> bool:
@@ -277,3 +316,45 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
     with connect() as conn:
         conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", values)
     return get_user(user_id)
+
+
+def put_session(
+    token: str,
+    kind: str,
+    *,
+    expires: float,
+    username: str | None = None,
+    user_id: str | None = None,
+    email: str | None = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO sessions (token, kind, username, user_id, email, expires)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (token, kind, username, user_id, email, expires),
+        )
+
+
+def get_session_row(token: str) -> dict[str, Any] | None:
+    now = time.time()
+    with connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE expires < ?", (now,))
+        row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
+    if not row:
+        return None
+    if float(row["expires"]) < now:
+        drop_session_token(token)
+        return None
+    return dict(row)
+
+
+def drop_session_token(token: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def drop_sessions_for_user(user_id: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))

@@ -407,9 +407,11 @@ function AdminSection({
 }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const configured = Boolean(auth?.configured);
+  const needSetupToken = !configured && Boolean(auth?.setup_token_required);
 
   async function submit() {
     setError(null);
@@ -417,7 +419,7 @@ function AdminSection({
     try {
       const next = configured
         ? await loginAdmin(username.trim(), password)
-        : await setupAdmin(username.trim(), password);
+        : await setupAdmin(username.trim(), password, setupToken.trim());
       onAuth(next);
       setPassword("");
       const settings = await getSettings();
@@ -437,7 +439,7 @@ function AdminSection({
         <p className="lead">
           {configured
             ? "Раздел закрыт логином и паролем администратора."
-            : "Создайте логин и пароль администратора. Это нужно сделать один раз."}
+            : "Создайте логин и пароль администратора. Если установка была через install.sh, введите SETUP_TOKEN из вывода скрипта или файла .env."}
         </p>
         <form
           className="key-box"
@@ -463,11 +465,27 @@ function AdminSection({
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
+          {needSetupToken && (
+            <input
+              className="title-input"
+              style={{ marginTop: 10 }}
+              type="password"
+              autoComplete="off"
+              placeholder="SETUP_TOKEN из .env"
+              value={setupToken}
+              onChange={(event) => setSetupToken(event.target.value)}
+            />
+          )}
           <div className="composer-row">
             <button
               className="primary"
               type="submit"
-              disabled={busy || username.trim().length < 3 || password.length < (configured ? 1 : 8)}
+              disabled={
+                busy ||
+                username.trim().length < 3 ||
+                password.length < (configured ? 1 : 8) ||
+                (needSetupToken && setupToken.trim().length < 8)
+              }
             >
               {busy ? "Проверяю…" : configured ? "Войти" : "Создать и войти"}
             </button>

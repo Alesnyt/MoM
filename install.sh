@@ -86,7 +86,13 @@ install_node_linux() {
     return
   fi
   if have apt-get; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | as_root bash -
+    as_root apt-get install -y ca-certificates curl gnupg
+    as_root mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | as_root gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+      | as_root tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+    as_root apt-get update -y
     as_root apt-get install -y nodejs
   elif have dnf; then
     as_root dnf install -y nodejs npm
@@ -166,6 +172,30 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
 fi
 
+SETUP_TOKEN_VALUE="$(python - <<'PY'
+from pathlib import Path
+import re
+import secrets
+
+path = Path(".env")
+text = path.read_text() if path.exists() else ""
+match = re.search(r"^SETUP_TOKEN=(.*)$", text, re.M)
+current = (match.group(1).strip() if match else "")
+if current:
+    print(current)
+else:
+    token = secrets.token_urlsafe(18)
+    line = f"SETUP_TOKEN={token}"
+    if match:
+        text = re.sub(r"^SETUP_TOKEN=.*$", line, text, count=1, flags=re.M)
+    else:
+        text = text.rstrip() + "\n" + line + "\n"
+    path.write_text(text)
+    print(token)
+PY
+)"
+chmod 600 .env 2>/dev/null || true
+
 log "Собираю интерфейс"
 (cd frontend && npm ci && npm run build)
 
@@ -206,7 +236,10 @@ deactivate || true
 
 echo
 echo "Готово. Дальше:"
-echo "  1. При необходимости отредактируйте .env (HOST, PORT, ключ API)."
-echo "  2. Запуск: ./start.sh"
-echo "  3. Откройте http://<IP-виртуальной-машины>:8000"
-echo "  Первый вход — создайте администратора, затем пользователей."
+echo "  1. Токен первого входа администратора (SETUP_TOKEN):"
+echo "     ${SETUP_TOKEN_VALUE}"
+echo "     Сохраните его: без него с другой машины админа не создать."
+echo "  2. При необходимости отредактируйте .env (HOST, PORT, ключ API)."
+echo "  3. Запуск: ./start.sh"
+echo "  4. Откройте http://<IP-виртуальной-машины>:8000"
+echo "  Не публикуйте порт 8000 в интернет без TLS-прокси."

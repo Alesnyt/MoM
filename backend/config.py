@@ -2,6 +2,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 import os
+import stat
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -18,6 +19,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "").strip()
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "").strip()
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
+SETUP_TOKEN = os.getenv("SETUP_TOKEN", "").strip()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -36,6 +38,8 @@ MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 512) * 1024 * 
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
 FFMPEG_TIMEOUT_SECONDS = max(60, _int_env("FFMPEG_TIMEOUT_SECONDS", 1800))
 WHISPER_DIR = DATA_DIR / "whisper"
+LOGIN_WINDOW_SECONDS = max(15, _int_env("LOGIN_WINDOW_SECONDS", 60))
+LOGIN_MAX_ATTEMPTS = max(3, _int_env("LOGIN_MAX_ATTEMPTS", 8))
 
 MAX_WHISPER_BYTES = 24 * 1024 * 1024
 CHUNK_SECONDS = 12 * 60
@@ -61,9 +65,19 @@ QWEN_ASR_MODELS = TOKEN_PLAN_ASR_MODELS + PAYG_ASR_MODELS
 TOKEN_PLAN_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 
 
+def restrict_path(path: Path, mode: int) -> None:
+    try:
+        if path.exists():
+            os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def ensure_dirs() -> None:
-    for path in (DATA_DIR, UPLOAD_DIR, AUDIO_DIR, WHISPER_DIR):
+    for path in (DATA_DIR, UPLOAD_DIR, AUDIO_DIR, WHISPER_DIR, DATA_DIR / "hf"):
         path.mkdir(parents=True, exist_ok=True)
+        restrict_path(path, stat.S_IRWXU)
+    restrict_path(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
     os.environ.setdefault("HF_HOME", str(DATA_DIR / "hf"))
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
@@ -196,6 +210,7 @@ def _upsert_env(values: dict[str, str]) -> None:
         if key not in seen:
             next_lines.append(f"{key}={value}")
     ENV_PATH.write_text("\n".join(next_lines).rstrip() + "\n")
+    restrict_path(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def set_runtime(key: str, base_url: str = "", chat_model: str = "", asr_model: str = "") -> None:
@@ -260,6 +275,10 @@ def clear_openai_api_key() -> None:
 
 def admin_configured() -> bool:
     return bool(ADMIN_USER and ADMIN_PASSWORD_HASH)
+
+
+def get_setup_token() -> str:
+    return SETUP_TOKEN
 
 
 def get_admin_user() -> str:

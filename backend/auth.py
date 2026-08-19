@@ -6,13 +6,13 @@ import secrets
 import time
 from typing import Any
 
-from . import config
+from . import config, store
 
 COOKIE_NAME = "mom_admin"
 USER_COOKIE = "mom_user"
 SESSION_SECONDS = 12 * 60 * 60
-_sessions: dict[str, dict[str, Any]] = {}
-_user_sessions: dict[str, dict[str, Any]] = {}
+_DUMMY_HASH: str | None = None
+_hits: dict[str, list[float]] = {}
 
 
 def hash_password(password: str) -> str:
@@ -24,6 +24,13 @@ def hash_password(password: str) -> str:
         200_000,
     ).hex()
     return f"{salt}${digest}"
+
+
+def dummy_hash() -> str:
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password("timing-oracle-placeholder")
+    return _DUMMY_HASH
 
 
 def verify_password(password: str, stored: str) -> bool:
@@ -42,6 +49,28 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(check, digest)
 
 
+def tokens_match(got: str, expected: str) -> bool:
+    left = got.strip().encode("utf-8")
+    right = expected.encode("utf-8")
+    if len(left) != len(right):
+        hmac.compare_digest(right, right)
+        return False
+    return hmac.compare_digest(left, right)
+
+
+def rate_allow(key: str) -> bool:
+    now = time.time()
+    window = float(config.LOGIN_WINDOW_SECONDS)
+    limit = int(config.LOGIN_MAX_ATTEMPTS)
+    recent = [stamp for stamp in _hits.get(key, []) if now - stamp < window]
+    if len(recent) >= limit:
+        _hits[key] = recent
+        return False
+    recent.append(now)
+    _hits[key] = recent
+    return True
+
+
 def check_credentials(username: str, password: str) -> bool:
     expected_user = config.get_admin_user()
     expected_hash = config.get_admin_password_hash()
@@ -55,28 +84,27 @@ def check_credentials(username: str, password: str) -> bool:
 
 def create_session(username: str) -> str:
     token = secrets.token_urlsafe(32)
-    _sessions[token] = {
-        "username": username,
-        "expires": time.time() + SESSION_SECONDS,
-    }
+    store.put_session(
+        token,
+        "admin",
+        username=username,
+        expires=time.time() + SESSION_SECONDS,
+    )
     return token
 
 
 def get_session(token: str | None) -> dict[str, Any] | None:
     if not token:
         return None
-    session = _sessions.get(token)
-    if not session:
+    row = store.get_session_row(token)
+    if not row or row.get("kind") != "admin":
         return None
-    if session["expires"] < time.time():
-        _sessions.pop(token, None)
-        return None
-    return session
+    return {"username": row.get("username")}
 
 
 def drop_session(token: str | None) -> None:
     if token:
-        _sessions.pop(token, None)
+        store.drop_session_token(token)
 
 
 def status(token: str | None) -> dict[str, Any]:
@@ -85,6 +113,7 @@ def status(token: str | None) -> dict[str, Any]:
         "configured": config.admin_configured(),
         "authenticated": bool(session),
         "username": (session or {}).get("username"),
+        "setup_token_required": (not config.admin_configured()) and bool(config.get_setup_token()),
     }
 
 
@@ -95,32 +124,29 @@ def generate_password(length: int = 12) -> str:
 
 def create_user_session(user_id: str, email: str) -> str:
     token = secrets.token_urlsafe(32)
-    _user_sessions[token] = {
-        "user_id": user_id,
-        "email": email,
-        "expires": time.time() + SESSION_SECONDS,
-    }
+    store.put_session(
+        token,
+        "user",
+        user_id=user_id,
+        email=email,
+        expires=time.time() + SESSION_SECONDS,
+    )
     return token
 
 
 def get_user_session(token: str | None) -> dict[str, Any] | None:
     if not token:
         return None
-    session = _user_sessions.get(token)
-    if not session:
+    row = store.get_session_row(token)
+    if not row or row.get("kind") != "user":
         return None
-    if session["expires"] < time.time():
-        _user_sessions.pop(token, None)
-        return None
-    return session
+    return {"user_id": row.get("user_id"), "email": row.get("email")}
 
 
 def drop_user_session(token: str | None) -> None:
     if token:
-        _user_sessions.pop(token, None)
+        store.drop_session_token(token)
 
 
 def drop_user_sessions_for(user_id: str) -> None:
-    for token, session in list(_user_sessions.items()):
-        if session.get("user_id") == user_id:
-            _user_sessions.pop(token, None)
+    store.drop_sessions_for_user(user_id)
