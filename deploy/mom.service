@@ -1,0 +1,20 @@
+[Unit]
+Description=MoM meeting minutes service
+After=network.target
+
+[Service]
+Type=simple
+User=REPLACE_USER
+Group=REPLACE_GROUP
+WorkingDirectory=REPLACE_ROOT
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+EnvironmentFile=-REPLACE_ROOT/.env
+ExecStart=REPLACE_ROOT/.venv/bin/python -m uvicorn backend.main:app --host ${HOST} --port ${PORT}
+Restart=on-failure
+RestartSec=5
+# Whisper and ffmpeg can use a lot of RAM/CPU on a small VM.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
