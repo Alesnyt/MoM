@@ -63,7 +63,7 @@ install_apt() {
     build-essential pkg-config \
     ffmpeg \
     curl ca-certificates \
-    libgomp1
+    libgomp1 libsndfile1
   install_node_linux
 }
 
@@ -73,7 +73,7 @@ install_dnf() {
     gcc gcc-c++ make pkgconf \
     ffmpeg \
     curl ca-certificates \
-    libgomp
+    libgomp libsndfile
   install_node_linux
 }
 
@@ -108,6 +108,7 @@ install_pacman() {
     ffmpeg \
     curl ca-certificates \
     gcc-libs \
+    libsndfile \
     nodejs npm
 }
 
@@ -165,6 +166,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 python -m pip install -U pip wheel
+log "Ставлю Python-зависимости, включая Whisper и GigaAM (PyTorch)"
 python -m pip install -r requirements.txt
 
 if [[ ! -f .env ]]; then

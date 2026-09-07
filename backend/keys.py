@@ -70,7 +70,7 @@ def snapshot() -> dict[str, Any]:
         "provider_label": label,
         "base_url": config.get_base_url() or None,
         "chat_model": config.get_chat_model(),
-        "asr_model": config.get_asr_model(),
+        "asr_model": config.canonical_asr_model(),
     }
 
 

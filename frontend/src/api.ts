@@ -137,6 +137,17 @@ export async function saveApiKey(key: string): Promise<Health> {
   return response.json();
 }
 
+export async function saveTheme(theme: "classic" | "t2"): Promise<Health> {
+  const response = await fetch("/api/settings/theme", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function saveModels(chatModel: string, asrModel: string): Promise<Health> {
   const response = await fetch("/api/settings/models", {
     method: "POST",
@@ -192,19 +203,31 @@ export async function retryMeeting(id: string): Promise<Meeting> {
   return response.json();
 }
 
-export function openMeetingEmail(meeting: Meeting): void {
+export async function openMeetingEmail(meeting: Meeting): Promise<string> {
   if (!meeting.result) throw new Error("Протокол ещё не готов");
   const subject = `MoM: ${meeting.result.title || meeting.title}`;
   const body = buildEmailBody(meeting);
+  const draft = `${subject}\n\n${body}`;
+  try {
+    await navigator.clipboard.writeText(draft);
+  } catch {
+    /* браузер может запретить буфер вне HTTPS */
+  }
   const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   if (mailto.length <= 1800) {
     window.location.assign(mailto);
-    return;
+    return "opened-mailto";
   }
-  downloadDraftEml(subject, body, meeting.result.title || meeting.title);
+  const response = await fetch(`/api/meetings/${meeting.id}/email`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  const payload = (await response.json()) as { mode?: string };
+  return payload.mode || "saved";
 }
 
-function buildEmailBody(meeting: Meeting): string {
+export function buildEmailBody(meeting: Meeting): string {
   const result = meeting.result;
   if (!result) return "";
   const lines: string[] = [];
@@ -244,39 +267,6 @@ function buildEmailBody(meeting: Meeting): string {
     lines.push(`Следующая встреча: ${next}`);
   }
   return lines.join("\n").trim() + "\n";
-}
-
-function downloadDraftEml(subject: string, body: string, title: string): void {
-  const encodedSubject = rfc2047(subject);
-  const eml = [
-    `Subject: ${encodedSubject}`,
-    "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=UTF-8",
-    "Content-Transfer-Encoding: 8bit",
-    "X-Unsent: 1",
-    "",
-    body.replace(/\n/g, "\r\n"),
-    "",
-  ].join("\r\n");
-  const blob = new Blob([eml], { type: "message/rfc822" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${slug(title)}.eml`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function rfc2047(value: string): string {
-  if (/^[\x20-\x7e]*$/.test(value)) return value;
-  const bytes = new TextEncoder().encode(value);
-  let binary = "";
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte);
-  });
-  return `=?UTF-8?B?${btoa(binary)}?=`;
 }
 
 export async function downloadMarkdown(id: string, title: string): Promise<void> {

@@ -20,6 +20,8 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "").strip()
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
 SETUP_TOKEN = os.getenv("SETUP_TOKEN", "").strip()
+UI_THEME = os.getenv("UI_THEME", "classic").strip().lower()
+UI_THEMES = ("classic", "t2")
 
 
 def _int_env(name: str, default: int) -> int:
@@ -61,6 +63,11 @@ PAYG_ASR_MODELS = (
 )
 TOKEN_PLAN_ASR_MODELS = ("qwen-audio-3.0-asr-flash",)
 LOCAL_ASR_MODEL = "local-whisper"
+WHISPER_SIZES = ("tiny", "base", "small", "medium", "large-v2", "large-v3")
+GIGAAM_MODEL = "gigaam-multilingual"
+GIGAAM_LARGE_MODEL = "gigaam-multilingual-large"
+GIGAAM_REPO = "ai-sage/GigaAM-Multilingual"
+GIGAAM_CHUNK_SECONDS = 24
 QWEN_ASR_MODELS = TOKEN_PLAN_ASR_MODELS + PAYG_ASR_MODELS
 TOKEN_PLAN_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 
@@ -74,7 +81,7 @@ def restrict_path(path: Path, mode: int) -> None:
 
 
 def ensure_dirs() -> None:
-    for path in (DATA_DIR, UPLOAD_DIR, AUDIO_DIR, WHISPER_DIR, DATA_DIR / "hf"):
+    for path in (DATA_DIR, UPLOAD_DIR, AUDIO_DIR, WHISPER_DIR, DATA_DIR / "hf", DATA_DIR / "exports"):
         path.mkdir(parents=True, exist_ok=True)
         restrict_path(path, stat.S_IRWXU)
     restrict_path(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
@@ -134,22 +141,62 @@ def asr_model_candidates(preferred: str | None = None) -> list[str]:
     return [item for item in dict.fromkeys([first, *extras]) if item and not is_local_asr(item)]
 
 
-def is_local_asr(model: str | None = None) -> bool:
-    name = (model if model is not None else get_asr_model()).strip().lower()
+def _asr_name(model: str | None = None) -> str:
+    return (model if model is not None else get_asr_model()).strip().lower()
+
+
+def is_gigaam_asr(model: str | None = None) -> bool:
+    name = _asr_name(model)
+    return name.startswith("gigaam") or name in {"sber", "sber-gigaam"}
+
+
+def is_whisper_asr(model: str | None = None) -> bool:
+    name = _asr_name(model)
+    if is_gigaam_asr(name):
+        return False
     return name in {"local", LOCAL_ASR_MODEL, "faster-whisper"} or name.startswith("local-")
 
 
-def local_whisper_size() -> str:
-    allowed = {"tiny", "base", "small", "medium", "large-v2", "large-v3"}
+def is_local_asr(model: str | None = None) -> bool:
+    return is_whisper_asr(model) or is_gigaam_asr(model)
+
+
+def local_whisper_size(model: str | None = None) -> str:
+    current = _asr_name(model)
+    size = ""
+    if current.startswith("local-whisper-"):
+        size = current[len("local-whisper-") :]
+    elif current.startswith("local-") and current not in {LOCAL_ASR_MODEL, "local", "faster-whisper"}:
+        rest = current.split("-", 1)[1]
+        size = rest[len("whisper-") :] if rest.startswith("whisper-") else rest
+    if size in WHISPER_SIZES:
+        return size
     raw = os.getenv("LOCAL_WHISPER_SIZE", "").strip().lower()
-    if raw in allowed:
+    if raw in WHISPER_SIZES:
         return raw
-    current = get_asr_model().strip().lower()
-    if current.startswith("local-") and current != LOCAL_ASR_MODEL:
-        size = current.split("-", 1)[1]
-        if size in allowed:
-            return size
     return "small"
+
+
+def gigaam_revision(model: str | None = None) -> str:
+    return "large_ctc" if "large" in _asr_name(model) else "ctc"
+
+
+def asr_engine_label(model: str | None = None) -> str:
+    if is_gigaam_asr(model):
+        return "GigaAM Multilingual 600M" if gigaam_revision(model) == "large_ctc" else "GigaAM Multilingual 220M"
+    if is_whisper_asr(model):
+        return f"Whisper {local_whisper_size(model)}"
+    name = (model if model is not None else get_asr_model()).strip()
+    return name or "ASR"
+
+
+def canonical_asr_model(model: str | None = None) -> str:
+    if is_gigaam_asr(model):
+        return GIGAAM_LARGE_MODEL if gigaam_revision(model) == "large_ctc" else GIGAAM_MODEL
+    if is_whisper_asr(model):
+        size = local_whisper_size(model)
+        return LOCAL_ASR_MODEL if size == "small" else f"local-whisper-{size}"
+    return (model if model is not None else get_asr_model()).strip()
 
 
 def is_payg_asr(model: str) -> bool:
@@ -239,8 +286,9 @@ def set_openai_api_key(key: str) -> None:
         if not (OPENAI_MODEL or "").startswith("qwen"):
             payload["OPENAI_MODEL"] = "qwen3.7-plus" if key.startswith("sk-sp-") else "qwen-plus"
         if key.startswith("sk-sp-"):
-            payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
-        elif not (WHISPER_MODEL or "").startswith("qwen"):
+            if not is_local_asr(WHISPER_MODEL):
+                payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
+        elif not (WHISPER_MODEL or "").startswith("qwen") and not is_local_asr(WHISPER_MODEL):
             payload["WHISPER_MODEL"] = QWEN_ASR_MODEL
     set_runtime(
         key,
@@ -259,14 +307,17 @@ def apply_connection(base_url: str, chat_model: str, asr_model: str) -> None:
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_MODEL"] = chat_model
     os.environ["WHISPER_MODEL"] = asr_model
-    _upsert_env(
-        {
-            "OPENAI_API_KEY": OPENAI_API_KEY,
-            "OPENAI_BASE_URL": base_url,
-            "OPENAI_MODEL": chat_model,
-            "WHISPER_MODEL": asr_model,
-        }
-    )
+    payload = {
+        "OPENAI_API_KEY": OPENAI_API_KEY,
+        "OPENAI_BASE_URL": base_url,
+        "OPENAI_MODEL": chat_model,
+        "WHISPER_MODEL": asr_model,
+    }
+    if is_whisper_asr(asr_model):
+        size = local_whisper_size(asr_model)
+        os.environ["LOCAL_WHISPER_SIZE"] = size
+        payload["LOCAL_WHISPER_SIZE"] = size
+    _upsert_env(payload)
 
 
 def clear_openai_api_key() -> None:
@@ -296,3 +347,19 @@ def set_admin_credentials(username: str, password_hash: str) -> None:
     os.environ["ADMIN_USER"] = ADMIN_USER
     os.environ["ADMIN_PASSWORD_HASH"] = ADMIN_PASSWORD_HASH
     _upsert_env({"ADMIN_USER": ADMIN_USER, "ADMIN_PASSWORD_HASH": ADMIN_PASSWORD_HASH})
+
+
+def get_ui_theme() -> str:
+    name = (UI_THEME or "classic").strip().lower()
+    return name if name in UI_THEMES else "classic"
+
+
+def set_ui_theme(theme: str) -> str:
+    global UI_THEME
+    name = (theme or "classic").strip().lower()
+    if name not in UI_THEMES:
+        raise ValueError("Неизвестная тема")
+    UI_THEME = name
+    os.environ["UI_THEME"] = name
+    _upsert_env({"UI_THEME": name})
+    return name

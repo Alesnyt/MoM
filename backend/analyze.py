@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -148,9 +149,13 @@ async def transcribe_file(
     duration: float | None = None,
     on_progress: Any = None,
 ) -> dict[str, Any]:
-    if config.is_local_asr(model):
+    if config.is_gigaam_asr(model):
+        from .gigaam_asr import transcribe_gigaam_sync
+
+        return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
+
+    if config.is_whisper_asr(model) or config.is_local_asr(model):
         from .local_asr import transcribe_local_sync
-        import asyncio
 
         return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
 
@@ -213,7 +218,6 @@ async def transcribe_qwen(
             raise
     if config.is_token_plan():
         from .local_asr import transcribe_local_sync
-        import asyncio
 
         return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
     raise last_error or RuntimeError("Не удалось расшифровать аудио ни одной ASR-моделью Qwen")

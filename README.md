@@ -1,6 +1,6 @@
 # MoM — протоколы встреч из записей
 
-Self-hosted приложение: загружаете запись созвона (**webm**, также mp4/mp3/wav/m4a/ogg), локальный Whisper расшифровывает речь на CPU, Qwen или OpenAI собирает саммари, поручения и протокол (Minutes of Meeting).
+Self-hosted приложение: загружаете запись созвона (**webm**, также mp4/mp3/wav/m4a/ogg), локальный Whisper или Сбер GigaAM Multilingual расшифровывает речь, Qwen или OpenAI собирает саммари, поручения и протокол (Minutes of Meeting).
 
 Данные остаются на машине (SQLite в `data/`). Есть администратор, пользователи и архив встреч. Один процесс FastAPI раздаёт API и интерфейс.
 
@@ -13,7 +13,7 @@ Self-hosted приложение: загружаете запись созвон
 | ОС | Ubuntu 22.04/24.04 (Debian 12), x86_64 | то же, 4 vCPU |
 | CPU | 2 ядра | 4 ядра |
 | RAM | 4 ГБ | 8 ГБ |
-| Свободное место | 5 ГБ | 15 ГБ и больше под записи |
+| Свободное место | 8 ГБ | 20 ГБ и больше под записи и модели |
 | Сеть | исходящий HTTPS при установке и для Qwen/OpenAI | без входящего 8000 из интернета |
 | GPU | не нужен | — |
 
@@ -25,7 +25,7 @@ Self-hosted приложение: загружаете запись созвон
 
 ## Установка на Linux (виртуальная машина)
 
-Нужен исходящий доступ в интернет при установке (пакеты, npm, модель Whisper ~500 МБ).
+Нужен исходящий доступ в интернет при установке (пакеты, npm, PyTorch, модель Whisper ~500 МБ).
 
 ```bash
 sudo apt-get update
@@ -60,9 +60,10 @@ chmod +x install.sh start.sh update.sh
 | `PORT` | По умолчанию `8000` |
 | `SETUP_TOKEN` | Токен первого создания администратора (`install.sh` генерирует сам) |
 | `OPENAI_API_KEY` | Ключ Qwen (`sk-sp-…` / `sk-ws-…`) или OpenAI |
-| `WHISPER_MODEL` | `local-whisper` — локальная расшифровка |
-| `LOCAL_WHISPER_SIZE` | `tiny` / `base` / `small` (по умолчанию) / `medium` |
+| `WHISPER_MODEL` | `local-whisper` / `local-whisper-medium` или `gigaam-multilingual` / `gigaam-multilingual-large` |
+| `LOCAL_WHISPER_SIZE` | `tiny` / `base` / `small` (по умолчанию) / `medium` / `large-v2` / `large-v3` |
 | `MAX_UPLOAD_MB` | Лимит загрузки, по умолчанию 512 |
+| `UI_THEME` | Тема интерфейса: `classic` (по умолчанию) или `t2` |
 
 Ключ можно задать и в веб-интерфейсе администратора.
 
@@ -105,10 +106,16 @@ chmod +x update.sh
 ## Как это работает
 
 1. Из записи вырезается моно-аудио 16 kHz.
-2. faster-whisper расшифровывает речь на CPU.
+2. Локальный ASR расшифровывает речь: Whisper (faster-whisper на CPU) или Сбер GigaAM Multilingual (2026).
 3. LLM собирает саммари, решения, поручения и MoM.
 4. Результат можно скачать как Markdown или открыть как черновик письма.
 
 ## Данные
 
-Локально в `data/`: SQLite (пользователи, протоколы, сессии), загрузки, аудио, кэш Whisper. Каталог и `.env` в git не попадают и при `./update.sh` не удаляются.
+Локально в `data/`: SQLite (пользователи, протоколы, сессии), загрузки, аудио, кэш Whisper и Hugging Face (GigaAM). Каталог и `.env` в git не попадают и при `./update.sh` не удаляются.
+
+## Сбер GigaAM Multilingual
+
+По умолчанию стоит Whisper `small`. В админке можно выбрать **Whisper** (и размер) или **Сбер GigaAM Multilingual** 220M / 600M.
+
+PyTorch и остальные пакеты GigaAM ставятся автоматически при `./install.sh` и `./update.sh`. Сама модель качается с Hugging Face при первой расшифровке в `data/hf/`. Длинные записи режутся на фрагменты по 24 с. На 4 ГБ RAM берите Whisper `tiny`/`small`, не GigaAM 600M.

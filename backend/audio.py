@@ -76,6 +76,57 @@ def extract_audio(src: Path, dst: Path) -> float:
     return duration_seconds(dst)
 
 
+def extract_wav(src: Path, dst: Path) -> float:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(dst),
+        ]
+    )
+    if not dst.exists() or dst.stat().st_size == 0:
+        raise AudioError("Не удалось подготовить WAV для распознавания")
+    return duration_seconds(dst)
+
+
+def split_wav(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    pattern = dest_dir / "chunk_%03d.wav"
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-f",
+            "segment",
+            "-segment_time",
+            str(chunk_seconds),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(pattern),
+        ]
+    )
+    chunks = sorted(dest_dir.glob("chunk_*.wav"))
+    if not chunks:
+        raise AudioError("Не удалось разрезать аудио на фрагменты")
+    return chunks
+
+
 def split_audio(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     pattern = dest_dir / "chunk_%03d.mp3"

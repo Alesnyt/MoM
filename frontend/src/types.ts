@@ -66,6 +66,7 @@ export type Health = {
   ok: boolean;
   ffmpeg: boolean;
   ui?: boolean;
+  theme?: "classic" | "t2";
   openai: OpenAIStatus;
 };
 

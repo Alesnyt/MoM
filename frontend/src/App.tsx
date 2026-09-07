@@ -5,6 +5,7 @@ import {
   deleteApiKey,
   deleteMeeting,
   downloadMarkdown,
+  buildEmailBody,
   getAuthStatus,
   getHealth,
   getMeeting,
@@ -21,6 +22,7 @@ import {
   retryMeeting,
   saveApiKey,
   saveModels,
+  saveTheme,
   setupAdmin,
   updateUserLimit,
   verifyApiKey,
@@ -69,13 +71,14 @@ export default function App() {
         setHealth({
           ok: false,
           ffmpeg: false,
-          openai: {
+                      openai: {
             configured: false,
             connected: false,
             hint: null,
             message: "Нет связи с сервером",
             checked_at: null,
           },
+          theme: "classic",
         }),
       );
     getAuthStatus().then(setAuth).catch(() => setAuth({ configured: false, authenticated: false }));
@@ -86,6 +89,10 @@ export default function App() {
       })
       .catch(() => setUser({ authenticated: false }));
   }, [refresh]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = health?.theme === "t2" ? "t2" : "classic";
+  }, [health?.theme]);
 
   useEffect(() => {
     if (!composing && !selectedId && meetings.length > 0) {
@@ -712,6 +719,67 @@ function UsersPanel() {
   );
 }
 
+const WHISPER_SIZES = [
+  { id: "tiny", label: "tiny — быстрее, хуже качество" },
+  { id: "base", label: "base" },
+  { id: "small", label: "small — по умолчанию" },
+  { id: "medium", label: "medium — точнее, больше RAM" },
+  { id: "large-v2", label: "large-v2" },
+  { id: "large-v3", label: "large-v3 — максимум качества" },
+] as const;
+
+type AsrEngine = "whisper" | "gigaam" | "cloud";
+
+type AsrChoice = {
+  engine: AsrEngine;
+  whisperSize: string;
+  gigaamVariant: "ctc" | "large";
+  cloudModel: string;
+};
+
+function parseAsrModel(model: string): AsrChoice {
+  const name = (model || "").trim().toLowerCase();
+  if (name.startsWith("gigaam") || name === "sber" || name.startsWith("sber-")) {
+    return {
+      engine: "gigaam",
+      whisperSize: "small",
+      gigaamVariant: name.includes("large") ? "large" : "ctc",
+      cloudModel: "",
+    };
+  }
+  if (!name || name.startsWith("local") || name === "faster-whisper") {
+    let size = "small";
+    const tagged = name.match(/local-whisper-(.+)$/);
+    const short = name.match(/^local-(tiny|base|small|medium|large-v2|large-v3)$/);
+    if (tagged) size = tagged[1];
+    else if (short) size = short[1];
+    return { engine: "whisper", whisperSize: size, gigaamVariant: "ctc", cloudModel: "" };
+  }
+  return { engine: "cloud", whisperSize: "small", gigaamVariant: "ctc", cloudModel: model };
+}
+
+function encodeAsrModel(choice: AsrChoice): string {
+  if (choice.engine === "gigaam") {
+    return choice.gigaamVariant === "large" ? "gigaam-multilingual-large" : "gigaam-multilingual";
+  }
+  if (choice.engine === "whisper") {
+    return choice.whisperSize === "small" ? "local-whisper" : `local-whisper-${choice.whisperSize}`;
+  }
+  return choice.cloudModel.trim();
+}
+
+function formatAsrLabel(model: string | null | undefined): string {
+  if (!model) return "";
+  const asr = parseAsrModel(model);
+  if (asr.engine === "gigaam") {
+    return asr.gigaamVariant === "large"
+      ? "Сбер GigaAM Multilingual 600M"
+      : "Сбер GigaAM Multilingual 220M";
+  }
+  if (asr.engine === "whisper") return `Whisper ${asr.whisperSize}`;
+  return model;
+}
+
 function SettingsPanel({
   health,
   username,
@@ -726,16 +794,17 @@ function SettingsPanel({
   const [apiKey, setApiKey] = useState("");
   const [chatModel, setChatModel] = useState(health?.openai.chat_model || "");
   const [asrModel, setAsrModel] = useState(health?.openai.asr_model || "");
-  const [busy, setBusy] = useState<"save" | "verify" | "delete" | "models" | null>(null);
+  const [busy, setBusy] = useState<"save" | "verify" | "delete" | "models" | "theme" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const openai = health?.openai;
+  const asr = parseAsrModel(asrModel);
 
   useEffect(() => {
     if (health?.openai.chat_model) setChatModel(health.openai.chat_model);
     if (health?.openai.asr_model) setAsrModel(health.openai.asr_model);
   }, [health]);
 
-  async function run(kind: "save" | "verify" | "delete" | "models", action: () => Promise<Health>) {
+  async function run(kind: "save" | "verify" | "delete" | "models" | "theme", action: () => Promise<Health>) {
     setError(null);
     setBusy(kind);
     try {
@@ -765,7 +834,7 @@ function SettingsPanel({
           {openai?.provider_label && <li>Провайдер: {openai.provider_label}</li>}
           {openai?.hint && <li>Ключ: {openai.hint}</li>}
           {openai?.chat_model && <li>Чат: {openai.chat_model}</li>}
-          {openai?.asr_model && <li>Расшифровка: {openai.asr_model}</li>}
+          {openai?.asr_model && <li>Расшифровка: {formatAsrLabel(openai.asr_model)}</li>}
           {openai?.base_url && <li>Host: {openai.base_url}</li>}
           {openai?.checked_at && <li>Проверено: {formatDate(openai.checked_at)}</li>}
           <li>ffmpeg: {health?.ffmpeg ? "найден" : "не найден"}</li>
@@ -802,26 +871,147 @@ function SettingsPanel({
           void run("models", () => saveModels(chatModel.trim(), asrModel.trim()));
         }}
       >
-        <p>Модели. Token Plan Individual не включает ASR — для расшифровки укажите local-whisper.</p>
-        <input
-          className="title-input"
-          placeholder="Чат, например qwen3.7-plus"
-          value={chatModel}
-          onChange={(event) => setChatModel(event.target.value)}
-        />
-        <input
-          className="title-input"
-          style={{ marginTop: 10 }}
-          placeholder="Расшифровка: local-whisper"
-          value={asrModel}
-          onChange={(event) => setAsrModel(event.target.value)}
-        />
+        <p>
+          Расшифровка локальная: Whisper или Сбер GigaAM Multilingual (2026). Token Plan Individual не
+          включает облачный ASR.
+        </p>
+        <div className="field-stack">
+          <label className="field-label">
+            Чат
+            <input
+              className="title-input"
+              placeholder="Чат, например qwen3.7-plus"
+              value={chatModel}
+              onChange={(event) => setChatModel(event.target.value)}
+            />
+          </label>
+          <label className="field-label">
+            Движок расшифровки
+            <select
+              className="title-input"
+              value={asr.engine}
+              onChange={(event) => {
+                const engine = event.target.value as AsrEngine;
+                setAsrModel(
+                  encodeAsrModel({
+                    ...asr,
+                    engine,
+                    cloudModel: asr.cloudModel || "whisper-1",
+                  }),
+                );
+              }}
+            >
+              <option value="whisper">Whisper (локально)</option>
+              <option value="gigaam">Сбер GigaAM Multilingual</option>
+              <option value="cloud">Облако (Qwen / OpenAI)</option>
+            </select>
+          </label>
+          {asr.engine === "whisper" && (
+            <label className="field-label">
+              Модель Whisper
+              <select
+                className="title-input"
+                value={asr.whisperSize}
+                onChange={(event) => {
+                  setAsrModel(
+                    encodeAsrModel({
+                      ...asr,
+                      whisperSize: event.target.value,
+                    }),
+                  );
+                }}
+              >
+                {WHISPER_SIZES.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {asr.engine === "gigaam" && (
+            <label className="field-label">
+              Модель GigaAM
+              <select
+                className="title-input"
+                value={asr.gigaamVariant}
+                onChange={(event) => {
+                  setAsrModel(
+                    encodeAsrModel({
+                      ...asr,
+                      gigaamVariant: event.target.value === "large" ? "large" : "ctc",
+                    }),
+                  );
+                }}
+              >
+                <option value="ctc">220M CTC — быстрее, меньше RAM</option>
+                <option value="large">600M CTC — точнее, тяжелее</option>
+              </select>
+            </label>
+          )}
+          {asr.engine === "gigaam" && (
+            <p>
+              Пакеты ставятся с проектом (`install.sh` / `update.sh`). Модель скачается с Hugging Face
+              при первой расшифровке.
+            </p>
+          )}
+          {asr.engine === "cloud" && (
+            <input
+              className="title-input"
+              placeholder="qwen3-asr-flash или whisper-1"
+              value={asr.cloudModel}
+              onChange={(event) => {
+                setAsrModel(
+                  encodeAsrModel({
+                    ...asr,
+                    cloudModel: event.target.value,
+                  }),
+                );
+              }}
+            />
+          )}
+        </div>
         <div className="composer-row">
           <button className="primary" type="submit" disabled={busy !== null || !chatModel.trim() || !asrModel.trim()}>
             {busy === "models" ? "Сохраняю…" : "Сохранить модели"}
           </button>
         </div>
       </form>
+
+      <div className="key-box">
+        <p>Тема интерфейса по умолчанию для всех пользователей.</p>
+        <div className="theme-grid">
+          <button
+            type="button"
+            className={`theme-card ${ (health?.theme || "classic") === "classic" ? "active" : ""}`}
+            disabled={busy !== null}
+            onClick={() => void run("theme", () => saveTheme("classic"))}
+          >
+            <span className="theme-swatch" aria-hidden="true">
+              <i style={{ background: "#101218" }} />
+              <i style={{ background: "#c9843e" }} />
+              <i style={{ background: "#f1e6cf" }} />
+            </span>
+            <strong>Классическая</strong>
+            <small>Текущая тёмная тема — по умолчанию</small>
+          </button>
+          <button
+            type="button"
+            className={`theme-card ${health?.theme === "t2" ? "active" : ""}`}
+            disabled={busy !== null}
+            onClick={() => void run("theme", () => saveTheme("t2"))}
+          >
+            <span className="theme-swatch" aria-hidden="true">
+              <i style={{ background: "#000000" }} />
+              <i style={{ background: "#ff3495" }} />
+              <i style={{ background: "#ffffff" }} />
+            </span>
+            <strong>T2</strong>
+            <small>Чёрный, розовый #FF3495 и белый</small>
+          </button>
+        </div>
+        {busy === "theme" && <p>Сохраняю тему…</p>}
+      </div>
 
       <div className="pane-actions settings-actions">
         <button
@@ -886,6 +1076,37 @@ function MeetingPane({
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error";
   const result = meeting.result;
+  const [mailNote, setMailNote] = useState<string | null>(null);
+
+  async function sendByEmail() {
+    setMailNote(null);
+    const mode = await openMeetingEmail(meeting);
+    if (mode === "opened-outlook") {
+      setMailNote("Черновик открыт в Outlook. Текст письма также скопирован в буфер.");
+    } else if (mode === "opened-mail") {
+      setMailNote(
+        "Открыто в Почте Apple — Outlook на Mac блокирует скачанные .eml. Текст скопирован: Новое письмо → вставить.",
+      );
+    } else if (mode === "opened" || mode === "saved") {
+      setMailNote("Текст письма скопирован в буфер. Вставьте его в новое письмо Outlook.");
+    }
+  }
+
+  async function copyProtocol() {
+    setMailNote(null);
+    const text =
+      tab === "transcript" && meeting.transcript
+        ? meeting.transcript
+        : buildEmailBody(meeting);
+    try {
+      await navigator.clipboard.writeText(text);
+      setMailNote(
+        tab === "transcript" ? "Транскрипт скопирован в буфер обмена." : "Протокол скопирован в буфер обмена.",
+      );
+    } catch {
+      setMailNote("Не удалось скопировать. Разрешите сайту доступ к буферу обмена.");
+    }
+  }
 
   return (
     <section className="pane">
@@ -905,7 +1126,17 @@ function MeetingPane({
             <>
               <button
                 className="ghost"
-                onClick={() => openMeetingEmail(meeting)}
+                type="button"
+                title="Копирует саммари, решения и поручения. На вкладке «Транскрипт» копирует расшифровку."
+                onClick={() => void copyProtocol()}
+              >
+                Копировать
+              </button>
+              <button
+                className="ghost"
+                type="button"
+                title="Откроет почту. Длинный протокол не скачивается как .eml — Apple иначе блокирует файл."
+                onClick={() => void sendByEmail()}
               >
                 Отправить письмом
               </button>
@@ -927,6 +1158,8 @@ function MeetingPane({
           </button>
         </div>
       </header>
+
+      {mailNote && <div className="banner">{mailNote}</div>}
 
       {processing && <ProcessCard meeting={meeting} />}
       {meeting.status === "error" && (
@@ -979,6 +1212,17 @@ function TabButton({
   );
 }
 
+function transcribeHint(message: string | null | undefined): string {
+  const text = (message || "").toLowerCase();
+  if (text.includes("gigaam") || text.includes("сбер")) {
+    return "GigaAM идёт по записи. Длинные файлы режутся на фрагменты, процент растёт по ходу.";
+  }
+  if (text.includes("whisper")) {
+    return "Whisper идёт по записи, процент растёт вместе с таймкодом.";
+  }
+  return "Расшифровка идёт по записи, процент растёт по ходу.";
+}
+
 function ProcessCard({ meeting }: { meeting: Meeting }) {
   const current = STEPS.findIndex((step) => step.id === meeting.status);
   const index = meeting.status === "queued" ? -1 : current;
@@ -999,7 +1243,7 @@ function ProcessCard({ meeting }: { meeting: Meeting }) {
     meeting.status === "analyzing"
       ? "Qwen пишет протокол. Процент обновится, когда модель ответит — для длинной записи это несколько минут."
       : meeting.status === "transcribing"
-        ? "Whisper идёт по записи, процент растёт вместе с таймкодом."
+        ? transcribeHint(meeting.status_message)
         : "Обработка идёт.";
   return (
     <div className="process">

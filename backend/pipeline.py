@@ -24,14 +24,21 @@ class _Progress:
         self.meeting_id = meeting_id
         self.last_pct = -1
         self.last_t = 0.0
+        self.last_message = ""
 
     def set(self, percent: int, message: str, status: str | None = None, force: bool = False) -> None:
         percent = max(0, min(100, int(percent)))
         now = time.monotonic()
-        if not force and percent < self.last_pct + 1 and now - self.last_t < 0.7:
+        if (
+            not force
+            and percent < self.last_pct + 1
+            and now - self.last_t < 0.7
+            and message == self.last_message
+        ):
             return
         self.last_pct = percent
         self.last_t = now
+        self.last_message = message
         fields: dict[str, Any] = {"progress": percent, "status_message": message}
         if status:
             fields["status"] = status
@@ -118,7 +125,7 @@ async def process_meeting(meeting_id: str) -> None:
         progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
         duration = await extract_audio_async(src, audio_path)
         store.update_meeting(meeting_id, duration_seconds=duration)
-        progress.set(15, "Аудио готово, запускаю Whisper", status="transcribing", force=True)
+        progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
 
         payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
         transcript = format_transcript(payload)
@@ -162,18 +169,23 @@ async def process_meeting(meeting_id: str) -> None:
 async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float, progress: _Progress) -> dict:
     asr_model = config.get_asr_model()
 
-    def on_whisper(pct: int, message: str) -> None:
+    def on_asr(pct: int, message: str) -> None:
         overall = 16 + int(max(0, min(100, pct)) * 0.70)
         progress.set(overall, message, status="transcribing")
 
     if config.is_local_asr(asr_model):
-        progress.set(16, f"Расшифровываю локально (Whisper {config.local_whisper_size()})", status="transcribing", force=True)
+        progress.set(
+            16,
+            f"Расшифровываю локально ({config.asr_engine_label(asr_model)})",
+            status="transcribing",
+            force=True,
+        )
         return await transcribe_file(
             client,
             audio_path,
             asr_model,
             duration=duration,
-            on_progress=on_whisper,
+            on_progress=on_asr,
         )
 
     limit = 6 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
@@ -185,7 +197,7 @@ async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float
             audio_path,
             asr_model,
             duration=duration,
-            on_progress=on_whisper,
+            on_progress=on_asr,
         )
 
     chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"

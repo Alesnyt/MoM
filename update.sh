@@ -37,7 +37,7 @@ fi
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
-log "Обновляю Python-зависимости"
+log "Обновляю Python-зависимости, включая Whisper и GigaAM (PyTorch)"
 python -m pip install -r requirements.txt
 
 if [[ -f .env.example ]]; then

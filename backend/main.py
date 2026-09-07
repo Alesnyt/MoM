@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from . import auth, config, keys, store
 from .audio import ffmpeg_available
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
+from .mail import open_or_save_eml
 from .pipeline import format_duration, process_meeting
 
 ALLOWED_SUFFIXES = {".webm", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
@@ -33,6 +34,10 @@ class SettingsIn(BaseModel):
 class ModelsIn(BaseModel):
     chat_model: str | None = None
     asr_model: str | None = None
+
+
+class ThemeIn(BaseModel):
+    theme: str
 
 
 class LoginIn(BaseModel):
@@ -137,6 +142,7 @@ def _health(*, full: bool = False) -> dict:
         "ok": True,
         "ffmpeg": ffmpeg_available(),
         "ui": (STATIC_DIR / "index.html").exists(),
+        "theme": config.get_ui_theme(),
         "openai": keys.snapshot() if full else keys.public_snapshot(),
     }
 
@@ -322,8 +328,8 @@ async def save_settings(payload: SettingsIn, _admin: dict = Depends(require_admi
     if " " in key or len(key) < 20:
         raise HTTPException(status_code=400, detail="Похоже, это не API-ключ")
     config.set_openai_api_key(key)
-    openai_status = await keys.verify_key(key)
-    return {"ok": True, "ffmpeg": ffmpeg_available(), "openai": openai_status}
+    await keys.verify_key(key)
+    return _health(full=True)
 
 
 @app.post("/api/settings/models")
@@ -336,12 +342,21 @@ def save_models(payload: ModelsIn, _admin: dict = Depends(require_admin)) -> dic
     return _health(full=True)
 
 
+@app.post("/api/settings/theme")
+def save_theme(payload: ThemeIn, _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        config.set_ui_theme(payload.theme)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _health(full=True)
+
+
 @app.post("/api/settings/verify")
 async def verify_settings(_admin: dict = Depends(require_admin)) -> dict:
     if not config.get_api_key():
         raise HTTPException(status_code=400, detail="Сначала сохраните ключ")
-    openai_status = await keys.verify_key()
-    return {"ok": True, "ffmpeg": ffmpeg_available(), "openai": openai_status}
+    await keys.verify_key()
+    return _health(full=True)
 
 
 @app.delete("/api/settings")
@@ -464,6 +479,14 @@ def export_markdown(meeting_id: str, user: dict = Depends(require_user)) -> str:
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
     return to_markdown(meeting)
+
+
+@app.post("/api/meetings/{meeting_id}/email")
+def send_meeting_email(meeting_id: str, user: dict = Depends(require_user)) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    if meeting["status"] != "done" or not meeting.get("result"):
+        raise HTTPException(status_code=409, detail="Протокол ещё не готов")
+    return open_or_save_eml(meeting)
 
 
 def to_markdown(meeting: dict) -> str:

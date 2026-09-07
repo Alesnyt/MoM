@@ -7,12 +7,43 @@
   --muted: #8b9388;
   --accent: #c9843e;
   --accent-dim: #3a2c1c;
+  --accent-on: #1a1208;
   --ok: #7f9d6e;
   --danger: #c46b63;
   --paper: #f1e6cf;
   --ink: #1c1710;
   --ink-soft: #5a5246;
+  --card: #12161f;
+  --hover: #1a2030;
+  --stage-glow: #1c2433;
+  --banner-text: #f0cfcb;
+  --paper-rule: #d9cdb3;
+  --shine: rgba(241, 230, 207, 0.28);
   --shadow: 0 0 0 1px var(--line);
+  color-scheme: dark;
+}
+
+[data-theme="t2"] {
+  --bg: #000000;
+  --rail: #000000;
+  --stage: #000000;
+  --line: #2a2a2a;
+  --text: #ffffff;
+  --muted: #b3b3b3;
+  --accent: #ff3495;
+  --accent-dim: #3a0a1f;
+  --accent-on: #ffffff;
+  --ok: #ffffff;
+  --danger: #ff3495;
+  --paper: #ffffff;
+  --ink: #000000;
+  --ink-soft: #5c5c5c;
+  --card: #0d0d0d;
+  --hover: #161616;
+  --stage-glow: #ff34952e;
+  --banner-text: #ffffff;
+  --paper-rule: #000000;
+  --shine: rgba(255, 52, 149, 0.35);
   color-scheme: dark;
 }
 
@@ -141,7 +172,7 @@ button {
 
 .primary {
   background: var(--accent);
-  color: #1a1208;
+  color: var(--accent-on);
   border: 0;
   border-radius: 6px;
   padding: 11px 16px;
@@ -195,7 +226,7 @@ button {
 
 .meeting-list button.active,
 .meeting-list button:hover {
-  background: #1a2030;
+  background: var(--hover);
 }
 
 .meeting-copy {
@@ -306,7 +337,7 @@ button {
   padding: 18px 20px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #12161f;
+  background: var(--card);
 }
 
 .status-kicker {
@@ -380,7 +411,7 @@ button {
 .stage {
   padding: 28px 48px 64px;
   background:
-    radial-gradient(circle at top right, #1c2433 0, transparent 36%),
+    radial-gradient(circle at top right, var(--stage-glow) 0, transparent 36%),
     var(--stage);
 }
 
@@ -439,7 +470,7 @@ button {
 .banner,
 .error-card {
   border: 1px solid var(--danger);
-  color: #f0cfcb;
+  color: var(--banner-text);
   padding: 12px 14px;
   border-radius: 8px;
   margin-bottom: 20px;
@@ -482,7 +513,7 @@ h1 {
   border-radius: 12px;
   padding: 36px;
   cursor: pointer;
-  background: #12161f;
+  background: var(--card);
 }
 
 .drop.over,
@@ -515,7 +546,7 @@ h1 {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #12161f;
+  background: var(--card);
 }
 
 .key-box p {
@@ -536,16 +567,79 @@ h1 {
 }
 
 .key-box .composer-row {
-  margin-top: 0;
+  margin-top: 12px;
 }
 
 .title-input {
   flex: 1;
-  background: #12161f;
+  background: var(--card);
   border: 1px solid var(--line);
   color: var(--text);
   border-radius: 6px;
   padding: 11px 12px;
+}
+
+select.title-input {
+  width: 100%;
+  appearance: auto;
+}
+
+.field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.theme-card strong {
+  font-size: 14px;
+}
+
+.theme-card small {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.theme-swatch {
+  display: flex;
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.theme-swatch i {
+  flex: 1;
 }
 
 .pane {
@@ -647,7 +741,7 @@ h1 {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(241, 230, 207, 0.28), transparent);
+  background: linear-gradient(90deg, transparent, var(--shine), transparent);
   animation: progress-shine 1.4s linear infinite;
 }
 
@@ -779,6 +873,14 @@ h1 {
   border-radius: 2px;
 }
 
+[data-theme="t2"] .paper {
+  box-shadow: 0 0 0 1px #000000, 0 16px 40px rgba(255, 52, 149, 0.12);
+}
+
+[data-theme="t2"] .decisions {
+  border-left-color: #ff3495;
+}
+
 .paper header p {
   margin: 0;
   letter-spacing: 0.18em;
@@ -827,18 +929,18 @@ h1 {
 .next {
   margin-top: 24px;
   padding-top: 16px;
-  border-top: 1px solid #d9cdb3;
+  border-top: 1px solid var(--paper-rule);
   font-weight: 600;
 }
 
 .transcript {
   white-space: pre-wrap;
-  background: #10141c;
+  background: var(--card);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 20px;
   line-height: 1.55;
-  color: #d7d0c3;
+  color: var(--text);
   max-height: 70vh;
   overflow: auto;
 }

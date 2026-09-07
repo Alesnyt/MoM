@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -12,11 +13,24 @@ _model = None
 _model_size: str | None = None
 
 
+def unload() -> None:
+    global _model, _model_size
+    _model = None
+    _model_size = None
+    gc.collect()
+
+
 def _load(on_progress: ProgressFn | None = None):
     global _model, _model_size
     size = config.local_whisper_size()
     if _model is not None and _model_size == size:
         return _model
+    try:
+        from . import gigaam_asr
+
+        gigaam_asr.unload()
+    except Exception:
+        pass
     if on_progress:
         on_progress(0, f"Загружаю модель Whisper {size}")
     try:
