@@ -8,7 +8,6 @@ import {
   buildEmailBody,
   getAuthStatus,
   getHealth,
-  getMeeting,
   getSettings,
   getUserSession,
   listMeetings,
@@ -22,14 +21,27 @@ import {
   retryMeeting,
   saveApiKey,
   saveModels,
+  saveQueue,
+  saveSmtp,
   saveTheme,
   setupAdmin,
+  testSmtp,
   updateUserLimit,
   verifyApiKey,
 } from "./api";
 import type { AuthStatus, Health, Meeting, MeetingResult, MeetingStatus, OpenAIStatus, PlatformUser, UserSession } from "./types";
 
 type Tab = "overview" | "actions" | "mom" | "transcript";
+type AdminTab = "llm" | "asr" | "queue" | "smtp" | "theme" | "users";
+
+const ADMIN_TABS: { id: AdminTab; label: string }[] = [
+  { id: "llm", label: "LLM" },
+  { id: "asr", label: "Расшифровка" },
+  { id: "queue", label: "Очередь" },
+  { id: "smtp", label: "Почта" },
+  { id: "theme", label: "Вид" },
+  { id: "users", label: "Пользователи" },
+];
 
 const STEPS: { id: MeetingStatus; label: string }[] = [
   { id: "extracting", label: "Аудио" },
@@ -51,7 +63,7 @@ export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [user, setUser] = useState<UserSession | null>(null);
   const [adminHealth, setAdminHealth] = useState<Health | null>(null);
-  const [adminTab, setAdminTab] = useState<"keys" | "users">("keys");
+  const [adminTab, setAdminTab] = useState<AdminTab>("llm");
 
   const selected = useMemo(
     () => meetings.find((item) => item.id === selectedId) ?? null,
@@ -100,20 +112,27 @@ export default function App() {
     }
   }, [composing, meetings, selectedId]);
 
+  const openai = health?.openai;
+  const keyReady = Boolean(openai?.connected);
+  const userReady = Boolean(user?.authenticated);
+  const showComposer = composing || meetings.length === 0;
+  const processingKey = meetings
+    .filter((item) => item.status !== "done" && item.status !== "error")
+    .map((item) => item.id)
+    .join(",");
+
   useEffect(() => {
-    if (!selected || selected.status === "done" || selected.status === "error") {
-      return;
-    }
+    if (!userReady || !processingKey) return;
     const timer = window.setInterval(async () => {
       try {
-        const next = await getMeeting(selected.id);
-        setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)));
+        const rows = await listMeetings();
+        setMeetings(rows);
       } catch {
         /* keep last known state */
       }
     }, 700);
     return () => window.clearInterval(timer);
-  }, [selected]);
+  }, [processingKey, userReady]);
 
   async function onUpload(file: File, title: string) {
     setError(null);
@@ -155,11 +174,6 @@ export default function App() {
     });
   }
 
-  const openai = health?.openai;
-  const keyReady = Boolean(openai?.connected);
-  const userReady = Boolean(user?.authenticated);
-  const showComposer = composing || meetings.length === 0;
-
   useEffect(() => {
     if (screen !== "admin" || !auth?.authenticated) return;
     getSettings()
@@ -198,7 +212,11 @@ export default function App() {
       <div className="workspace">
       <aside className="rail">
         {userReady ? (
-          <button className="primary" onClick={() => { setScreen("app"); setComposing(true); }}>
+          <button className="primary" onClick={() => {
+            setScreen("app");
+            setComposing(true);
+            getHealth().then(setHealth).catch(() => undefined);
+          }}>
             Новая запись
           </button>
         ) : (
@@ -222,7 +240,9 @@ export default function App() {
                   <strong>{item.title}</strong>
                   <small>
                     {item.status !== "done" && item.status !== "error"
-                      ? `${item.status_message || stepLabel(item.status)}${typeof item.progress === "number" ? ` · ${item.progress}%` : ""}`
+                      ? item.status === "queued"
+                        ? item.status_message || stepLabel(item.status)
+                        : `${item.status_message || stepLabel(item.status)}${typeof item.progress === "number" ? ` · ${item.progress}%` : ""}`
                       : `${formatDate(item.created_at)}${item.duration_seconds ? ` · ${formatDuration(item.duration_seconds)}` : ""}`}
                   </small>
                 </span>
@@ -288,6 +308,8 @@ export default function App() {
           <Composer
             busy={busy}
             keyReady={keyReady}
+            queue={health?.queue}
+            mailReady={Boolean(health?.smtp?.configured)}
             onOpenSettings={() => setScreen("admin")}
             onUpload={onUpload}
           />
@@ -295,6 +317,7 @@ export default function App() {
           <MeetingPane
             meeting={selected}
             tab={tab}
+            mailEnabled={Boolean(health?.smtp?.configured)}
             onTab={setTab}
             onRetry={() => void onRetry(selected.id)}
             onDelete={() => onDelete(selected.id)}
@@ -303,6 +326,8 @@ export default function App() {
           <Composer
             busy={busy}
             keyReady={keyReady}
+            queue={health?.queue}
+            mailReady={Boolean(health?.smtp?.configured)}
             onOpenSettings={() => setScreen("admin")}
             onUpload={onUpload}
           />
@@ -316,11 +341,15 @@ export default function App() {
 function Composer({
   busy,
   keyReady,
+  queue,
+  mailReady,
   onOpenSettings,
   onUpload,
 }: {
   busy: boolean;
   keyReady: boolean;
+  queue?: { active: number; waiting: number; limit: number };
+  mailReady: boolean;
   onOpenSettings: () => void;
   onUpload: (file: File, title: string) => Promise<void>;
 }) {
@@ -334,14 +363,24 @@ function Composer({
     if (!title) setTitle(next.name.replace(/\.[^.]+$/, ""));
   }
 
+  const queued = (queue?.active || 0) + (queue?.waiting || 0);
+
   return (
     <section className="composer">
       <p className="eyebrow">Обработка записей</p>
       <h1>Из webm — саммари, поручения и протокол</h1>
       <p className="lead">
-        Загрузите запись конф-колла. Приложение извлечёт аудио, расшифрует речь и
-        соберёт Minutes of Meeting: итоги, решения и список поручений.
+        Загрузите запись. Если слоты заняты, встреча встанет в очередь.
+        Сколько обрабатывается сразу, задаёт администратор. {mailReady
+          ? "Когда протокол будет готов, письмо придёт на email, с которым вы входите."
+          : "Готовый протокол останется в MoM; почтовые уведомления включит администратор."}
       </p>
+      {queued > 0 && (
+        <p className="lead">
+          Сейчас в работе {queue?.active ?? 0}
+          {(queue?.waiting ?? 0) > 0 ? `, в очереди ${queue?.waiting}` : ""}.
+        </p>
+      )}
       {!keyReady && (
         <div className="key-box">
           <p>Ключ ещё не подключён. Без рабочего ключа запись обработать нельзя.</p>
@@ -407,8 +446,8 @@ function AdminSection({
 }: {
   auth: AuthStatus | null;
   health: Health | null;
-  tab: "keys" | "users";
-  onTab: (tab: "keys" | "users") => void;
+  tab: AdminTab;
+  onTab: (tab: AdminTab) => void;
   onAuth: (auth: AuthStatus) => void;
   onHealth: (health: Health) => void;
 }) {
@@ -504,21 +543,52 @@ function AdminSection({
   }
 
   return (
-    <div>
-      <nav className="tabs" style={{ marginBottom: 8 }}>
-        <button className={tab === "keys" ? "active" : ""} onClick={() => onTab("keys")}>
-          API-ключи
+    <section className="composer admin-page">
+      <header className="admin-head">
+        <div>
+          <p className="eyebrow">Администрирование{auth?.username ? ` · ${auth.username}` : ""}</p>
+          <h1>{adminHeading(tab).title}</h1>
+          <p className="lead">{adminHeading(tab).lead}</p>
+        </div>
+        <button
+          className="ghost"
+          type="button"
+          onClick={() => {
+            void logoutAdmin()
+              .then(onAuth)
+              .catch((err: Error) => setError(err.message));
+          }}
+        >
+          Выйти
         </button>
-        <button className={tab === "users" ? "active" : ""} onClick={() => onTab("users")}>
-          Пользователи
-        </button>
+      </header>
+      <nav className="admin-tabs" aria-label="Настройки">
+        {ADMIN_TABS.map((item) => (
+          <button key={item.id} className={tab === item.id ? "active" : ""} onClick={() => onTab(item.id)}>
+            {item.label}
+          </button>
+        ))}
       </nav>
+      <div className="status-pills" aria-label="Сводка">
+        <span className={`status-pill ${connectionClass(health?.openai)}`}>{connectionLabel(health?.openai)}</span>
+        <span className={`status-pill ${health?.ffmpeg ? "ok" : "bad"}`}>
+          ffmpeg {health?.ffmpeg ? "найден" : "нет"}
+        </span>
+        <span className="status-pill">
+          Очередь {health?.queue?.active ?? 0}/{health?.queue?.limit ?? 1}
+          {(health?.queue?.waiting ?? 0) > 0 ? ` · ждут ${health?.queue?.waiting}` : ""}
+        </span>
+        <span className={`status-pill ${health?.smtp?.configured ? "ok" : ""}`}>
+          {health?.smtp?.configured ? `Почта ${health.smtp.host || "вкл."}` : "Почта выкл."}
+        </span>
+      </div>
       {tab === "users" ? (
         <UsersPanel />
       ) : (
-        <SettingsPanel health={health} username={auth?.username} onChange={onHealth} onLogout={onAuth} />
+        <SettingsPanel topic={tab} health={health} onChange={onHealth} />
       )}
-    </div>
+      {error && <div className="banner">{error}</div>}
+    </section>
   );
 }
 
@@ -629,14 +699,7 @@ function UsersPanel() {
   }
 
   return (
-    <section className="composer">
-      <p className="eyebrow">Профили</p>
-      <h1>Пользователи</h1>
-      <p className="lead">
-        Администратор заводит профиль вручную: указывает email, система генерирует
-        пароль. По умолчанию в архиве 5 последних протоколов, лимит можно задать
-        отдельно для каждого.
-      </p>
+    <>
       <form
         className="key-box"
         onSubmit={(event) => {
@@ -715,7 +778,7 @@ function UsersPanel() {
         )}
       </div>
       {error && <div className="banner">{error}</div>}
-    </section>
+    </>
   );
 }
 
@@ -780,21 +843,65 @@ function formatAsrLabel(model: string | null | undefined): string {
   return model;
 }
 
+function adminHeading(tab: AdminTab): { title: string; lead: string } {
+  if (tab === "llm") {
+    return {
+      title: "LLM и ключ",
+      lead: "Ключ Qwen или OpenAI и модель чата. Она пишет саммари и протокол.",
+    };
+  }
+  if (tab === "asr") {
+    return {
+      title: "Расшифровка",
+      lead: "Движок распознавания речи: локальный Whisper, Сбер GigaAM или облако.",
+    };
+  }
+  if (tab === "queue") {
+    return {
+      title: "Очередь",
+      lead: "Сколько встреч запускать сразу. Если слотов не хватает, новые ждут в очереди.",
+    };
+  }
+  if (tab === "smtp") {
+    return {
+      title: "Почта",
+      lead: "Когда протокол готов, письмо уходит на email пользователя. Без SMTP обработка не ломается.",
+    };
+  }
+  if (tab === "theme") {
+    return {
+      title: "Вид",
+      lead: "Тема интерфейса по умолчанию для всех пользователей.",
+    };
+  }
+  return {
+    title: "Пользователи",
+    lead: "Профиль заводится вручную: указываете email, система генерирует пароль. Лимит архива задаётся отдельно.",
+  };
+}
+
 function SettingsPanel({
+  topic,
   health,
-  username,
   onChange,
-  onLogout,
 }: {
+  topic: Exclude<AdminTab, "users">;
   health: Health | null;
-  username?: string | null;
   onChange: (health: Health) => void;
-  onLogout: (auth: AuthStatus) => void;
 }) {
   const [apiKey, setApiKey] = useState("");
   const [chatModel, setChatModel] = useState(health?.openai.chat_model || "");
   const [asrModel, setAsrModel] = useState(health?.openai.asr_model || "");
-  const [busy, setBusy] = useState<"save" | "verify" | "delete" | "models" | "theme" | null>(null);
+  const [smtpHost, setSmtpHost] = useState(health?.smtp?.host || "");
+  const [smtpPort, setSmtpPort] = useState(String(health?.smtp?.port || 587));
+  const [smtpUser, setSmtpUser] = useState(health?.smtp?.user || "");
+  const [smtpPassword, setSmtpPassword] = useState("");
+  const [smtpFrom, setSmtpFrom] = useState(health?.smtp?.from_addr || "");
+  const [smtpStarttls, setSmtpStarttls] = useState(health?.smtp?.starttls !== false);
+  const [maxJobs, setMaxJobs] = useState(String(health?.queue?.limit || 1));
+  const [publicUrl, setPublicUrl] = useState(health?.smtp?.public_url || "");
+  const [smtpNote, setSmtpNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"save" | "verify" | "delete" | "models" | "theme" | "smtp" | "smtp-test" | "queue" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const openai = health?.openai;
   const asr = parseAsrModel(asrModel);
@@ -802,9 +909,21 @@ function SettingsPanel({
   useEffect(() => {
     if (health?.openai.chat_model) setChatModel(health.openai.chat_model);
     if (health?.openai.asr_model) setAsrModel(health.openai.asr_model);
+    if (health?.smtp) {
+      setSmtpHost(health.smtp.host || "");
+      setSmtpPort(String(health.smtp.port || 587));
+      setSmtpUser(health.smtp.user || "");
+      setSmtpFrom(health.smtp.from_addr || "");
+      setSmtpStarttls(health.smtp.starttls !== false);
+      setPublicUrl(health.smtp.public_url || "");
+    }
+    if (health?.queue?.limit) setMaxJobs(String(health.queue.limit));
   }, [health]);
 
-  async function run(kind: "save" | "verify" | "delete" | "models" | "theme", action: () => Promise<Health>) {
+  async function run(
+    kind: "save" | "verify" | "delete" | "models" | "theme" | "smtp" | "queue",
+    action: () => Promise<Health>,
+  ) {
     setError(null);
     setBusy(kind);
     try {
@@ -818,233 +937,412 @@ function SettingsPanel({
     }
   }
 
+  function setEngine(engine: AsrEngine) {
+    setAsrModel(
+      encodeAsrModel({
+        ...asr,
+        engine,
+        cloudModel: asr.cloudModel || "whisper-1",
+      }),
+    );
+  }
+
   return (
-    <section className="composer">
-      <p className="eyebrow">Администрирование</p>
-      <h1>API-ключи</h1>
-      <p className="lead">
-        Раздел доступен только администратору{username ? ` (${username})` : ""}.
-        Ключи QwenCloud и OpenAI хранятся локально в `.env`.
-      </p>
+    <>
+      {topic === "llm" && (
+        <>
+          <div className={`status-card ${connectionClass(openai)}`}>
+            <p className="status-kicker">{connectionLabel(openai)}</p>
+            <p>{openai?.message || "Статус ещё не получен"}</p>
+            <ul>
+              {openai?.provider_label && <li>Провайдер: {openai.provider_label}</li>}
+              {openai?.hint && <li>Ключ: {openai.hint}</li>}
+              {openai?.chat_model && <li>Чат: {openai.chat_model}</li>}
+              {openai?.base_url && <li>Host: {openai.base_url}</li>}
+              {openai?.checked_at && <li>Проверено: {formatDate(openai.checked_at)}</li>}
+            </ul>
+          </div>
 
-      <div className={`status-card ${connectionClass(openai)}`}>
-        <p className="status-kicker">{connectionLabel(openai)}</p>
-        <p>{openai?.message || "Статус ещё не получен"}</p>
-        <ul>
-          {openai?.provider_label && <li>Провайдер: {openai.provider_label}</li>}
-          {openai?.hint && <li>Ключ: {openai.hint}</li>}
-          {openai?.chat_model && <li>Чат: {openai.chat_model}</li>}
-          {openai?.asr_model && <li>Расшифровка: {formatAsrLabel(openai.asr_model)}</li>}
-          {openai?.base_url && <li>Host: {openai.base_url}</li>}
-          {openai?.checked_at && <li>Проверено: {formatDate(openai.checked_at)}</li>}
-          <li>ffmpeg: {health?.ffmpeg ? "найден" : "не найден"}</li>
-        </ul>
-      </div>
+          <form
+            className="key-box"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run("save", () => saveApiKey(apiKey.trim()));
+            }}
+          >
+            <p>{openai?.configured ? "Заменить ключ" : "Добавить ключ Qwen или OpenAI"}</p>
+            <div className="composer-row">
+              <input
+                className="title-input"
+                type="password"
+                autoComplete="off"
+                placeholder="sk-ws-… или sk-…"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+              />
+              <button className="primary" type="submit" disabled={busy !== null || apiKey.trim().length < 20}>
+                {busy === "save" ? "Проверяю…" : "Сохранить и проверить"}
+              </button>
+            </div>
+          </form>
 
-      <form
-        className="key-box"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run("save", () => saveApiKey(apiKey.trim()));
-        }}
-      >
-        <p>{openai?.configured ? "Заменить ключ" : "Добавить ключ Qwen или OpenAI"}</p>
-        <div className="composer-row">
-          <input
-            className="title-input"
-            type="password"
-            autoComplete="off"
-            placeholder="sk-ws-… или sk-…"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-          />
-          <button className="primary" type="submit" disabled={busy !== null || apiKey.trim().length < 20}>
-            {busy === "save" ? "Проверяю…" : "Сохранить и проверить"}
-          </button>
-        </div>
-      </form>
+          <form
+            className="key-box"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run("models", () => saveModels(chatModel.trim(), asrModel.trim() || health?.openai.asr_model || "local-whisper"));
+            }}
+          >
+            <p>Модель, которая собирает протокол.</p>
+            <label className="field-label">
+              Чат
+              <input
+                className="title-input"
+                placeholder="Например qwen3.7-plus"
+                value={chatModel}
+                onChange={(event) => setChatModel(event.target.value)}
+              />
+            </label>
+            <div className="composer-row">
+              <button className="primary" type="submit" disabled={busy !== null || !chatModel.trim()}>
+                {busy === "models" ? "Сохраняю…" : "Сохранить модель"}
+              </button>
+            </div>
+          </form>
 
-      <form
-        className="key-box"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run("models", () => saveModels(chatModel.trim(), asrModel.trim()));
-        }}
-      >
-        <p>
-          Расшифровка локальная: Whisper или Сбер GigaAM Multilingual (2026). Token Plan Individual не
-          включает облачный ASR.
-        </p>
-        <div className="field-stack">
-          <label className="field-label">
-            Чат
-            <input
-              className="title-input"
-              placeholder="Чат, например qwen3.7-plus"
-              value={chatModel}
-              onChange={(event) => setChatModel(event.target.value)}
-            />
-          </label>
-          <label className="field-label">
-            Движок расшифровки
-            <select
-              className="title-input"
-              value={asr.engine}
-              onChange={(event) => {
-                const engine = event.target.value as AsrEngine;
-                setAsrModel(
-                  encodeAsrModel({
-                    ...asr,
-                    engine,
-                    cloudModel: asr.cloudModel || "whisper-1",
-                  }),
-                );
+          <div className="pane-actions settings-actions">
+            <button
+              className="ghost"
+              type="button"
+              disabled={busy !== null || !openai?.configured}
+              onClick={() => void run("verify", verifyApiKey)}
+            >
+              {busy === "verify" ? "Проверяю…" : "Проверить подключение"}
+            </button>
+            <button
+              className="ghost danger"
+              type="button"
+              disabled={busy !== null || !openai?.configured}
+              onClick={() => {
+                if (!window.confirm("Удалить сохранённый ключ?")) return;
+                void run("delete", deleteApiKey);
               }}
             >
-              <option value="whisper">Whisper (локально)</option>
-              <option value="gigaam">Сбер GigaAM Multilingual</option>
-              <option value="cloud">Облако (Qwen / OpenAI)</option>
-            </select>
-          </label>
-          {asr.engine === "whisper" && (
-            <label className="field-label">
-              Модель Whisper
-              <select
-                className="title-input"
-                value={asr.whisperSize}
-                onChange={(event) => {
-                  setAsrModel(
-                    encodeAsrModel({
-                      ...asr,
-                      whisperSize: event.target.value,
-                    }),
-                  );
-                }}
-              >
-                {WHISPER_SIZES.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {asr.engine === "gigaam" && (
-            <label className="field-label">
-              Модель GigaAM
-              <select
-                className="title-input"
-                value={asr.gigaamVariant}
-                onChange={(event) => {
-                  setAsrModel(
-                    encodeAsrModel({
-                      ...asr,
-                      gigaamVariant: event.target.value === "large" ? "large" : "ctc",
-                    }),
-                  );
-                }}
-              >
-                <option value="ctc">220M CTC — быстрее, меньше RAM</option>
-                <option value="large">600M CTC — точнее, тяжелее</option>
-              </select>
-            </label>
-          )}
-          {asr.engine === "gigaam" && (
+              {busy === "delete" ? "Удаляю…" : "Удалить ключ"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {topic === "asr" && (
+        <form
+          className="key-box"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run("models", () =>
+              saveModels(chatModel.trim() || health?.openai.chat_model || "qwen3.7-plus", asrModel.trim()),
+            );
+          }}
+        >
+          <p>
+            Сейчас: {formatAsrLabel(openai?.asr_model) || "не задано"}. Token Plan Individual не включает облачный ASR —
+            берите Whisper или GigaAM.
+          </p>
+          <div className="choice-grid">
+            <button
+              type="button"
+              className={`choice-card ${asr.engine === "whisper" ? "active" : ""}`}
+              onClick={() => setEngine("whisper")}
+            >
+              <strong>Whisper</strong>
+              <small>Локально, CPU, меньше RAM</small>
+            </button>
+            <button
+              type="button"
+              className={`choice-card ${asr.engine === "gigaam" ? "active" : ""}`}
+              onClick={() => setEngine("gigaam")}
+            >
+              <strong>GigaAM</strong>
+              <small>Сбер, локально, 2026</small>
+            </button>
+            <button
+              type="button"
+              className={`choice-card ${asr.engine === "cloud" ? "active" : ""}`}
+              onClick={() => setEngine("cloud")}
+            >
+              <strong>Облако</strong>
+              <small>Qwen ASR или whisper-1</small>
+            </button>
+          </div>
+          <div className="field-stack" style={{ marginTop: 14 }}>
+            {asr.engine === "whisper" && (
+              <label className="field-label">
+                Модель Whisper
+                <select
+                  className="title-input"
+                  value={asr.whisperSize}
+                  onChange={(event) => {
+                    setAsrModel(encodeAsrModel({ ...asr, whisperSize: event.target.value }));
+                  }}
+                >
+                  {WHISPER_SIZES.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {asr.engine === "gigaam" && (
+              <>
+                <label className="field-label">
+                  Модель GigaAM
+                  <select
+                    className="title-input"
+                    value={asr.gigaamVariant}
+                    onChange={(event) => {
+                      setAsrModel(
+                        encodeAsrModel({
+                          ...asr,
+                          gigaamVariant: event.target.value === "large" ? "large" : "ctc",
+                        }),
+                      );
+                    }}
+                  >
+                    <option value="ctc">220M CTC — быстрее, меньше RAM</option>
+                    <option value="large">600M CTC — точнее, тяжелее</option>
+                  </select>
+                </label>
+                <p>
+                  Пакеты ставятся с проектом (`install.sh` / `update.sh`). Модель скачается с Hugging Face при первой
+                  расшифровке.
+                </p>
+              </>
+            )}
+            {asr.engine === "cloud" && (
+              <label className="field-label">
+                Облачная модель
+                <input
+                  className="title-input"
+                  placeholder="qwen3-asr-flash или whisper-1"
+                  value={asr.cloudModel}
+                  onChange={(event) => {
+                    setAsrModel(encodeAsrModel({ ...asr, cloudModel: event.target.value }));
+                  }}
+                />
+              </label>
+            )}
+          </div>
+          <div className="composer-row">
+            <button className="primary" type="submit" disabled={busy !== null || !asrModel.trim()}>
+              {busy === "models" ? "Сохраняю…" : "Сохранить расшифровку"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {topic === "queue" && (
+        <form
+          className="key-box"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run("queue", () => saveQueue(Math.min(8, Math.max(1, Number(maxJobs) || 1))));
+          }}
+        >
+          <p>
+            1 — спокойно для 4–8 ГБ. 2–4, если RAM и CPU позволяют: ffmpeg и Qwen идут параллельно. Локальный
+            Whisper/GigaAM в памяти один, распознавание не грузит вторую копию модели.
+          </p>
+          {health?.queue && (
             <p>
-              Пакеты ставятся с проектом (`install.sh` / `update.sh`). Модель скачается с Hugging Face
-              при первой расшифровке.
+              Сейчас в работе {health.queue.active}, в очереди {health.queue.waiting}, слотов {health.queue.limit}.
             </p>
           )}
-          {asr.engine === "cloud" && (
-            <input
-              className="title-input"
-              placeholder="qwen3-asr-flash или whisper-1"
-              value={asr.cloudModel}
-              onChange={(event) => {
-                setAsrModel(
-                  encodeAsrModel({
-                    ...asr,
-                    cloudModel: event.target.value,
-                  }),
-                );
+          <label className="field-label">
+            Одновременно в работе
+            <select className="title-input" value={maxJobs} onChange={(event) => setMaxJobs(event.target.value)}>
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                <option key={n} value={String(n)}>
+                  {n === 1
+                    ? "1 — по умолчанию, мало RAM"
+                    : n === 4
+                      ? "4 — 16+ ГБ RAM"
+                      : n === 8
+                        ? "8 — много ядер и облачный ASR"
+                        : String(n)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="composer-row">
+            <button className="primary" type="submit" disabled={busy !== null}>
+              {busy === "queue" ? "Сохраняю…" : "Сохранить очередь"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {topic === "smtp" && (
+        <form
+          className="key-box"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setSmtpNote(null);
+            void run("smtp", () =>
+              saveSmtp({
+                host: smtpHost.trim(),
+                port: Number(smtpPort) || 587,
+                user: smtpUser.trim(),
+                password: smtpPassword,
+                from_addr: smtpFrom.trim(),
+                starttls: smtpStarttls,
+                public_url: publicUrl.trim(),
+              }).then((next) => {
+                setSmtpPassword("");
+                return next;
+              }),
+            );
+          }}
+        >
+          <p>
+            {health?.smtp?.configured
+              ? `Сервер: ${health.smtp.host || "задан"} · порт ${health.smtp.port ?? 587}`
+              : "SMTP ещё не задан — письма не уходят, протоколы остаются в MoM."}
+          </p>
+          <div className="field-stack">
+            <label className="field-label">
+              SMTP-сервер
+              <input
+                className="title-input"
+                placeholder="smtp.example.com"
+                value={smtpHost}
+                onChange={(event) => setSmtpHost(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field-label">
+              Порт
+              <input
+                className="title-input"
+                type="number"
+                min={1}
+                max={65535}
+                value={smtpPort}
+                onChange={(event) => setSmtpPort(event.target.value)}
+              />
+            </label>
+            <label className="field-label">
+              Логин SMTP
+              <input
+                className="title-input"
+                value={smtpUser}
+                onChange={(event) => setSmtpUser(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field-label">
+              Пароль SMTP
+              <input
+                className="title-input"
+                type="password"
+                autoComplete="new-password"
+                placeholder={health?.smtp?.has_password ? "Задан, оставьте пустым чтобы не менять" : "Пароль"}
+                value={smtpPassword}
+                onChange={(event) => setSmtpPassword(event.target.value)}
+              />
+            </label>
+            <label className="field-label">
+              От кого
+              <input
+                className="title-input"
+                placeholder="mom@example.com"
+                value={smtpFrom}
+                onChange={(event) => setSmtpFrom(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field-check">
+              <input
+                type="checkbox"
+                checked={smtpStarttls}
+                onChange={(event) => setSmtpStarttls(event.target.checked)}
+              />
+              STARTTLS (для порта 587)
+            </label>
+            <label className="field-label">
+              Ссылка на MoM в письме (необязательно)
+              <input
+                className="title-input"
+                placeholder="https://mom.example.com"
+                value={publicUrl}
+                onChange={(event) => setPublicUrl(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+          </div>
+          <div className="composer-row">
+            <button className="primary" type="submit" disabled={busy !== null}>
+              {busy === "smtp" ? "Сохраняю…" : "Сохранить почту"}
+            </button>
+            <button
+              className="ghost"
+              type="button"
+              disabled={busy !== null || !health?.smtp?.configured}
+              onClick={() => {
+                setSmtpNote(null);
+                setBusy("smtp-test");
+                void testSmtp(smtpFrom.trim() || smtpUser.trim())
+                  .then((result) => setSmtpNote(`Тестовое письмо отправлено на ${result.to}`))
+                  .catch((err: Error) => setError(err.message))
+                  .finally(() => setBusy(null));
               }}
-            />
-          )}
-        </div>
-        <div className="composer-row">
-          <button className="primary" type="submit" disabled={busy !== null || !chatModel.trim() || !asrModel.trim()}>
-            {busy === "models" ? "Сохраняю…" : "Сохранить модели"}
-          </button>
-        </div>
-      </form>
+            >
+              {busy === "smtp-test" ? "Отправляю…" : "Проверить SMTP"}
+            </button>
+          </div>
+          {smtpNote && <p>{smtpNote}</p>}
+        </form>
+      )}
 
-      <div className="key-box">
-        <p>Тема интерфейса по умолчанию для всех пользователей.</p>
-        <div className="theme-grid">
-          <button
-            type="button"
-            className={`theme-card ${ (health?.theme || "classic") === "classic" ? "active" : ""}`}
-            disabled={busy !== null}
-            onClick={() => void run("theme", () => saveTheme("classic"))}
-          >
-            <span className="theme-swatch" aria-hidden="true">
-              <i style={{ background: "#101218" }} />
-              <i style={{ background: "#c9843e" }} />
-              <i style={{ background: "#f1e6cf" }} />
-            </span>
-            <strong>Классическая</strong>
-            <small>Текущая тёмная тема — по умолчанию</small>
-          </button>
-          <button
-            type="button"
-            className={`theme-card ${health?.theme === "t2" ? "active" : ""}`}
-            disabled={busy !== null}
-            onClick={() => void run("theme", () => saveTheme("t2"))}
-          >
-            <span className="theme-swatch" aria-hidden="true">
-              <i style={{ background: "#000000" }} />
-              <i style={{ background: "#ff3495" }} />
-              <i style={{ background: "#ffffff" }} />
-            </span>
-            <strong>T2</strong>
-            <small>Чёрный, розовый #FF3495 и белый</small>
-          </button>
+      {topic === "theme" && (
+        <div className="key-box">
+          <p>Тема применяется сразу для всех, кто открывает MoM.</p>
+          <div className="theme-grid">
+            <button
+              type="button"
+              className={`theme-card ${(health?.theme || "classic") === "classic" ? "active" : ""}`}
+              disabled={busy !== null}
+              onClick={() => void run("theme", () => saveTheme("classic"))}
+            >
+              <span className="theme-swatch" aria-hidden="true">
+                <i style={{ background: "#101218" }} />
+                <i style={{ background: "#c9843e" }} />
+                <i style={{ background: "#f1e6cf" }} />
+              </span>
+              <strong>Классическая</strong>
+              <small>Тёмная тема — по умолчанию</small>
+            </button>
+            <button
+              type="button"
+              className={`theme-card ${health?.theme === "t2" ? "active" : ""}`}
+              disabled={busy !== null}
+              onClick={() => void run("theme", () => saveTheme("t2"))}
+            >
+              <span className="theme-swatch" aria-hidden="true">
+                <i style={{ background: "#000000" }} />
+                <i style={{ background: "#ff3495" }} />
+                <i style={{ background: "#ffffff" }} />
+              </span>
+              <strong>T2</strong>
+              <small>Чёрный, розовый #FF3495 и белый</small>
+            </button>
+          </div>
+          {busy === "theme" && <p>Сохраняю тему…</p>}
         </div>
-        {busy === "theme" && <p>Сохраняю тему…</p>}
-      </div>
+      )}
 
-      <div className="pane-actions settings-actions">
-        <button
-          className="ghost"
-          disabled={busy !== null || !openai?.configured}
-          onClick={() => void run("verify", verifyApiKey)}
-        >
-          {busy === "verify" ? "Проверяю…" : "Проверить подключение"}
-        </button>
-        <button
-          className="ghost danger"
-          disabled={busy !== null || !openai?.configured}
-          onClick={() => {
-            if (!window.confirm("Удалить сохранённый ключ?")) return;
-            void run("delete", deleteApiKey);
-          }}
-        >
-          {busy === "delete" ? "Удаляю…" : "Удалить ключ"}
-        </button>
-        <button
-          className="ghost"
-          disabled={busy !== null}
-          onClick={() => {
-            void logoutAdmin()
-              .then(onLogout)
-              .catch((err: Error) => setError(err.message));
-          }}
-        >
-          Выйти
-        </button>
-      </div>
       {error && <div className="banner">{error}</div>}
-    </section>
+    </>
   );
 }
 
@@ -1064,12 +1362,14 @@ function connectionLabel(status: OpenAIStatus | undefined): string {
 function MeetingPane({
   meeting,
   tab,
+  mailEnabled,
   onTab,
   onRetry,
   onDelete,
 }: {
   meeting: Meeting;
   tab: Tab;
+  mailEnabled: boolean;
   onTab: (tab: Tab) => void;
   onRetry: () => void;
   onDelete: () => void;
@@ -1161,7 +1461,7 @@ function MeetingPane({
 
       {mailNote && <div className="banner">{mailNote}</div>}
 
-      {processing && <ProcessCard meeting={meeting} />}
+      {processing && <ProcessCard meeting={meeting} mailEnabled={mailEnabled} />}
       {meeting.status === "error" && (
         <div className="error-card">
           <strong>Обработка не удалась</strong>
@@ -1223,9 +1523,10 @@ function transcribeHint(message: string | null | undefined): string {
   return "Расшифровка идёт по записи, процент растёт по ходу.";
 }
 
-function ProcessCard({ meeting }: { meeting: Meeting }) {
+function ProcessCard({ meeting, mailEnabled }: { meeting: Meeting; mailEnabled: boolean }) {
   const current = STEPS.findIndex((step) => step.id === meeting.status);
   const index = meeting.status === "queued" ? -1 : current;
+  const queued = meeting.status === "queued";
   const pct = Math.max(0, Math.min(100, meeting.progress ?? fallbackProgress(meeting.status)));
   const stamp = `${meeting.status}|${pct}|${meeting.status_message}`;
   const started = useRef({ stamp, at: Date.now() });
@@ -1239,8 +1540,11 @@ function ProcessCard({ meeting }: { meeting: Meeting }) {
   }, [meeting.id]);
   const elapsed = Math.max(0, Math.floor((now - started.current.at) / 1000));
   const waiting = meeting.status === "analyzing" || elapsed >= 4;
-  const hint =
-    meeting.status === "analyzing"
+  const hint = queued
+    ? mailEnabled
+      ? "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка, готовый протокол придёт на почту."
+      : "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка. Результат появится в MoM."
+    : meeting.status === "analyzing"
       ? "Qwen пишет протокол. Процент обновится, когда модель ответит — для длинной записи это несколько минут."
       : meeting.status === "transcribing"
         ? transcribeHint(meeting.status_message)
@@ -1248,21 +1552,21 @@ function ProcessCard({ meeting }: { meeting: Meeting }) {
   return (
     <div className="process">
       <div className="progress-head">
-        <strong>{pct}%</strong>
+        <strong>{queued ? "очередь" : `${pct}%`}</strong>
         <span>{meeting.status_message || stepLabel(meeting.status)}</span>
       </div>
       <div
         className={`progress-bar${waiting ? " waiting" : ""}`}
         role="progressbar"
-        aria-valuenow={pct}
+        aria-valuenow={queued ? 0 : pct}
         aria-valuemin={0}
         aria-valuemax={100}
       >
-        <i style={{ width: `${pct}%` }} />
+        <i style={{ width: `${queued ? 6 : pct}%` }} />
       </div>
       <p className="progress-live">
-        В работе {formatClock(elapsed)}
-        {waiting ? " · процесс живой, ждём ответ" : ""}
+        {queued ? `Ожидание ${formatClock(elapsed)}` : `В работе ${formatClock(elapsed)}`}
+        {!queued && waiting ? " · процесс живой, ждём ответ" : ""}
       </p>
       <ol>
         {STEPS.map((step, i) => (

@@ -47,6 +47,7 @@ export type Meeting = {
   result: MeetingResult | null;
   error: string | null;
   progress?: number;
+  queue_ahead?: number;
 };
 
 export type OpenAIStatus = {
@@ -62,12 +63,31 @@ export type OpenAIStatus = {
   asr_model?: string | null;
 };
 
+export type QueueStatus = {
+  active: number;
+  waiting: number;
+  limit: number;
+};
+
+export type SmtpStatus = {
+  configured: boolean;
+  host?: string | null;
+  port?: number;
+  user?: string | null;
+  from_addr?: string | null;
+  starttls?: boolean;
+  has_password?: boolean;
+  public_url?: string | null;
+};
+
 export type Health = {
   ok: boolean;
   ffmpeg: boolean;
   ui?: boolean;
   theme?: "classic" | "t2";
   openai: OpenAIStatus;
+  queue?: QueueStatus;
+  smtp?: SmtpStatus;
 };
 
 export type AuthStatus = {

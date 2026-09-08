@@ -9,6 +9,8 @@ from openai import APIStatusError, AsyncOpenAI
 
 from . import config
 
+_local_asr_lock = asyncio.Lock()
+
 SYSTEM_PROMPT = """Ты — ассистент, который готовит протокол встречи (Minutes of Meeting, MoM).
 По транскрипту созвона верни ТОЛЬКО JSON по схеме ниже.
 Пиши на языке транскрипта. Не выдумывай факты, имена, сроки и решения, которых нет в тексте.
@@ -141,6 +143,25 @@ def _parse_result(raw: str) -> dict[str, Any]:
     return data
 
 
+async def _transcribe_local(
+    path: Path,
+    model: str,
+    language: str | None,
+    duration: float | None,
+    on_progress: Any,
+) -> dict[str, Any]:
+    if _local_asr_lock.locked() and on_progress:
+        on_progress(1, "Жду свободный слот распознавания")
+    async with _local_asr_lock:
+        if config.is_gigaam_asr(model):
+            from .gigaam_asr import transcribe_gigaam_sync
+
+            return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
+        from .local_asr import transcribe_local_sync
+
+        return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
+
+
 async def transcribe_file(
     client: AsyncOpenAI,
     path: Path,
@@ -149,15 +170,8 @@ async def transcribe_file(
     duration: float | None = None,
     on_progress: Any = None,
 ) -> dict[str, Any]:
-    if config.is_gigaam_asr(model):
-        from .gigaam_asr import transcribe_gigaam_sync
-
-        return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
-
-    if config.is_whisper_asr(model) or config.is_local_asr(model):
-        from .local_asr import transcribe_local_sync
-
-        return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
+    if config.is_gigaam_asr(model) or config.is_whisper_asr(model) or config.is_local_asr(model):
+        return await _transcribe_local(path, model, language, duration, on_progress)
 
     if config.is_qwen() or model.startswith("qwen"):
         return await transcribe_qwen(client, path, model, language, duration, on_progress)
@@ -217,9 +231,7 @@ async def transcribe_qwen(
                 continue
             raise
     if config.is_token_plan():
-        from .local_asr import transcribe_local_sync
-
-        return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
+        return await _transcribe_local(path, config.LOCAL_ASR_MODEL, language, duration, on_progress)
     raise last_error or RuntimeError("Не удалось расшифровать аудио ни одной ASR-моделью Qwen")
 
 

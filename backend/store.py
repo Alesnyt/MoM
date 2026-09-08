@@ -10,7 +10,7 @@ from typing import Any, Iterator
 import stat
 import time
 
-from .config import DB_PATH, ensure_dirs, restrict_path
+from .config import DB_PATH, ensure_dirs, get_max_jobs, restrict_path
 
 STATUSES = (
     "queued",
@@ -68,6 +68,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE meetings ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
         if "user_id" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN user_id TEXT")
+        if "queued_at" not in columns:
+            conn.execute("ALTER TABLE meetings ADD COLUMN queued_at TEXT")
+            conn.execute("UPDATE meetings SET queued_at = created_at WHERE queued_at IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_queue ON meetings(status, queued_at)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -97,39 +101,30 @@ def init_db() -> None:
 
 
 def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> dict[str, Any]:
-    row = {
-        "id": meeting_id,
-        "title": title,
-        "filename": filename,
-        "status": "queued",
-        "status_message": "Файл принят, обработка в очереди",
-        "created_at": utc_now(),
-        "duration_seconds": None,
-        "language": None,
-        "transcript": None,
-        "result": None,
-        "error": None,
-        "progress": 0,
-        "user_id": user_id,
-    }
+    now = utc_now()
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO meetings (
-                id, title, filename, status, status_message, created_at, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, title, filename, status, status_message, created_at, queued_at, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["id"],
-                row["title"],
-                row["filename"],
-                row["status"],
-                row["status_message"],
-                row["created_at"],
+                meeting_id,
+                title,
+                filename,
+                "queued",
+                "Файл принят, обработка в очереди",
+                now,
+                now,
                 user_id,
             ),
         )
-    return row
+    refresh_queue_messages()
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        raise RuntimeError("Не удалось сохранить встречу")
+    return meeting
 
 
 def update_meeting(meeting_id: str, **fields: Any) -> None:
@@ -145,6 +140,7 @@ def update_meeting(meeting_id: str, **fields: Any) -> None:
         "result_json",
         "error",
         "progress",
+        "queued_at",
     }
     sets = []
     values: list[Any] = []
@@ -164,7 +160,9 @@ def update_meeting(meeting_id: str, **fields: Any) -> None:
 def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-    return _serialize(row) if row else None
+    if not row:
+        return None
+    return attach_queue_info([_serialize(row)])[0]
 
 
 def list_meetings(user_id: str | None = None) -> list[dict[str, Any]]:
@@ -178,7 +176,7 @@ def list_meetings(user_id: str | None = None) -> list[dict[str, Any]]:
             rows = conn.execute(
                 "SELECT * FROM meetings ORDER BY created_at DESC"
             ).fetchall()
-    return [_serialize(row) for row in rows]
+    return attach_queue_info([_serialize(row) for row in rows])
 
 
 ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
@@ -203,18 +201,172 @@ def prune_user_meetings(user_id: str) -> list[str]:
     return removed
 
 
-def fail_interrupted_meetings() -> int:
+def queue_wait_message(ahead: int) -> str:
+    if ahead <= 0:
+        return "Следующая в очереди"
+    return f"В очереди, впереди {ahead} {_meetings_word(ahead)}"
+
+
+def _meetings_word(count: int) -> str:
+    n = abs(count) % 100
+    if 11 <= n <= 14:
+        return "встреч"
+    last = n % 10
+    if last == 1:
+        return "встреча"
+    if 2 <= last <= 4:
+        return "встречи"
+    return "встреч"
+
+
+def queue_stats() -> dict[str, int]:
+    with connect() as conn:
+        active = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM meetings
+            WHERE status IN ('extracting', 'transcribing', 'analyzing')
+            """
+        ).fetchone()["n"]
+        waiting = conn.execute(
+            "SELECT COUNT(*) AS n FROM meetings WHERE status = 'queued'"
+        ).fetchone()["n"]
+    return {"active": int(active), "waiting": int(waiting), "limit": get_max_jobs()}
+
+
+def attach_queue_info(meetings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not meetings:
+        return meetings
+    with connect() as conn:
+        active = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM meetings
+            WHERE status IN ('extracting', 'transcribing', 'analyzing')
+            """
+        ).fetchone()["n"]
+        queued = conn.execute(
+            """
+            SELECT id FROM meetings
+            WHERE status = 'queued'
+            ORDER BY COALESCE(queued_at, created_at) ASC, id ASC
+            """
+        ).fetchall()
+    order = {row["id"]: index for index, row in enumerate(queued)}
+    active_n = int(active)
+    for item in meetings:
+        if item.get("status") == "queued" and item["id"] in order:
+            item["queue_ahead"] = active_n + order[item["id"]]
+        else:
+            item["queue_ahead"] = 0
+    return meetings
+
+
+def refresh_queue_messages() -> None:
+    with connect() as conn:
+        active = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM meetings
+            WHERE status IN ('extracting', 'transcribing', 'analyzing')
+            """
+        ).fetchone()["n"]
+        rows = conn.execute(
+            """
+            SELECT id, status_message FROM meetings
+            WHERE status = 'queued'
+            ORDER BY COALESCE(queued_at, created_at) ASC, id ASC
+            """
+        ).fetchall()
+        for index, row in enumerate(rows):
+            message = queue_wait_message(int(active) + index)
+            if row["status_message"] != message:
+                conn.execute(
+                    "UPDATE meetings SET status_message = ? WHERE id = ? AND status = 'queued'",
+                    (message, row["id"]),
+                )
+
+
+def claim_next_meeting(max_jobs: int) -> str | None:
+    limit = max(1, int(max_jobs))
+    ensure_dirs()
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    chosen: str | None = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        running = conn.execute(
+            """
+            SELECT id, user_id FROM meetings
+            WHERE status IN ('extracting', 'transcribing', 'analyzing')
+            """
+        ).fetchall()
+        if len(running) >= limit:
+            conn.execute("COMMIT")
+            return None
+        busy_users = {row["user_id"] for row in running if row["user_id"]}
+        queued = conn.execute(
+            """
+            SELECT id, user_id FROM meetings
+            WHERE status = 'queued'
+            ORDER BY COALESCE(queued_at, created_at) ASC, id ASC
+            """
+        ).fetchall()
+        for row in queued:
+            if row["user_id"] and row["user_id"] in busy_users:
+                continue
+            chosen = row["id"]
+            break
+        if not chosen and queued:
+            chosen = queued[0]["id"]
+        if not chosen:
+            conn.execute("COMMIT")
+            return None
+        cursor = conn.execute(
+            """
+            UPDATE meetings
+            SET status = 'extracting',
+                status_message = 'Начинаю обработку',
+                progress = 1,
+                error = NULL
+            WHERE id = ? AND status = 'queued'
+            """,
+            (chosen,),
+        )
+        if cursor.rowcount != 1:
+            conn.execute("COMMIT")
+            return None
+        conn.execute("COMMIT")
+        return chosen
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        conn.close()
+        restrict_path(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def requeue_interrupted_meetings() -> int:
     with connect() as conn:
         cursor = conn.execute(
             """
             UPDATE meetings
-            SET status = 'error',
-                status_message = 'Обработка прервана перезапуском сервера',
-                error = 'Повторите обработку'
-            WHERE status IN ('queued', 'extracting', 'transcribing', 'analyzing')
+            SET status = 'queued',
+                status_message = 'В очереди после перезапуска сервера',
+                progress = 0,
+                error = NULL
+            WHERE status IN ('extracting', 'transcribing', 'analyzing')
             """
         )
-        return cursor.rowcount
+        count = cursor.rowcount
+    refresh_queue_messages()
+    return count
+
+
+def fail_interrupted_meetings() -> int:
+    return requeue_interrupted_meetings()
 
 
 def delete_meeting(meeting_id: str) -> bool:

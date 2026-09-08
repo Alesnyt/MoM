@@ -9,17 +9,17 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, config, keys, store
+from . import auth, config, keys, store, worker
 from .audio import ffmpeg_available
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
-from .mail import open_or_save_eml
-from .pipeline import format_duration, process_meeting
+from .mail import open_or_save_eml, send_mail, smtp_snapshot
+from .pipeline import format_duration
 
 ALLOWED_SUFFIXES = {".webm", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -38,6 +38,24 @@ class ModelsIn(BaseModel):
 
 class ThemeIn(BaseModel):
     theme: str
+
+
+class SmtpIn(BaseModel):
+    host: str = ""
+    port: int = Field(default=587, ge=1, le=65535)
+    user: str = ""
+    password: str = ""
+    from_addr: str = ""
+    starttls: bool = True
+    public_url: str = ""
+
+
+class QueueIn(BaseModel):
+    max_jobs: int = Field(ge=1, le=8)
+
+
+class SmtpTestIn(BaseModel):
+    to: str = ""
 
 
 class LoginIn(BaseModel):
@@ -144,13 +162,15 @@ def _health(*, full: bool = False) -> dict:
         "ui": (STATIC_DIR / "index.html").exists(),
         "theme": config.get_ui_theme(),
         "openai": keys.snapshot() if full else keys.public_snapshot(),
+        "queue": store.queue_stats(),
+        "smtp": smtp_snapshot(full=full),
     }
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_dirs()
     store.init_db()
-    store.fail_interrupted_meetings()
+    store.requeue_interrupted_meetings()
     config.migrate_token_plan_asr()
     if config.get_api_key():
         try:
@@ -159,7 +179,21 @@ async def lifespan(_app: FastAPI):
             keys.reset_status("Не удалось проверить ключ при запуске — сохраните его снова в админке")
     else:
         keys.reset_status()
-    yield
+    stop = asyncio.Event()
+    worker_task = asyncio.create_task(worker.run_worker(stop), name="mom-queue")
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.notify_work()
+        try:
+            await asyncio.wait_for(worker_task, timeout=4)
+        except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="MoM", version="1.0.0", lifespan=lifespan)
@@ -351,6 +385,41 @@ def save_theme(payload: ThemeIn, _admin: dict = Depends(require_admin)) -> dict:
     return _health(full=True)
 
 
+@app.post("/api/settings/smtp")
+def save_smtp(payload: SmtpIn, _admin: dict = Depends(require_admin)) -> dict:
+    config.set_smtp(
+        host=payload.host,
+        port=payload.port,
+        user=payload.user,
+        password=payload.password,
+        from_addr=payload.from_addr,
+        starttls=payload.starttls,
+    )
+    config.set_public_base_url(payload.public_url)
+    return _health(full=True)
+
+
+@app.post("/api/settings/queue")
+def save_queue(payload: QueueIn, _admin: dict = Depends(require_admin)) -> dict:
+    config.set_max_jobs(payload.max_jobs)
+    worker.notify_work()
+    return _health(full=True)
+
+
+@app.post("/api/settings/smtp/test")
+def test_smtp(payload: SmtpTestIn, _admin: dict = Depends(require_admin)) -> dict:
+    if not config.smtp_configured():
+        raise HTTPException(status_code=400, detail="Сначала сохраните SMTP-сервер и адрес отправителя")
+    to = (payload.to or config.get_smtp_from() or "").strip().lower()
+    if "@" not in to:
+        raise HTTPException(status_code=400, detail="Укажите email для проверки")
+    try:
+        send_mail(to, "MoM: проверка почты", "Если вы видите это письмо, SMTP настроен верно.\n")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"SMTP не принял письмо: {exc}") from exc
+    return {"ok": True, "to": to}
+
+
 @app.post("/api/settings/verify")
 async def verify_settings(_admin: dict = Depends(require_admin)) -> dict:
     if not config.get_api_key():
@@ -378,7 +447,6 @@ def get_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
 
 @app.post("/api/meetings")
 async def create_meeting(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str | None = Form(None),
     user: dict = Depends(require_user),
@@ -428,14 +496,13 @@ async def create_meeting(
     meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"])
     for extra_id in store.prune_user_meetings(user["user_id"]):
         _purge_files(extra_id)
-    background_tasks.add_task(process_meeting, meeting_id)
+    worker.notify_work()
     return meeting
 
 
 @app.post("/api/meetings/{meeting_id}/retry")
 async def retry_meeting(
     meeting_id: str,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(require_user),
 ) -> dict:
     meeting = _owned(store.get_meeting(meeting_id), user)
@@ -456,8 +523,10 @@ async def retry_meeting(
         result=None,
         language=None,
         progress=0,
+        queued_at=store.utc_now(),
     )
-    background_tasks.add_task(process_meeting, meeting_id)
+    store.refresh_queue_messages()
+    worker.notify_work()
     updated = store.get_meeting(meeting_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Встреча не найдена")

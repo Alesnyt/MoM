@@ -17,6 +17,7 @@ from .analyze import (
 from . import config
 from .audio import extract_audio_async, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
+from .mail import notify_meeting_done
 
 
 class _Progress:
@@ -164,6 +165,9 @@ async def process_meeting(meeting_id: str) -> None:
             status_message="Обработка не удалась",
             error=str(exc),
         )
+    meeting = store.get_meeting(meeting_id)
+    if meeting and meeting.get("status") == "done":
+        await asyncio.to_thread(notify_meeting_done, meeting)
 
 
 async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float, progress: _Progress) -> dict:

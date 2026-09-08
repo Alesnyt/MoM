@@ -148,6 +148,47 @@ export async function saveTheme(theme: "classic" | "t2"): Promise<Health> {
   return response.json();
 }
 
+export async function saveSmtp(payload: {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  from_addr: string;
+  starttls: boolean;
+  public_url: string;
+}): Promise<Health> {
+  const response = await fetch("/api/settings/smtp", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function saveQueue(maxJobs: number): Promise<Health> {
+  const response = await fetch("/api/settings/queue", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_jobs: maxJobs }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function testSmtp(to: string): Promise<{ ok: boolean; to: string }> {
+  const response = await fetch("/api/settings/smtp/test", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function saveModels(chatModel: string, asrModel: string): Promise<Health> {
   const response = await fetch("/api/settings/models", {
     method: "POST",

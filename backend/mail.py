@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import base64
+import logging
+import smtplib
 import subprocess
 import sys
 from email.header import Header
+from email.message import EmailMessage
 from email.utils import formatdate
 from pathlib import Path
 
 from . import config
+
+log = logging.getLogger("mom.mail")
 
 
 def email_subject(meeting: dict) -> str:
@@ -104,3 +109,91 @@ def _open_local_eml(path: Path) -> str:
             return mode
     subprocess.run(["open", str(path)], capture_output=True, check=False)
     return "opened"
+
+
+def smtp_snapshot(*, full: bool = False) -> dict:
+    configured = config.smtp_configured()
+    data = {"configured": configured}
+    if not full:
+        return data
+    data.update(
+        {
+            "host": config.get_smtp_host() or None,
+            "port": config.get_smtp_port(),
+            "user": config.get_smtp_user() or None,
+            "from_addr": config.get_smtp_from() or None,
+            "starttls": config.get_smtp_starttls(),
+            "has_password": bool(config.get_smtp_password()),
+            "public_url": config.get_public_base_url() or None,
+        }
+    )
+    return data
+
+
+def send_mail(to: str, subject: str, body: str) -> None:
+    host = config.get_smtp_host()
+    from_addr = config.get_smtp_from()
+    if not host or not from_addr:
+        raise RuntimeError("Сначала укажите SMTP-сервер и адрес отправителя")
+    if not to or "@" not in to:
+        raise RuntimeError("Нет адреса получателя")
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = from_addr
+    message["To"] = to
+    message.set_content(body)
+
+    port = config.get_smtp_port()
+    user = config.get_smtp_user()
+    password = config.get_smtp_password()
+    if port == 465:
+        client: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=20)
+    else:
+        client = smtplib.SMTP(host, port, timeout=20)
+        if config.get_smtp_starttls():
+            client.ehlo()
+            client.starttls()
+            client.ehlo()
+    try:
+        if user:
+            client.login(user, password)
+        client.send_message(message)
+    finally:
+        try:
+            client.quit()
+        except Exception:
+            client.close()
+
+
+def notify_meeting_done(meeting: dict) -> None:
+    if meeting.get("status") != "done":
+        return
+    if not config.smtp_configured():
+        return
+    from . import store
+
+    user_id = meeting.get("user_id")
+    user = store.get_user(user_id) if user_id else None
+    to = (user or {}).get("email") or ""
+    if not to:
+        log.warning("Некому отправить письмо по встрече %s", meeting.get("id"))
+        return
+    extra = ""
+    public = config.get_public_base_url()
+    if public:
+        extra = f"\n\nОткрыть в MoM: {public}/"
+    body = (
+        "Встреча расшифрована, протокол готов.\n\n"
+        + email_body(meeting)
+        + extra
+    )
+    try:
+        send_mail(to, email_subject(meeting), body)
+    except Exception as exc:  # noqa: BLE001 — don't fail the job if mail is down
+        log.warning("Не отправилось письмо по встрече %s: %s", meeting.get("id"), exc)
+        store.update_meeting(
+            meeting["id"],
+            status_message="Готово. Письмо не отправилось — проверьте SMTP в админке",
+        )
+        return
+    store.update_meeting(meeting["id"], status_message="Готово, протокол отправлен на почту")

@@ -34,10 +34,26 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
 PORT = _int_env("PORT", 8000)
 MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 512) * 1024 * 1024)
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
+MAX_JOBS_LIMIT = 8
+MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, _int_env("MAX_JOBS", 1)))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = max(1, min(65535, _int_env("SMTP_PORT", 587)))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
+SMTP_STARTTLS = _bool_env("SMTP_STARTTLS", True)
 FFMPEG_TIMEOUT_SECONDS = max(60, _int_env("FFMPEG_TIMEOUT_SECONDS", 1800))
 WHISPER_DIR = DATA_DIR / "whisper"
 LOGIN_WINDOW_SECONDS = max(15, _int_env("LOGIN_WINDOW_SECONDS", 60))
@@ -363,3 +379,89 @@ def set_ui_theme(theme: str) -> str:
     os.environ["UI_THEME"] = name
     _upsert_env({"UI_THEME": name})
     return name
+
+
+def get_max_jobs() -> int:
+    return MAX_JOBS
+
+
+def set_max_jobs(value: int) -> int:
+    global MAX_JOBS
+    MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, int(value)))
+    os.environ["MAX_JOBS"] = str(MAX_JOBS)
+    _upsert_env({"MAX_JOBS": str(MAX_JOBS)})
+    return MAX_JOBS
+
+
+def get_public_base_url() -> str:
+    return PUBLIC_BASE_URL.rstrip("/")
+
+
+def set_public_base_url(url: str) -> str:
+    global PUBLIC_BASE_URL
+    PUBLIC_BASE_URL = url.strip().rstrip("/")
+    os.environ["PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
+    _upsert_env({"PUBLIC_BASE_URL": PUBLIC_BASE_URL})
+    return PUBLIC_BASE_URL
+
+
+def get_smtp_host() -> str:
+    return SMTP_HOST
+
+
+def get_smtp_port() -> int:
+    return SMTP_PORT
+
+
+def get_smtp_user() -> str:
+    return SMTP_USER
+
+
+def get_smtp_password() -> str:
+    return SMTP_PASSWORD
+
+
+def get_smtp_from() -> str:
+    return SMTP_FROM or SMTP_USER
+
+
+def get_smtp_starttls() -> bool:
+    return SMTP_STARTTLS
+
+
+def smtp_configured() -> bool:
+    return bool(SMTP_HOST and get_smtp_from())
+
+
+def set_smtp(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    from_addr: str,
+    starttls: bool,
+) -> None:
+    global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, SMTP_STARTTLS
+    SMTP_HOST = host.strip()
+    SMTP_PORT = max(1, min(65535, int(port)))
+    SMTP_USER = user.strip()
+    SMTP_FROM = from_addr.strip()
+    SMTP_STARTTLS = bool(starttls)
+    os.environ["SMTP_HOST"] = SMTP_HOST
+    os.environ["SMTP_PORT"] = str(SMTP_PORT)
+    os.environ["SMTP_USER"] = SMTP_USER
+    os.environ["SMTP_FROM"] = SMTP_FROM
+    os.environ["SMTP_STARTTLS"] = "1" if SMTP_STARTTLS else "0"
+    payload = {
+        "SMTP_HOST": SMTP_HOST,
+        "SMTP_PORT": str(SMTP_PORT),
+        "SMTP_USER": SMTP_USER,
+        "SMTP_FROM": SMTP_FROM,
+        "SMTP_STARTTLS": "1" if SMTP_STARTTLS else "0",
+    }
+    if password:
+        SMTP_PASSWORD = password
+        os.environ["SMTP_PASSWORD"] = SMTP_PASSWORD
+        payload["SMTP_PASSWORD"] = SMTP_PASSWORD
+    _upsert_env(payload)
