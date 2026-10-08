@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import shutil
 import subprocess
@@ -8,9 +9,29 @@ from pathlib import Path
 
 from . import config
 
+log = logging.getLogger("mom.audio")
+
 
 class AudioError(RuntimeError):
     pass
+
+
+def looks_like_audio(path: Path) -> bool:
+    try:
+        data = path.read_bytes()[:64]
+    except OSError:
+        return False
+    if len(data) < 12:
+        return False
+    if data[:4] in {b"RIFF", b"OggS", b"fLaC"}:
+        return True
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return True
+    if data[:3] == b"ID3":
+        return True
+    if data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return True
+    return data[4:8] == b"ftyp"
 
 
 def _run(cmd: list[str], timeout: int | None = None) -> str:
@@ -18,10 +39,14 @@ def _run(cmd: list[str], timeout: int | None = None) -> str:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
     except subprocess.TimeoutExpired as exc:
+        log.error("ffmpeg timeout after %s s: %s", limit, " ".join(cmd[:8]))
         raise AudioError(f"ffmpeg не уложился в {limit} с") from exc
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "unknown ffmpeg error").strip()
-        raise AudioError(err[-2000:])
+        log.error("ffmpeg failed (%s): %s", result.returncode, err[-4000:])
+        raise AudioError(
+            "Не удалось обработать аудио. Проверьте, что файл — запись, а не повреждённый контейнер."
+        )
     return (result.stdout or "").strip()
 
 
@@ -45,7 +70,8 @@ def duration_seconds(path: Path) -> float:
     try:
         value = float(out)
     except ValueError as exc:
-        raise AudioError(f"Не удалось определить длительность файла: {out}") from exc
+        log.error("ffprobe duration parse failed: %s", out)
+        raise AudioError("Не удалось определить длительность записи") from exc
     if not math.isfinite(value) or value <= 0:
         raise AudioError("В записи не найдена звуковая дорожка")
     return value

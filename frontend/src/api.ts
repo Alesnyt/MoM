@@ -244,10 +244,16 @@ export async function retryMeeting(id: string): Promise<Meeting> {
   return response.json();
 }
 
+export async function getEmailBody(id: string): Promise<string> {
+  const response = await fetch(`/api/meetings/${id}/email.txt`, { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.text();
+}
+
 export async function openMeetingEmail(meeting: Meeting): Promise<string> {
   if (!meeting.result) throw new Error("Протокол ещё не готов");
   const subject = `MoM: ${meeting.result.title || meeting.title}`;
-  const body = buildEmailBody(meeting);
+  const body = await getEmailBody(meeting.id);
   const draft = `${subject}\n\n${body}`;
   try {
     await navigator.clipboard.writeText(draft);
@@ -266,48 +272,6 @@ export async function openMeetingEmail(meeting: Meeting): Promise<string> {
   if (!response.ok) throw new Error(await parseError(response));
   const payload = (await response.json()) as { mode?: string };
   return payload.mode || "saved";
-}
-
-export function buildEmailBody(meeting: Meeting): string {
-  const result = meeting.result;
-  if (!result) return "";
-  const lines: string[] = [];
-  lines.push(`Саммари встречи: ${result.title || meeting.title}`);
-  lines.push("");
-  if (result.date_hint) lines.push(`Дата: ${result.date_hint}`);
-  if (result.participants?.length) {
-    lines.push(`Участники: ${result.participants.join(", ")}`);
-  }
-  lines.push("");
-  lines.push(result.summary?.trim() || "Саммари отсутствует.");
-  if (result.key_points?.length) {
-    lines.push("");
-    lines.push("Ключевые тезисы:");
-    for (const item of result.key_points) lines.push(`• ${item}`);
-  }
-  if (result.decisions?.length) {
-    lines.push("");
-    lines.push("Решения:");
-    for (const item of result.decisions) lines.push(`• ${item}`);
-  }
-  const actions = result.action_items || [];
-  lines.push("");
-  lines.push("Поручения:");
-  if (!actions.length) {
-    lines.push("Поручений не зафиксировано.");
-  } else {
-    for (const item of actions) {
-      const who = item.assignee || "не назначен";
-      const due = item.due || "без срока";
-      lines.push(`• ${item.task} — ${who}; срок: ${due}`);
-    }
-  }
-  const next = result.mom?.next_meeting;
-  if (next) {
-    lines.push("");
-    lines.push(`Следующая встреча: ${next}`);
-  }
-  return lines.join("\n").trim() + "\n";
 }
 
 export async function downloadMarkdown(id: string, title: string): Promise<void> {

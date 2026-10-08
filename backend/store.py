@@ -97,6 +97,15 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rate_hits (
+                key TEXT NOT NULL,
+                at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_hits ON rate_hits(key, at)")
 
 
 
@@ -162,21 +171,38 @@ def get_meeting(meeting_id: str) -> dict[str, Any] | None:
         row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
     if not row:
         return None
-    return attach_queue_info([_serialize(row)])[0]
+    return attach_queue_info([_serialize(row, body=True)])[0]
 
 
-def list_meetings(user_id: str | None = None) -> list[dict[str, Any]]:
+_LIST_COLUMNS = """
+    id, title, filename, status, status_message, created_at,
+    duration_seconds, language, error, progress, queued_at, user_id,
+    NULL AS transcript, NULL AS result_json
+"""
+
+
+def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dict[str, Any]]:
     with connect() as conn:
-        if user_id:
+        if body:
+            if user_id:
+                rows = conn.execute(
+                    "SELECT * FROM meetings WHERE user_id = ? ORDER BY created_at DESC",
+                    (user_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM meetings ORDER BY created_at DESC"
+                ).fetchall()
+        elif user_id:
             rows = conn.execute(
-                "SELECT * FROM meetings WHERE user_id = ? ORDER BY created_at DESC",
+                f"SELECT {_LIST_COLUMNS} FROM meetings WHERE user_id = ? ORDER BY created_at DESC",
                 (user_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM meetings ORDER BY created_at DESC"
+                f"SELECT {_LIST_COLUMNS} FROM meetings ORDER BY created_at DESC"
             ).fetchall()
-    return attach_queue_info([_serialize(row) for row in rows])
+    return attach_queue_info([_serialize(row, body=body) for row in rows])
 
 
 ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
@@ -365,8 +391,20 @@ def requeue_interrupted_meetings() -> int:
     return count
 
 
-def fail_interrupted_meetings() -> int:
-    return requeue_interrupted_meetings()
+def rate_allow(key: str, window: float, limit: int) -> bool:
+    now = time.time()
+    cutoff = now - float(window)
+    cap = max(1, int(limit))
+    with connect() as conn:
+        conn.execute("DELETE FROM rate_hits WHERE at < ?", (cutoff,))
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM rate_hits WHERE key = ? AND at >= ?",
+            (key, cutoff),
+        ).fetchone()["n"]
+        if int(n) >= cap:
+            return False
+        conn.execute("INSERT INTO rate_hits (key, at) VALUES (?, ?)", (key, now))
+    return True
 
 
 def delete_meeting(meeting_id: str) -> bool:
@@ -375,12 +413,17 @@ def delete_meeting(meeting_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def _serialize(row: sqlite3.Row) -> dict[str, Any]:
+def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
     data = dict(row)
     raw = data.pop("result_json")
-    data["result"] = json.loads(raw) if raw else None
     data["progress"] = int(data.get("progress") or 0)
     data["user_id"] = data.get("user_id")
+    if body:
+        data["result"] = json.loads(raw) if raw else None
+    else:
+        data.pop("transcript", None)
+        data["transcript"] = None
+        data["result"] = None
     return data
 
 

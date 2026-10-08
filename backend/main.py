@@ -16,15 +16,25 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth, config, keys, store, worker
-from .audio import ffmpeg_available
+from .audio import ffmpeg_available, looks_like_audio
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
-from .mail import open_or_save_eml, send_mail, smtp_snapshot
+from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
 
 ALLOWED_SUFFIXES = {".webm", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 _setup_lock = threading.Lock()
-_LOOPBACK = {"127.0.0.1", "::1", "testclient", "localhost"}
+_LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient", "localhost"}
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": (
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    ),
+}
 
 
 class SettingsIn(BaseModel):
@@ -71,20 +81,33 @@ class UserLoginIn(BaseModel):
 
 class UserCreateIn(BaseModel):
     email: str = Field(min_length=3, max_length=200)
-    archive_limit: int = 5
+    archive_limit: int = Field(default=5, ge=1, le=100)
 
 
 class UserLimitIn(BaseModel):
     archive_limit: int = Field(ge=1, le=100)
 
 
+def _peer_trusted(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    return host in _LOOPBACK
+
+
 def _client_ip(request: Request) -> str:
-    return (request.client.host if request.client else "") or "unknown"
+    peer = (request.client.host if request.client else "") or "unknown"
+    if _peer_trusted(request):
+        forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+    return peer
 
 
 def _cookie_kw(request: Request) -> dict:
-    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    secure = request.url.scheme == "https" or proto == "https"
+    secure = request.url.scheme == "https"
+    if _peer_trusted(request):
+        proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        if proto == "https":
+            secure = True
     return {
         "httponly": True,
         "samesite": "lax",
@@ -92,6 +115,11 @@ def _cookie_kw(request: Request) -> dict:
         "path": "/",
         "secure": secure,
     }
+
+
+def _clear_cookie(response: Response, name: str, request: Request) -> None:
+    kw = _cookie_kw(request)
+    response.delete_cookie(name, path="/", secure=kw["secure"], httponly=True, samesite="lax")
 
 
 def _rate_or_429(request: Request, action: str) -> None:
@@ -211,6 +239,16 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    if request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
 @app.get("/api/health")
 def health() -> dict:
     return _health(full=False)
@@ -254,9 +292,13 @@ def auth_login(payload: LoginIn, request: Request, response: Response) -> dict:
 
 
 @app.post("/api/auth/logout")
-def auth_logout(response: Response, mom_admin: str | None = Cookie(default=None)) -> dict:
+def auth_logout(
+    request: Request,
+    response: Response,
+    mom_admin: str | None = Cookie(default=None),
+) -> dict:
     auth.drop_session(mom_admin)
-    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    _clear_cookie(response, auth.COOKIE_NAME, request)
     return {"configured": config.admin_configured(), "authenticated": False, "username": None}
 
 
@@ -299,9 +341,13 @@ def user_login(payload: UserLoginIn, request: Request, response: Response) -> di
 
 
 @app.post("/api/session/logout")
-def user_logout(response: Response, mom_user: str | None = Cookie(default=None)) -> dict:
+def user_logout(
+    request: Request,
+    response: Response,
+    mom_user: str | None = Cookie(default=None),
+) -> dict:
     auth.drop_user_session(mom_user)
-    response.delete_cookie(auth.USER_COOKIE, path="/")
+    _clear_cookie(response, auth.USER_COOKIE, request)
     return {"authenticated": False, "email": None, "archive_limit": None}
 
 
@@ -491,6 +537,12 @@ async def create_meeting(
     if size == 0:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Пустой файл")
+    if not looks_like_audio(dest):
+        dest.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail="Файл не похож на запись (webm, mp4, mp3, wav, m4a или ogg)",
+        )
 
     display_title = (title or "").strip() or Path(original).stem
     meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"])
@@ -535,7 +587,12 @@ async def retry_meeting(
 
 @app.delete("/api/meetings/{meeting_id}")
 def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
-    _owned(store.get_meeting(meeting_id), user)
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    if meeting["status"] in store.ACTIVE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя удалить встречу, пока она в очереди или в обработке",
+        )
     if not store.delete_meeting(meeting_id):
         raise HTTPException(status_code=404, detail="Встреча не найдена")
     _purge_files(meeting_id)
@@ -548,6 +605,14 @@ def export_markdown(meeting_id: str, user: dict = Depends(require_user)) -> str:
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
     return to_markdown(meeting)
+
+
+@app.get("/api/meetings/{meeting_id}/email.txt", response_class=PlainTextResponse)
+def meeting_email_text(meeting_id: str, user: dict = Depends(require_user)) -> str:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    if meeting["status"] != "done" or not meeting.get("result"):
+        raise HTTPException(status_code=409, detail="Протокол ещё не готов")
+    return email_body(meeting)
 
 
 @app.post("/api/meetings/{meeting_id}/email")
@@ -629,6 +694,12 @@ def index():
         "<h1>MoM</h1><p>Соберите интерфейс: <code>./install.sh</code> или <code>cd frontend && npm run build</code></p>",
         status_code=503,
     )
+
+
+@app.get("/admin", include_in_schema=False)
+@app.get("/admin/{rest:path}", include_in_schema=False)
+def admin_index(rest: str = ""):
+    return index()
 
 
 if (STATIC_DIR / "assets").exists():

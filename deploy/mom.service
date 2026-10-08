@@ -13,6 +13,12 @@ ExecStart=REPLACE_ROOT/.venv/bin/python -m backend
 Restart=on-failure
 RestartSec=5
 Nice=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=REPLACE_ROOT
+MemoryMax=6G
 
 [Install]
 WantedBy=multi-user.target

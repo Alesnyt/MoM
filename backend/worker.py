@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
-from . import config, store
+from . import config, gigaam_asr, local_asr, store
 from .pipeline import process_meeting
 
 log = logging.getLogger("mom.queue")
@@ -16,10 +17,20 @@ def notify_work() -> None:
         _wake.set()
 
 
+def _unload_idle_asr() -> None:
+    stats = store.queue_stats()
+    if stats["active"] or stats["waiting"]:
+        return
+    local_asr.unload()
+    gigaam_asr.unload()
+    log.info("Локальный ASR выгружен после простоя очереди")
+
+
 async def run_worker(stop: asyncio.Event) -> None:
     global _wake
     _wake = asyncio.Event()
     running: set[asyncio.Task[None]] = set()
+    idle_since: float | None = None
     try:
         while not stop.is_set():
             running = {task for task in running if not task.done()}
@@ -28,9 +39,11 @@ async def run_worker(stop: asyncio.Event) -> None:
                 meeting_id = await asyncio.to_thread(store.claim_next_meeting, limit)
                 if not meeting_id:
                     break
+                idle_since = None
                 await asyncio.to_thread(store.refresh_queue_messages)
                 running.add(asyncio.create_task(_run_job(meeting_id), name=f"mom-job-{meeting_id[:8]}"))
             if running:
+                idle_since = None
                 _done, running = await asyncio.wait(
                     running,
                     timeout=1.0,
@@ -38,6 +51,12 @@ async def run_worker(stop: asyncio.Event) -> None:
                 )
                 await asyncio.to_thread(store.refresh_queue_messages)
                 continue
+            now = time.monotonic()
+            if idle_since is None:
+                idle_since = now
+            elif now - idle_since >= float(config.ASR_IDLE_UNLOAD_SECONDS):
+                await asyncio.to_thread(_unload_idle_asr)
+                idle_since = now
             await asyncio.to_thread(store.refresh_queue_messages)
             try:
                 await asyncio.wait_for(_wake.wait(), timeout=1.5)

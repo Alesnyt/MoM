@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import importlib
+import logging
 import shutil
 import sys
 import types
@@ -10,6 +11,8 @@ from typing import Any, Callable
 
 from . import config
 from .audio import duration_seconds, extract_wav, split_wav
+
+log = logging.getLogger("mom.gigaam")
 
 ProgressFn = Callable[[int, str], None]
 
@@ -39,11 +42,12 @@ def _text_of(result: Any) -> str:
 
 
 def _allow_gigaam_import() -> None:
-    # transformers scans the whole GigaAM modeling file and demands `pyannote`
+    # transformers scans the GigaAM modeling file and demands `pyannote`
     # even though we never call transcribe_longform (we cut audio with ffmpeg).
     try:
         importlib.import_module("pyannote")
     except ImportError:
+        log.warning("pyannote не установлен — подставляю заглушку только для импорта GigaAM")
         sys.modules["pyannote"] = types.ModuleType("pyannote")
 
 

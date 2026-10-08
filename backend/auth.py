@@ -12,7 +12,6 @@ COOKIE_NAME = "mom_admin"
 USER_COOKIE = "mom_user"
 SESSION_SECONDS = 12 * 60 * 60
 _DUMMY_HASH: str | None = None
-_hits: dict[str, list[float]] = {}
 
 
 def hash_password(password: str) -> str:
@@ -59,16 +58,11 @@ def tokens_match(got: str, expected: str) -> bool:
 
 
 def rate_allow(key: str) -> bool:
-    now = time.time()
-    window = float(config.LOGIN_WINDOW_SECONDS)
-    limit = int(config.LOGIN_MAX_ATTEMPTS)
-    recent = [stamp for stamp in _hits.get(key, []) if now - stamp < window]
-    if len(recent) >= limit:
-        _hits[key] = recent
-        return False
-    recent.append(now)
-    _hits[key] = recent
-    return True
+    return store.rate_allow(
+        key,
+        window=float(config.LOGIN_WINDOW_SECONDS),
+        limit=int(config.LOGIN_MAX_ATTEMPTS),
+    )
 
 
 def check_credentials(username: str, password: str) -> bool:

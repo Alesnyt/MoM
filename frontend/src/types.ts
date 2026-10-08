@@ -6,6 +6,9 @@ export type MeetingStatus =
   | "done"
   | "error";
 
+export type Tab = "overview" | "actions" | "mom" | "transcript";
+export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "theme" | "users";
+
 export type ActionItem = {
   task: string;
   assignee: string | null;

@@ -60,7 +60,9 @@ PY
 
 if [[ "$port_busy" == "1" ]]; then
   if [[ "${MOM_KILL_PORT:-0}" == "1" ]]; then
-    if command -v fuser >/dev/null 2>&1; then
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v lsof >/dev/null 2>&1; then
+      lsof -tiTCP:"$PORT" -sTCP:LISTEN | xargs kill >/dev/null 2>&1 || true
+    elif command -v fuser >/dev/null 2>&1; then
       fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
     elif command -v lsof >/dev/null 2>&1; then
       lsof -tiTCP:"$PORT" -sTCP:LISTEN | xargs kill >/dev/null 2>&1 || true

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -15,9 +17,11 @@ from .analyze import (
     transcribe_file,
 )
 from . import config
-from .audio import extract_audio_async, split_audio_async
+from .audio import AudioError, extract_audio_async, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import notify_meeting_done
+
+log = logging.getLogger("mom.pipeline")
 
 
 class _Progress:
@@ -158,12 +162,13 @@ async def process_meeting(meeting_id: str) -> None:
             error=None,
             progress=100,
         )
-    except Exception as exc:  # noqa: BLE001 — surface any pipeline failure in UI
+    except Exception as exc:  # noqa: BLE001 — surface a short phrase; log the rest
+        log.exception("Встреча %s не обработана", meeting_id)
         store.update_meeting(
             meeting_id,
             status="error",
             status_message="Обработка не удалась",
-            error=str(exc),
+            error=public_error(exc),
         )
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting.get("status") == "done":
@@ -205,22 +210,41 @@ async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float
         )
 
     chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"
-    chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
-    merged = []
-    for index, chunk in enumerate(chunks):
-        base = 16 + int(index / max(1, len(chunks)) * 70)
-        progress.set(
-            base,
-            f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
-            status="transcribing",
-            force=True,
-        )
-        offset = index * chunk_seconds
-        if offset > duration:
-            offset = max(0.0, duration - chunk_seconds)
-        payload = await transcribe_file(client, chunk, asr_model)
-        merged.append((float(offset), payload))
-    return merge_transcripts(merged)
+    try:
+        chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
+        merged = []
+        for index, chunk in enumerate(chunks):
+            base = 16 + int(index / max(1, len(chunks)) * 70)
+            progress.set(
+                base,
+                f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
+                status="transcribing",
+                force=True,
+            )
+            offset = index * chunk_seconds
+            if offset > duration:
+                offset = max(0.0, duration - chunk_seconds)
+            payload = await transcribe_file(client, chunk, asr_model)
+            merged.append((float(offset), payload))
+        return merge_transcripts(merged)
+    finally:
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+
+
+def public_error(exc: BaseException) -> str:
+    if isinstance(exc, AudioError):
+        return str(exc) or "Не удалось обработать аудио"
+    text = str(exc)
+    lowered = text.lower()
+    if "пуст" in lowered or "empty" in lowered:
+        return "В записи нет распознанной речи"
+    if "401" in text or "403" in text or "authentication" in lowered or "api key" in lowered:
+        return "Провайдер отклонил запрос. Проверьте ключ в админке."
+    if "timeout" in lowered or "timed out" in lowered:
+        return "Сервер не ответил вовремя. Повторите обработку."
+    if "429" in text or "rate" in lowered:
+        return "Провайдер временно ограничил запросы. Повторите позже."
+    return "Обработка не удалась. Подробности в журнале сервера."
 
 
 def format_duration(seconds: float | None) -> str:

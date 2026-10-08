@@ -62,10 +62,6 @@ def make_client(
     return AsyncOpenAI(**kwargs)
 
 
-def _is_omni(model: str) -> bool:
-    return "omni" in (model or "").lower()
-
-
 def _is_asr(model: str) -> bool:
     name = (model or "").lower()
     return "asr" in name and "omni" not in name
