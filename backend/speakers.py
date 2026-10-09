@@ -1,11 +1,83 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+log = logging.getLogger("mom.speakers")
 
 
 class SpeakerError(ValueError):
     pass
+
+
+UNKNOWN_ID = "unknown"
+UNKNOWN_NAME = "Неясно"
+# A GigaAM chunk is 24s. Shorter ASR phrases stay whole.
+COARSE_SECONDS = 8.0
+MIN_SLICE_SECONDS = 0.45
+
+
+def plan_cuts(segment: dict[str, Any], turns: list[dict[str, Any]]) -> list[dict[str, float]] | None:
+    """Time slices of a long chunk that contains more than one voice.
+
+    Returns None when the chunk should stay one phrase: it is short, or only
+    one speaker occupies it.
+    """
+    start = float(segment.get("start") or 0)
+    end = float(segment.get("end") or start)
+    if end - start < COARSE_SECONDS:
+        return None
+    slices: list[dict[str, Any]] = []
+    for turn in turns:
+        if not turn.get("speaker"):
+            continue
+        left = max(start, float(turn.get("start") or 0))
+        right = min(end, float(turn.get("end") or 0))
+        if right - left < MIN_SLICE_SECONDS:
+            continue
+        slices.append({"start": left, "end": right, "speaker": str(turn["speaker"])})
+    slices.sort(key=lambda item: (item["start"], item["end"]))
+    merged: list[dict[str, Any]] = []
+    for item in slices:
+        if (
+            merged
+            and merged[-1]["speaker"] == item["speaker"]
+            and item["start"] - merged[-1]["end"] <= 0.3
+        ):
+            merged[-1]["end"] = max(merged[-1]["end"], item["end"])
+        else:
+            merged.append(dict(item))
+    voices = {item["speaker"] for item in merged}
+    if len(voices) < 2:
+        return None
+    return [{"start": item["start"], "end": item["end"]} for item in merged]
+
+
+def expand_coarse_segments(
+    segments: list[dict[str, Any]],
+    turns: list[dict[str, Any]],
+    transcribe,
+) -> list[dict[str, Any]]:
+    """Replace a long mixed chunk with one phrase per voice boundary."""
+    expanded: list[dict[str, Any]] = []
+    for segment in segments:
+        cuts = plan_cuts(segment, turns)
+        if not cuts:
+            expanded.append(segment)
+            continue
+        pieces: list[dict[str, Any]] = []
+        for cut in cuts:
+            try:
+                text = str(transcribe(cut["start"], cut["end"]) or "").strip()
+            except Exception:
+                log.exception("Не удалось распознать фрагмент %.2f–%.2f", cut["start"], cut["end"])
+                pieces = []
+                break
+            if text:
+                pieces.append({"start": cut["start"], "end": cut["end"], "text": text})
+        expanded.extend(pieces or [segment])
+    return expanded
 
 
 def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]]) -> dict[str, Any]:
@@ -21,15 +93,25 @@ def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]])
     fallback = speakers[0]["id"]
     assigned: list[dict[str, Any]] = []
     for segment in clean_segments:
-        best_id = fallback
-        best = 0.0
+        totals: dict[str, float] = {}
         for turn in clean_turns:
             overlap = _overlap(segment["start"], segment["end"], turn["start"], turn["end"])
-            if overlap > best:
-                best = overlap
-                best_id = turn["speaker"]
+            if overlap <= 0:
+                continue
+            totals[turn["speaker"]] = totals.get(turn["speaker"], 0.0) + overlap
+        ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
+        if not clean_turns:
+            best_id = fallback
+        elif not ranked or ranked[0][1] < MIN_SLICE_SECONDS:
+            best_id = UNKNOWN_ID
+        elif len(ranked) == 1 or ranked[1][1] < MIN_SLICE_SECONDS or ranked[0][1] >= ranked[1][1] * 1.8:
+            best_id = ranked[0][0]
+        else:
+            best_id = UNKNOWN_ID
         assigned.append({**segment, "speaker": best_id})
-    speakers.sort(key=lambda item: int(str(item["id"])[1:] or "0"))
+    if any(item["speaker"] == UNKNOWN_ID for item in assigned):
+        speakers.append({"id": UNKNOWN_ID, "name": UNKNOWN_NAME})
+    speakers.sort(key=_speaker_sort_key)
     return {"speakers": speakers, "segments": assigned, "note": None}
 
 
@@ -125,6 +207,13 @@ def _stable_labels(turns: list[dict[str, Any]]) -> dict[str, str]:
             labels[raw] = f"S{number}"
             number += 1
     return labels
+
+
+def _speaker_sort_key(item: dict[str, Any]) -> tuple[int, int | str]:
+    sid = str(item["id"])
+    if sid.startswith("S") and sid[1:].isdigit():
+        return (0, int(sid[1:]))
+    return (1, sid)
 
 
 def _unique(values: list[str]) -> list[str]:

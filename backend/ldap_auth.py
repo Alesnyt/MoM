@@ -30,6 +30,15 @@ def user_filter(username: str) -> str:
     return template.replace("{username}", escape_filter(username))
 
 
+def people_filter(query: str) -> str:
+    escaped = escape_filter(query.strip())
+    mail = (config.get_ldap_email_attr() or "mail").strip() or "mail"
+    clauses = [f"(cn=*{escaped}*)", f"(displayName=*{escaped}*)", f"({mail}=*{escaped}*)"]
+    if mail.lower() != "mail":
+        clauses.append(f"(mail=*{escaped}*)")
+    return "(|" + "".join(clauses) + ")"
+
+
 def authenticate(username: str, password: str) -> bool:
     if not password:
         return False
@@ -142,6 +151,60 @@ def _search(connection, username: str) -> list[tuple[str, str]]:
             mail = raw if isinstance(raw, str) else (raw[0] if raw else "")
         found.append((entry.entry_dn, str(mail or "")))
     return found
+
+
+def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
+    text = query.strip()
+    if len(text) < 2 or not config.ldap_configured():
+        return []
+    try:
+        connection, _server = _service_connection()
+    except LdapError:
+        raise
+    except Exception as exc:
+        log.exception("Нет связи с каталогом")
+        raise LdapError("Каталог недоступен") from exc
+    try:
+        from ldap3 import SUBTREE
+
+        mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
+        attributes = list({mail_attr, "mail", "cn", "displayName"})
+        ok = connection.search(
+            search_base=config.get_ldap_base_dn(),
+            search_filter=people_filter(text),
+            search_scope=SUBTREE,
+            attributes=attributes,
+            size_limit=max(1, min(int(limit), 30)),
+        )
+        if not ok and not connection.entries:
+            description = str((connection.result or {}).get("description") or "")
+            if description not in {"success", "sizeLimitExceeded", "noSuchObject"}:
+                log.warning("Поиск людей в каталоге не удался: %s", connection.result)
+                raise LdapError("Каталог недоступен")
+        people: list[dict[str, str]] = []
+        for entry in connection.entries:
+            mail = _entry_attr(entry, mail_attr) or _entry_attr(entry, "mail")
+            name = _entry_attr(entry, "displayName") or _entry_attr(entry, "cn") or mail
+            if not name:
+                continue
+            people.append({"name": name, "email": mail, "source": "ldap"})
+        return people
+    finally:
+        connection.unbind()
+
+
+def _entry_attr(entry: object, name: str) -> str:
+    try:
+        if name not in entry:
+            return ""
+        raw = entry[name].value
+    except Exception:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, (list, tuple)) and raw:
+        return str(raw[0]).strip()
+    return str(raw or "").strip()
 
 
 def _server():

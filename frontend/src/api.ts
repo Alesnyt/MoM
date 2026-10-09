@@ -307,6 +307,19 @@ export async function retryMeeting(id: string): Promise<Meeting> {
   return response.json();
 }
 
+export type Person = {
+  name: string;
+  email: string;
+  source: "mom" | "ldap";
+};
+
+export async function listPeople(query: string): Promise<Person[]> {
+  const response = await fetch(`/api/people?q=${encodeURIComponent(query)}`, { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  const data = await response.json();
+  return data.people ?? [];
+}
+
 export async function renameSpeaker(id: string, speakerId: string, name: string): Promise<Meeting> {
   const response = await fetch(`/api/meetings/${id}/speakers/${encodeURIComponent(speakerId)}`, {
     method: "PATCH",

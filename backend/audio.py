@@ -129,6 +129,33 @@ def extract_wav(src: Path, dst: Path) -> float:
     return duration_seconds(dst)
 
 
+def cut_wav(src: Path, dst: Path, start: float, end: float) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.0, end - start)
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-ss",
+            f"{max(0.0, start):.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(dst),
+        ]
+    )
+    if not dst.exists() or dst.stat().st_size == 0:
+        raise AudioError("Не удалось вырезать фрагмент по границе спикера")
+
+
 def split_wav(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     pattern = dest_dir / "chunk_%03d.wav"

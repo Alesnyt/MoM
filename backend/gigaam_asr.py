@@ -223,3 +223,18 @@ def transcribe_gigaam_sync(
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def transcribe_span(src: Path, start: float, end: float) -> str:
+    """Recognize one voice slice cut out of a longer GigaAM chunk."""
+    if end - start < 0.3:
+        return ""
+    from .audio import cut_wav
+
+    model = _load()
+    dst = src.parent / f"{src.stem}_{start:.2f}_{end:.2f}.wav"
+    try:
+        cut_wav(src, dst, start, end)
+        return _text_of(model.transcribe(str(dst)))
+    finally:
+        dst.unlink(missing_ok=True)

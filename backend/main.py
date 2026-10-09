@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, config, disk, keys, ldap_auth, store, worker
+from . import auth, config, disk, keys, ldap_auth, people, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -704,6 +704,11 @@ def delete_settings(_admin: dict = Depends(require_admin)) -> dict:
     keys.reset_status("Ключ удалён")
     store.record_audit(_actor_name(_admin), "key.delete", "llm", "ключ удалён")
     return _health(full=True)
+
+
+@app.get("/api/people")
+def list_people(q: str = "", _user: dict = Depends(require_user)) -> dict:
+    return people.suggest(q)
 
 
 @app.get("/api/meetings")

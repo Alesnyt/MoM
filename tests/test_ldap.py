@@ -7,6 +7,34 @@ def test_escape_filter_metacharacters() -> None:
     assert escape_filter("a*b(c)\\d") == "a\\2ab\\28c\\29\\5cd"
 
 
+def test_people_filter_escapes_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.ldap_auth import people_filter
+
+    monkeypatch.setattr(config, "LDAP_EMAIL_ATTR", "mail")
+    built = people_filter("a*b")
+    assert "a\\2ab" in built
+    assert "(cn=*a\\2ab*)" in built
+    assert "(displayName=*a\\2ab*)" in built
+
+
+def test_suggest_uses_local_users_without_ldap(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend import people
+
+    db = tmp_path / "mom.db"
+    monkeypatch.setattr(config, "DB_PATH", db)
+    monkeypatch.setattr(store, "DB_PATH", db)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "LDAP_ENABLED", False)
+    store.init_db()
+    store.create_user("anna@example.com", auth.hash_password("secret-pass"), 5)
+    store.create_user("boris@example.com", auth.hash_password("secret-pass"), 5)
+    found = people.suggest("ann")
+    assert found["ldap"] is False
+    assert [item["name"] for item in found["people"]] == ["anna@example.com"]
+    everyone = people.suggest("")
+    assert {item["email"] for item in everyone["people"]} == {"anna@example.com", "boris@example.com"}
+
+
 def test_user_filter_substitutes_escaped_login(monkeypatch) -> None:
     monkeypatch.setattr(config, "LDAP_USER_FILTER", "(mail={username})")
     assert user_filter("a*@example.com") == "(mail=a\\2a@example.com)"

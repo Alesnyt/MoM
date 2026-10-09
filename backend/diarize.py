@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from . import config
 from .audio import extract_wav
-from .speakers import assign_speakers, render_transcript
+from .speakers import assign_speakers, expand_coarse_segments, plan_cuts, render_transcript
 
 log = logging.getLogger("mom.diarize")
 
@@ -42,10 +42,28 @@ def apply_diarization(
         except Exception:
             log.exception("Разметка спикеров не удалась")
             note = "Не удалось разметить спикеров. Реплики собраны в одного, имя можно задать вручную."
+    if turns and config.is_gigaam_asr():
+        mixed = sum(1 for segment in segments if plan_cuts(segment, turns))
+        if mixed:
+            if on_progress:
+                on_progress("Режу реплики по голосам")
+            log.info("gigaam смешанных кусков %s, режу по границам голоса", mixed)
+            segments = expand_coarse_segments(
+                segments,
+                turns,
+                lambda start, end: _transcribe_voice_slice(audio_path, start, end),
+            )
     document = assign_speakers(segments, turns)
     document["note"] = note
     document["text"] = render_transcript(document)
     return document
+
+
+def _transcribe_voice_slice(audio_path: Path, start: float, end: float) -> str:
+    from .gigaam_asr import transcribe_span
+
+    log.info("gigaam граница голоса %.2f–%.2f", start, end)
+    return transcribe_span(audio_path, start, end)
 
 
 def _unavailable_reason() -> str | None:

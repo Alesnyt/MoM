@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { assignSpeaker, renameSpeaker } from "./api";
+import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
 import type { Meeting, TranscriptSegment } from "./types";
 
@@ -47,6 +47,8 @@ export function TranscriptView({
   const speakers = meeting.speakers || [];
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [origin, setOrigin] = useState("");
+  const [people, setPeople] = useState<Person[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,6 +58,17 @@ export function TranscriptView({
     setEditing(null);
     setError(null);
   }, [meeting.id]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const query = draft.trim() === origin.trim() ? "" : draft.trim();
+    const handle = window.setTimeout(() => {
+      listPeople(query.length >= 2 ? query : "")
+        .then(setPeople)
+        .catch(() => setPeople([]));
+    }, query.length >= 2 ? 250 : 0);
+    return () => window.clearTimeout(handle);
+  }, [editing, draft, origin]);
 
   if (!segments.length) {
     return (
@@ -100,7 +113,7 @@ export function TranscriptView({
   return (
     <div className="turns">
       <p className="progress-hint">
-        Имя меняется у всех реплик этого человека и в протоколе. Если реплика чужая — выберите другого спикера.
+        Имя можно выбрать из пользователей или вписать гостя. Оно меняется у всех реплик этого человека и в протоколе. Если реплика чужая — выберите другого спикера.
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
       {error && <div className="banner" role="alert">{error}</div>}
@@ -122,12 +135,22 @@ export function TranscriptView({
                     autoFocus
                     disabled={busy}
                     aria-label="Имя спикера"
+                    placeholder="Имя пользователя или гость"
+                    list={`people-${turn.speaker}`}
                     onChange={(event) => setDraft(event.target.value)}
                     onBlur={() => {
                       if (draft.trim() && draft.trim() !== name) void saveName(turn.speaker);
                       else setEditing(null);
                     }}
                   />
+                  <datalist id={`people-${turn.speaker}`}>
+                    {people.map((person) => (
+                      <option key={`${person.source}-${person.email || person.name}`} value={person.name}>
+                        {person.email && person.email !== person.name ? person.email : person.name}
+                      </option>
+                    ))}
+                  </datalist>
+                  <span className="speaker-hint">Можно выбрать пользователя или вписать гостя</span>
                 </form>
               ) : (
                 <button
@@ -136,6 +159,7 @@ export function TranscriptView({
                   disabled={busy}
                   onClick={() => {
                     setEditing(turn.speaker);
+                    setOrigin(name);
                     setDraft(name);
                   }}
                 >
