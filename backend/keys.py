@@ -43,8 +43,20 @@ def mask_api_key(key: str) -> str | None:
 
 def public_snapshot() -> dict[str, Any]:
     data = snapshot()
+    message = data.get("message") or ""
+    model_unavailable = "модел" in message.lower()
+    data["model_unavailable"] = model_unavailable
     data["hint"] = None
     data["base_url"] = None
+    data["chat_model"] = None
+    data["asr_model"] = None
+    data["denied_models"] = []
+    if model_unavailable:
+        data["message"] = "Выбранная модель недоступна этому ключу"
+    elif data.get("auth_rejected"):
+        data["message"] = "Ключ не принят"
+    elif data.get("configured") and not data.get("connected"):
+        data["message"] = "Нет связи с провайдером"
     return data
 
 

@@ -3,9 +3,11 @@ import {
   createUser,
   deleteApiKey,
   getSettings,
+  listAudit,
   listUsers,
   loginAdmin,
   logoutAdmin,
+  deleteUser,
   resetUserPassword,
   saveApiKey,
   saveModels,
@@ -21,8 +23,8 @@ import {
   verifyApiKey,
 } from "./api";
 import { encodeAsrModel, formatAsrLabel, parseAsrModel, WHISPER_SIZES, type AsrEngine } from "./asr";
-import { connectionClass, connectionLabel, formatDate } from "./format";
-import type { AdminTab, AuthStatus, Health, PlatformUser } from "./types";
+import { connectionClass, connectionLabel, formatBytes, formatDate } from "./format";
+import type { AdminTab, AuditEvent, AuthStatus, Health, PlatformUser } from "./types";
 
 export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "llm", label: "LLM" },
@@ -32,6 +34,7 @@ export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "ldap", label: "Каталог" },
   { id: "theme", label: "Вид" },
   { id: "users", label: "Пользователи" },
+  { id: "audit", label: "Журнал" },
 ];
 
 export function AdminSection({
@@ -164,6 +167,7 @@ export function AdminSection({
           onClick={() => {
             void logoutAdmin()
               .then((next) => {
+                setUsername("");
                 setPassword("");
                 onAuth(next);
               })
@@ -195,11 +199,25 @@ export function AdminSection({
         <span className={`status-pill ${health?.ldap?.configured ? "ok" : ""}`}>
           {health?.ldap?.configured ? "LDAP вкл." : "LDAP выкл."}
         </span>
+        {health?.disk && (
+          <span className={`status-pill ${health.disk.ok ? "" : "bad"}`}>
+            {typeof health.disk.free_bytes === "number"
+              ? `Диск ${formatBytes(health.disk.free_bytes)} свободно`
+              : health.disk.ok
+                ? "Диск в порядке"
+                : "Мало места на диске"}
+            {typeof health.disk.recordings_bytes === "number" && health.disk.recordings_bytes > 0
+              ? ` · записи ${formatBytes(health.disk.recordings_bytes)}`
+              : ""}
+          </span>
+        )}
       </div>
       {tab === "users" ? (
         <UsersPanel />
       ) : tab === "ldap" ? (
         <LdapPanel health={health} onChange={onHealth} />
+      ) : tab === "audit" ? (
+        <AuditPanel />
       ) : (
         <SettingsPanel topic={tab} health={health} onChange={onHealth} />
       )}
@@ -239,6 +257,18 @@ function UsersPanel() {
       setError(err instanceof Error ? err.message : "Не удалось создать пользователя");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onDelete(id: string, userEmail: string) {
+    if (!window.confirm(`Удалить ${userEmail} и встречи этого профиля?`)) return;
+    setError(null);
+    try {
+      await deleteUser(id);
+      if (secret?.email === userEmail) setSecret(null);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить пользователя");
     }
   }
 
@@ -387,6 +417,14 @@ function UsersPanel() {
                   Сбросить пароль
                 </button>
               )}
+              <button
+                className="ghost"
+                type="button"
+                aria-label={`Удалить ${item.email}`}
+                onClick={() => void onDelete(item.id, item.email)}
+              >
+                Удалить
+              </button>
             </div>
           ))
         )}
@@ -606,10 +644,90 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
       lead: "Тема интерфейса по умолчанию для всех пользователей.",
     };
   }
+  if (tab === "audit") {
+    return {
+      title: "Журнал",
+      lead: "Входы, пользователи, ключ, каталог, удаление встреч, спикеры и отправка протокола.",
+    };
+  }
   return {
     title: "Пользователи",
     lead: "Профиль заводится вручную. Локальный вход получает сгенерированный пароль, LDAP берёт пароль из каталога.",
   };
+}
+
+const AUDIT_LABELS: Record<string, string> = {
+  "user.create": "Создан пользователь",
+  "user.delete": "Удалён пользователь",
+  "user.auth": "Сменён способ входа",
+  "user.password": "Сброшен пароль",
+  "user.limit": "Изменён архив",
+  "ldap.save": "Изменён каталог",
+  "meeting.delete": "Удалена встреча",
+  "speaker.rename": "Переименован спикер",
+  "speaker.reassign": "Реплики перенесены",
+  "email.send": "Протокол отправлен",
+  "email.open": "Открыт черновик письма",
+  "email.fail": "Письмо не ушло",
+  "admin.setup": "Создан администратор",
+  "admin.login": "Вход администратора",
+  "admin.login.fail": "Неудачный вход администратора",
+  "user.login": "Вход пользователя",
+  "user.login.fail": "Неудачный вход",
+  "key.save": "Сохранён ключ",
+  "key.delete": "Ключ удалён",
+  "models.save": "Сменены модели",
+  "smtp.save": "Изменена почта",
+};
+
+function AuditPanel() {
+  const [events, setEvents] = useState<AuditEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function load() {
+    setError(null);
+    listAudit()
+      .then(setEvents)
+      .catch((err: Error) => {
+        setEvents([]);
+        setError(err.message);
+      });
+  }
+
+  useEffect(load, []);
+
+  return (
+    <div className="audit-panel">
+      <div className="actions-row">
+        <button className="ghost" type="button" onClick={load}>
+          Обновить
+        </button>
+      </div>
+      {error && <div className="banner" role="alert">{error}</div>}
+      {events === null ? (
+        <p>Загружаю журнал…</p>
+      ) : events.length === 0 ? (
+        <p>Пока пусто. Здесь появятся создание пользователей, смена каталога, удаление встреч, правка спикеров и отправка почты.</p>
+      ) : (
+        <div className="audit-list">
+          {events.map((event) => (
+            <article className="audit-row" key={event.id}>
+              <time dateTime={event.at}>{formatDate(event.at)}</time>
+              <div>
+                <strong>{AUDIT_LABELS[event.action] || event.action}</strong>
+                <span>{event.actor}</span>
+                {(event.detail || event.target) && (
+                  <small>
+                    {[event.detail, event.target].filter(Boolean).join(" · ")}
+                  </small>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 
@@ -618,7 +736,7 @@ function SettingsPanel({
   health,
   onChange,
 }: {
-  topic: Exclude<AdminTab, "users" | "ldap">;
+  topic: Exclude<AdminTab, "users" | "ldap" | "audit">;
   health: Health | null;
   onChange: (health: Health) => void;
 }) {
@@ -855,8 +973,7 @@ function SettingsPanel({
                   </select>
                 </label>
                 <p>
-                  Пакеты ставятся с проектом (`install.sh` / `update.sh`). Модель скачается с Hugging Face при первой
-                  расшифровке.
+                  Пакеты и код модели уже в приложении. При первой расшифровке с Hugging Face скачиваются только веса.
                 </p>
               </>
             )}

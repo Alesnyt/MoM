@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import shutil
 import sqlite3
 import threading
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, config, keys, ldap_auth, store, worker
+from . import auth, config, disk, keys, ldap_auth, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -246,6 +247,32 @@ def _check_ldap_settings(payload: LdapIn) -> None:
             raise HTTPException(status_code=400, detail="В фильтре должен быть плейсхолдер {username}")
 
 
+def _actor_name(session: dict) -> str:
+    return (session.get("username") or session.get("email") or "система").strip() or "система"
+
+
+def _note_purged(actor: str, removed: list[dict]) -> None:
+    for item in removed:
+        meeting_id = item.get("id") or ""
+        if not meeting_id:
+            continue
+        store.record_audit(
+            actor,
+            "meeting.delete",
+            meeting_id,
+            f"{item.get('title') or 'встреча'} · вытеснено из архива",
+        )
+        _purge_files(meeting_id)
+
+
+_EMAIL_OPENED = {
+    "saved": "черновик сохранён",
+    "opened-outlook": "открыт в Outlook",
+    "opened-mail": "открыт в Почте",
+    "opened": "открыт файл письма",
+}
+
+
 def _normalize_auth_mode(value: str) -> str:
     mode = (value or "local").strip().lower()
     if mode not in {"local", "ldap"}:
@@ -256,6 +283,9 @@ def _normalize_auth_mode(value: str) -> str:
 
 
 def _health(*, full: bool = False) -> dict:
+    disk_status = disk.snapshot()
+    if not full:
+        disk_status = {"ok": disk_status["ok"]}
     return {
         "ok": True,
         "ffmpeg": ffmpeg_available(),
@@ -265,6 +295,7 @@ def _health(*, full: bool = False) -> dict:
         "queue": store.queue_stats(),
         "smtp": smtp_snapshot(full=full),
         "ldap": ldap_snapshot(full=full),
+        "disk": disk_status,
     }
 
 @asynccontextmanager
@@ -347,6 +378,7 @@ def auth_setup(payload: LoginIn, request: Request, response: Response) -> dict:
             raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
         config.set_admin_credentials(username, auth.hash_password(password))
         token = auth.create_session(username)
+        store.record_audit(username, "admin.setup", username, "создана учётная запись администратора")
     response.set_cookie(auth.COOKIE_NAME, token, **_cookie_kw(request))
     return {"configured": True, "authenticated": True, "username": username, "setup_token_required": False}
 
@@ -358,8 +390,10 @@ def auth_login(payload: LoginIn, request: Request, response: Response) -> dict:
         raise HTTPException(status_code=400, detail="Сначала создайте учётную запись администратора")
     username = payload.username.strip()
     if not auth.check_credentials(username, payload.password):
+        store.record_audit(username or "администратор", "admin.login.fail", username, "неверный логин или пароль")
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     token = auth.create_session(username)
+    store.record_audit(username, "admin.login", username, "вход в админку")
     response.set_cookie(auth.COOKIE_NAME, token, **_cookie_kw(request))
     return {"configured": True, "authenticated": True, "username": username, "setup_token_required": False}
 
@@ -401,8 +435,10 @@ def user_login(payload: UserLoginIn, request: Request, response: Response) -> di
     except ldap_auth.LdapError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not record:
+        store.record_audit(email or "пользователь", "user.login.fail", email, "неверный email или пароль")
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
     token = auth.create_user_session(record["id"], record["email"])
+    store.record_audit(record["email"], "user.login", record["email"], "вход в профиль")
     response.set_cookie(auth.USER_COOKIE, token, **_cookie_kw(request))
     user = store.get_user(record["id"])
     return {
@@ -425,6 +461,11 @@ def user_logout(
     return {"authenticated": False, "email": None, "archive_limit": None}
 
 
+@app.get("/api/admin/audit")
+def admin_audit(limit: int = 200, _admin: dict = Depends(require_admin)) -> list[dict]:
+    return store.list_audit(limit)
+
+
 @app.get("/api/admin/users")
 def admin_list_users(_admin: dict = Depends(require_admin)) -> list[dict]:
     return store.list_users()
@@ -444,6 +485,12 @@ def admin_create_user(payload: UserCreateIn, _admin: dict = Depends(require_admi
         user = store.create_user(email, password_hash, payload.archive_limit, mode)
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail="Пользователь с таким email уже есть")
+    store.record_audit(
+        _actor_name(_admin),
+        "user.create",
+        email,
+        f"вход {mode}, архив {payload.archive_limit}",
+    )
     return {"user": user, "password": password}
 
 
@@ -458,8 +505,16 @@ def admin_update_user(
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     fields: dict = {}
     generated = None
+    actor = _actor_name(_admin)
     if payload.archive_limit is not None:
         fields["archive_limit"] = payload.archive_limit
+        if payload.archive_limit != current.get("archive_limit"):
+            store.record_audit(
+                actor,
+                "user.limit",
+                current["email"],
+                f"архив {current.get('archive_limit')} → {payload.archive_limit}",
+            )
     if payload.auth_mode is not None:
         mode = _normalize_auth_mode(payload.auth_mode)
         fields["auth_mode"] = mode
@@ -470,12 +525,16 @@ def admin_update_user(
             fields["password_hash"] = auth.hash_password(generated)
         if mode != current.get("auth_mode"):
             auth.drop_user_sessions_for(user_id)
+            store.record_audit(
+                actor,
+                "user.auth",
+                current["email"],
+                f"{current.get('auth_mode') or 'local'} → {mode}",
+            )
     if fields:
         store.update_user(user_id, **fields)
     if payload.archive_limit is not None:
-        removed = store.prune_user_meetings(user_id)
-        for meeting_id in removed:
-            _purge_files(meeting_id)
+        _note_purged(actor, store.prune_user_meetings(user_id))
     user = store.get_user(user_id)
     if generated:
         return {"user": user, "password": generated}
@@ -492,7 +551,33 @@ def admin_reset_password(user_id: str, _admin: dict = Depends(require_admin)) ->
     password = auth.generate_password()
     store.update_user(user_id, password_hash=auth.hash_password(password))
     auth.drop_user_sessions_for(user_id)
+    store.record_audit(_actor_name(_admin), "user.password", user["email"], "выдан новый локальный пароль")
     return {"password": password}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: str, _admin: dict = Depends(require_admin)) -> dict:
+    user = store.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    try:
+        removed = store.delete_user(user_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя удалить профиль, пока его встреча обрабатывается",
+        ) from exc
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    for meeting_id in removed:
+        _purge_files(meeting_id)
+    store.record_audit(
+        _actor_name(_admin),
+        "user.delete",
+        user["email"],
+        f"встреч {len(removed)}",
+    )
+    return {"ok": True}
 
 
 @app.get("/api/settings")
@@ -506,6 +591,7 @@ async def save_settings(payload: SettingsIn, _admin: dict = Depends(require_admi
     if " " in key or len(key) < 20:
         raise HTTPException(status_code=400, detail="Похоже, это не API-ключ")
     config.set_openai_api_key(key)
+    store.record_audit(_actor_name(_admin), "key.save", "llm", "ключ сохранён")
     await keys.verify_key(key)
     return _health(full=True)
 
@@ -517,6 +603,7 @@ def save_models(payload: ModelsIn, _admin: dict = Depends(require_admin)) -> dic
     if not chat or not asr:
         raise HTTPException(status_code=400, detail="Укажите модели чата и расшифровки")
     config.apply_connection(config.get_base_url(), chat, asr)
+    store.record_audit(_actor_name(_admin), "models.save", "llm", f"чат {chat}, расшифровка {asr}")
     return _health(full=True)
 
 
@@ -540,6 +627,14 @@ def save_smtp(payload: SmtpIn, _admin: dict = Depends(require_admin)) -> dict:
         starttls=payload.starttls,
     )
     config.set_public_base_url(payload.public_url)
+    host = payload.host.strip()
+    sender = payload.from_addr.strip()
+    store.record_audit(
+        _actor_name(_admin),
+        "smtp.save",
+        "smtp",
+        ", ".join(part for part in (host, sender) if part) or "настройки почты",
+    )
     return _health(full=True)
 
 
@@ -557,6 +652,12 @@ def save_ldap(payload: LdapIn, _admin: dict = Depends(require_admin)) -> dict:
         tls_verify=payload.tls_verify,
         email_attr=payload.email_attr,
     )
+    state = "включён" if payload.enabled else "выключен"
+    bits = [state, payload.url.strip()]
+    base = payload.base_dn.strip()
+    if base:
+        bits.append(f"база {base}")
+    store.record_audit(_actor_name(_admin), "ldap.save", "ldap", ", ".join(bit for bit in bits if bit))
     return _health(full=True)
 
 
@@ -601,6 +702,7 @@ async def verify_settings(_admin: dict = Depends(require_admin)) -> dict:
 def delete_settings(_admin: dict = Depends(require_admin)) -> dict:
     config.clear_openai_api_key()
     keys.reset_status("Ключ удалён")
+    store.record_audit(_actor_name(_admin), "key.delete", "llm", "ключ удалён")
     return _health(full=True)
 
 
@@ -615,7 +717,15 @@ def get_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
 
 
 @app.post("/api/meetings")
+def _disk_or_507(extra: int = 0) -> None:
+    try:
+        disk.ensure_space(extra)
+    except disk.DiskError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+
+
 async def create_meeting(
+    request: Request,
     file: UploadFile = File(...),
     title: str | None = Form(None),
     user: dict = Depends(require_user),
@@ -641,6 +751,11 @@ async def create_meeting(
     dest = UPLOAD_DIR / f"{meeting_id}{suffix}"
     size = 0
     limit = config.MAX_UPLOAD_BYTES
+    declared = 0
+    raw_length = request.headers.get("content-length") or ""
+    if raw_length.isdigit():
+        declared = int(raw_length)
+    _disk_or_507(declared)
     try:
         with dest.open("wb") as out:
             while True:
@@ -653,9 +768,16 @@ async def create_meeting(
                         status_code=413,
                         detail=f"Файл больше {limit // (1024 * 1024)} МБ",
                     )
+                if size % (8 * 1024 * 1024) < len(chunk):
+                    _disk_or_507()
                 out.write(chunk)
     except HTTPException:
         dest.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            raise HTTPException(status_code=507, detail="Диск заполнился во время загрузки") from exc
         raise
     if size == 0:
         dest.unlink(missing_ok=True)
@@ -669,8 +791,7 @@ async def create_meeting(
 
     display_title = (title or "").strip() or Path(original).stem
     meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"])
-    for extra_id in store.prune_user_meetings(user["user_id"]):
-        _purge_files(extra_id)
+    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"]))
     worker.notify_work()
     return meeting
 
@@ -722,6 +843,7 @@ def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
     if not store.delete_meeting(meeting_id):
         raise HTTPException(status_code=404, detail="Встреча не найдена")
     _purge_files(meeting_id)
+    store.record_audit(_actor_name(user), "meeting.delete", meeting_id, meeting.get("title") or "")
     return {"ok": True}
 
 
@@ -784,13 +906,16 @@ def rename_meeting_speaker(
         updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name)
     except SpeakerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _save_segments(
+    saved = _save_segments(
         meeting_id,
         updated,
         meeting.get("result"),
         replace_from=old_name,
         replace_to=new_name,
     )
+    if old_name != new_name:
+        store.record_audit(_actor_name(user), "speaker.rename", meeting_id, f"{old_name} → {new_name}")
+    return saved
 
 
 @app.patch("/api/meetings/{meeting_id}/segments")
@@ -805,7 +930,22 @@ def reassign_meeting_segments(
         updated = reassign_segments(document, payload.segment_indexes, payload.speaker_id)
     except SpeakerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    old_ids = {item["id"] for item in document.get("speakers") or []}
+    if payload.speaker_id == "new":
+        created = next((item for item in updated.get("speakers") or [] if item.get("id") not in old_ids), None)
+        label = (created or {}).get("name") or "новый спикер"
+    else:
+        label = next(
+            (item.get("name") for item in updated.get("speakers") or [] if item.get("id") == payload.speaker_id),
+            payload.speaker_id,
+        )
     _save_segments(meeting_id, updated, None)
+    store.record_audit(
+        _actor_name(user),
+        "speaker.reassign",
+        meeting_id,
+        f"{len(payload.segment_indexes)} реплик → {label}",
+    )
     return _queue_protocol(meeting_id, "Обновляю протокол после правки спикеров")
 
 
@@ -830,7 +970,14 @@ def send_meeting_email(meeting_id: str, user: dict = Depends(require_user)) -> d
     meeting = _owned(store.get_meeting(meeting_id), user)
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
-    return open_or_save_eml(meeting)
+    opened = open_or_save_eml(meeting)
+    store.record_audit(
+        _actor_name(user),
+        "email.open",
+        meeting_id,
+        _EMAIL_OPENED.get(opened.get("mode") or "", "черновик сохранён"),
+    )
+    return opened
 
 
 def to_markdown(meeting: dict) -> str:

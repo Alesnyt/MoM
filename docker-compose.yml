@@ -1,5 +1,6 @@
 services:
   mom:
+    image: ghcr.io/alesnyt/mom:latest
     build: .
     ports:
       - "${PORT:-8000}:8000"
@@ -7,5 +8,6 @@ services:
     # и Compose иначе подставит его как переменную.
     volumes:
       - ./data:/app/data
+      - ./backups:/app/backups
       - ./.env:/app/.env
     restart: unless-stopped

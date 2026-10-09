@@ -1,0 +1,5 @@
+modeling_gigaam.py взят без правок из
+https://huggingface.co/ai-sage/GigaAM-Multilingual
+коммит 2f8a57144e6ec3adfd32fe0484d9ea9913305bc8 (тот же файл на large_ctc).
+Карточка модели указывает лицензию MIT.
+SHA-256: 6d02e640fbb5738ab11c030520a68654ef32f4ff363723db10534cf8b5d5c0e7

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
 
 from . import config
+
+log = logging.getLogger("mom.llm")
 
 _local_asr_lock = asyncio.Lock()
 
@@ -167,6 +170,7 @@ async def transcribe_file(
     duration: float | None = None,
     on_progress: Any = None,
 ) -> dict[str, Any]:
+    log.info("asr model=%s file=%s", model, path.name)
     if config.is_gigaam_asr(model) or config.is_whisper_asr(model) or config.is_local_asr(model):
         return await _transcribe_local(path, model, language, duration, on_progress)
 
@@ -334,12 +338,14 @@ def format_transcript(payload: dict[str, Any]) -> str:
 
 
 async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: str | None) -> dict[str, Any]:
+    model = config.get_chat_model()
+    log.info("llm model=%s символов %s", model, len(transcript))
     user = "Транскрипт встречи:\n\n" + transcript
     if title_hint:
         user = f"Предложенный заголовок (можно уточнить): {title_hint}\n\n" + user
     try:
         response = await client.chat.completions.create(
-            model=config.get_chat_model(),
+            model=model,
             temperature=0.2,
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
@@ -349,8 +355,9 @@ async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: s
             ],
         )
     except Exception:
+        log.warning("llm model=%s без json_object, повтор запроса", model)
         response = await client.chat.completions.create(
-            model=config.get_chat_model(),
+            model=model,
             temperature=0.2,
             extra_body={"enable_thinking": False},
             messages=[

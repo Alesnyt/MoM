@@ -11,11 +11,14 @@ FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        adduser \
         ffmpeg \
         ca-certificates \
         libgomp1 \
         libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
+        util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && adduser --disabled-password --gecos "" --uid 1000 mom
 
 WORKDIR /app
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 from pathlib import Path
 from typing import Any, Callable
 
 from . import config
+
+log = logging.getLogger("mom.asr")
 
 ProgressFn = Callable[[int, str], None]
 
@@ -69,6 +72,7 @@ def transcribe_local_sync(
     duration: float | None = None,
     on_progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
+    log.info("whisper size=%s file=%s", config.local_whisper_size(), path.name)
     model = _load(on_progress)
     if on_progress:
         on_progress(1, "Whisper готов, начинаю распознавание")
@@ -94,6 +98,7 @@ def transcribe_local_sync(
                 on_progress(pct, f"Whisper: {_clock(end)} из {_clock(total)} · {pct}%")
     if on_progress:
         on_progress(100, "Расшифровка завершена")
+    log.info("whisper готово file=%s segments=%s", path.name, len(timed))
     return {
         "language": getattr(info, "language", None) or language,
         "text": " ".join(texts).strip(),

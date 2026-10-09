@@ -340,7 +340,7 @@ button {
   display: flex;
   gap: 10px;
   align-items: flex-start;
-  margin-top: auto;
+  margin-top: 12px;
   padding: 12px 0 0;
   border: 0;
   border-top: 1px solid var(--line);
@@ -365,9 +365,8 @@ button {
 
 .conn small {
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .conn-dot {
@@ -436,6 +435,46 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.audit-panel .actions-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.audit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  gap: 8px 16px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.audit-row time {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.audit-row div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.audit-row span,
+.audit-row small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .user-row {
@@ -958,6 +997,10 @@ select.title-input {
   }
 
   .choice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-row {
     grid-template-columns: 1fr;
   }
 }

@@ -1,20 +1,21 @@
 
 import { useState } from "react";
 import { loginUser } from "./api";
-import type { UserSession } from "./types";
+import { uploadBlockedReason } from "./format";
+import type { OpenAIStatus, UserSession } from "./types";
 
 export const ACCEPT = ".webm,.mp4,.mp3,.wav,.m4a,.ogg,audio/webm,video/webm";
 
 export function Composer({
   busy,
-  keyReady,
+  keyStatus,
   queue,
   mailReady,
   onOpenSettings,
   onUpload,
 }: {
   busy: boolean;
-  keyReady: boolean;
+  keyStatus: OpenAIStatus | null;
   queue?: { active: number; waiting: number; limit: number };
   mailReady: boolean;
   onOpenSettings: () => void;
@@ -31,6 +32,8 @@ export function Composer({
   }
 
   const queued = (queue?.active || 0) + (queue?.waiting || 0);
+  const blocked = uploadBlockedReason(keyStatus);
+  const keyReady = keyStatus?.connected === true;
 
   return (
     <section className="composer">
@@ -48,9 +51,9 @@ export function Composer({
           {(queue?.waiting ?? 0) > 0 ? `, в очереди ${queue?.waiting}` : ""}.
         </p>
       )}
-      {!keyReady && (
+      {blocked && (
         <div className="key-box">
-          <p>Ключ ещё не подключён. Без рабочего ключа запись обработать нельзя.</p>
+          <p>{blocked}</p>
           <button className="primary" type="button" onClick={onOpenSettings}>
             Открыть администрирование
           </button>

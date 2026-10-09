@@ -67,7 +67,9 @@ docker compose up -d
 docker compose logs mom
 ```
 
-Откройте `http://<IP>:8000`. Каталог `data/` и файл `.env` переживают пересборку контейнера. Whisper `small` скачается в `data/whisper/` при первой расшифровке, не при сборке образа. Обновление образа: `git pull && docker compose up -d --build`.
+Откройте `http://<IP>:8000`. Каталог `data/` и файл `.env` переживают пересборку контейнера. Сервер внутри контейнера работает от пользователя `mom`, не от root. Whisper `small` скачается в `data/whisper/` при первой расшифровке, не при сборке образа.
+
+Образ публикуется в GHCR по тегу `v*`: `ghcr.io/alesnyt/mom:latest`. Обновление из реестра: `docker compose pull && docker compose up -d`. Сборка на месте: `git pull && docker compose up -d --build`.
 
 ### Контур, где наружу ходит только GitHub
 
@@ -84,7 +86,7 @@ docker save "$(docker compose images -q mom)" -o mom-image.tar
 tar czf mom-models.tgz data/whisper data/hf
 ```
 
-Если в админке выбран GigaAM, на той же машине заранее скачайте его в `data/hf` (`ai-sage/GigaAM-Multilingual`, ревизия `ctc` или `large_ctc`). Иначе первая расшифровка снова пойдёт на Hugging Face.
+Если в админке выбран GigaAM, на той же машине заранее скачайте веса в `data/hf`. Код модели уже в репозитории, с Hugging Face берутся только `config.json` и `pytorch_model.bin` зафиксированных коммитов `ctc` и `large_ctc`. Иначе первая расшифровка снова пойдёт за весами.
 
 В контуре:
 
@@ -121,6 +123,7 @@ mom.example.com {
 | `WHISPER_MODEL` | `local-whisper` / `local-whisper-medium` или `gigaam-multilingual` / `gigaam-multilingual-large` |
 | `LOCAL_WHISPER_SIZE` | `tiny` / `base` / `small` (по умолчанию) / `medium` / `large-v2` / `large-v3` |
 | `MAX_UPLOAD_MB` | Лимит загрузки, по умолчанию 512 |
+| `MIN_FREE_MB` | Не принимать запись, если свободно меньше этого запаса. По умолчанию `2048` |
 | `UI_THEME` | Тема интерфейса: `classic` (по умолчанию) или `t2` |
 | `MAX_JOBS` | Сколько встреч обрабатывать сразу: `1`–`8`, по умолчанию `1`. ffmpeg и Qwen идут параллельно; локальный Whisper/GigaAM в RAM один |
 | `SMTP_HOST` | SMTP-сервер для писем «протокол готов» на email пользователя |
@@ -190,10 +193,21 @@ chmod +x update.sh
 
 ## Данные
 
-Локально в `data/`: SQLite (пользователи, протоколы, сессии), загрузки, аудио, кэш Whisper и Hugging Face (GigaAM). Каталог и `.env` в git не попадают и при `./update.sh` не удаляются.
+Локально в `data/`: SQLite (пользователи, протоколы, сессии), загрузки, аудио, кэш Whisper и Hugging Face (веса GigaAM). Каталог и `.env` в git не попадают и при `./update.sh` не удаляются.
+
+Снимок базы и записей, без кэша моделей:
+
+```bash
+.venv/bin/python -m backend.backup
+.venv/bin/python -m backend.backup --check backups/20261009T120000Z
+```
+
+В контейнере то же самое: `docker compose exec mom python -m backend.backup`. Каталог `./backups` смонтирован в контейнер. Команда пишет согласованную копию SQLite через `backup()`, плюс `uploads/`, `audio/` и `exports/`. Каталог снимка закрыт от остальных пользователей машины. Сразу после записи она открывает снимок только на чтение и проверяет `integrity_check`. Живую базу копировать через `cp` не нужно: у SQLite включён WAL.
+
+В админке на сводке видно, сколько свободно на диске и сколько занимают записи. Если свободно меньше `MIN_FREE_MB` (по умолчанию 2 ГБ), новая загрузка не принимается.
 
 ## Сбер GigaAM Multilingual
 
 По умолчанию стоит Whisper `small`. В админке можно выбрать **Whisper** (и размер) или **Сбер GigaAM Multilingual** 220M / 600M.
 
-PyTorch и остальные пакеты GigaAM ставятся автоматически при `./install.sh` и `./update.sh`. Сама модель качается с Hugging Face при первой расшифровке в `data/hf/`. Длинные записи режутся на фрагменты по 24 с. На 4 ГБ RAM берите Whisper `tiny`/`small`, не GigaAM 600M.
+PyTorch и остальные пакеты GigaAM ставятся автоматически при `./install.sh` и `./update.sh`. Код модели лежит в репозитории (`backend/vendor/gigaam/modeling_gigaam.py`) и сверяется по SHA-256 перед импортом, поэтому процесс не исполняет скрипт, скачанный с Hugging Face. Веса по-прежнему качаются в `data/hf/` с зафиксированных коммитов, и размер файла сверяется. Длинные записи режутся на фрагменты по 24 с. На 4 ГБ RAM берите Whisper `tiny`/`small`, не GigaAM 600M.

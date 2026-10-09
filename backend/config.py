@@ -44,6 +44,7 @@ def _bool_env(name: str, default: bool) -> bool:
 HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
 PORT = _int_env("PORT", 8000)
 MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 512) * 1024 * 1024)
+MIN_FREE_BYTES = max(0, _int_env("MIN_FREE_MB", 2048)) * 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
 MAX_JOBS_LIMIT = 8
 MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, _int_env("MAX_JOBS", 1)))
@@ -97,6 +98,22 @@ GIGAAM_MODEL = "gigaam-multilingual"
 GIGAAM_LARGE_MODEL = "gigaam-multilingual-large"
 GIGAAM_REPO = "ai-sage/GigaAM-Multilingual"
 GIGAAM_CHUNK_SECONDS = 24
+# Код модели лежит в репозитории. Веса качаются только с этих коммитов.
+GIGAAM_CODE_SHA256 = "6d02e640fbb5738ab11c030520a68654ef32f4ff363723db10534cf8b5d5c0e7"
+GIGAAM_PINS = {
+    "ctc": {
+        "commit": "2f8a57144e6ec3adfd32fe0484d9ea9913305bc8",
+        "weights_sha256": "e1db43873ec5e296f229572e06e2470fc157ac9f8d4aacabda295630b9b91728",
+        "weights_size": 883170115,
+        "config_sha256": "c830232c7d51688a630a221517b52585ab5ee57e1d3c21bcbae01759351d2653",
+    },
+    "large_ctc": {
+        "commit": "3905cd51c3ed4e88c8edf33f3302969ba480a327",
+        "weights_sha256": "c3fabefb50b41f08f4d7ad44e02c26c37d242882704cdcca2ebd98e45eff73d1",
+        "weights_size": 2341592643,
+        "config_sha256": "5ea1089c77b60e094352d7fb7bfb6580906b380c4dc7053edb4f7f0a1f59c172",
+    },
+}
 QWEN_ASR_MODELS = TOKEN_PLAN_ASR_MODELS + PAYG_ASR_MODELS
 TOKEN_PLAN_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import store
+from . import disk, store
 from .analyze import (
     analyze_long_transcript,
     make_client,
@@ -20,6 +20,7 @@ from .audio import AudioError, extract_audio_async, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import notify_meeting_done
 from .diarize import apply_diarization
+from .logctx import meeting_scope
 
 log = logging.getLogger("mom.pipeline")
 
@@ -101,8 +102,14 @@ def has_saved_transcript(meeting: dict) -> bool:
 
 
 async def process_meeting(meeting_id: str) -> None:
+    with meeting_scope(meeting_id):
+        await _process_meeting(meeting_id)
+
+
+async def _process_meeting(meeting_id: str) -> None:
     meeting = store.get_meeting(meeting_id)
     if not meeting:
+        log.warning("Встреча не найдена")
         return
     api_key = config.get_api_key()
     if not api_key:
@@ -118,10 +125,14 @@ async def process_meeting(meeting_id: str) -> None:
     client = make_client(api_key)
     progress = _Progress(meeting_id)
     resume = has_saved_transcript(meeting)
+    step = "старт"
+    log.info("старт file=%s resume=%s", meeting.get("filename") or "", resume)
 
     try:
         if resume:
             transcript = meeting["transcript"].strip()
+            step = "протокол"
+            log.info("шаг: протокол, расшифровка уже сохранена, символов %s", len(transcript))
             progress.set(88, "Продолжаю с готовой расшифровки", status="analyzing", force=True)
         else:
             src = UPLOAD_DIR / f"{meeting_id}{Path(meeting['filename']).suffix.lower() or '.webm'}"
@@ -135,12 +146,29 @@ async def process_meeting(meeting_id: str) -> None:
                     error="Запись исчезла с диска до начала обработки",
                 )
                 return
+            step = "извлечение"
+            log.info("шаг: извлечение %s", src.name)
+            try:
+                disk.ensure_space()
+            except disk.DiskError as exc:
+                log.warning("нет места: %s", exc)
+                store.update_meeting(
+                    meeting_id,
+                    status="error",
+                    status_message="Не хватает места на диске",
+                    error=str(exc),
+                )
+                return
             progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
             duration = await extract_audio_async(src, audio_path)
             store.update_meeting(meeting_id, duration_seconds=duration)
+            step = "расшифровка"
+            log.info("шаг: расшифровка model=%s", config.get_asr_model())
             progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
 
             payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
+            step = "спикеры"
+            log.info("шаг: спикеры")
             progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
             voiced = await asyncio.to_thread(
                 apply_diarization,
@@ -162,6 +190,7 @@ async def process_meeting(meeting_id: str) -> None:
                 },
                 language=payload.get("language"),
             )
+        step = "протокол"
         parts = max(1, (len(transcript) + 79_999) // 80_000)
         if parts == 1:
             prefix = "Qwen пишет протокол"
@@ -170,6 +199,7 @@ async def process_meeting(meeting_id: str) -> None:
         else:
             prefix = f"Qwen пишет протокол ({parts} запросов)"
         progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
+        log.info("шаг: протокол model=%s частей %s", config.get_chat_model(), parts)
         result = await _analyze_with_heartbeat(client, transcript, meeting["title"], progress, prefix)
         title = (result.get("title") or meeting["title"]).strip() or meeting["title"]
         store.update_meeting(
@@ -182,8 +212,9 @@ async def process_meeting(meeting_id: str) -> None:
             error=None,
             progress=100,
         )
+        log.info("готово")
     except Exception as exc:  # noqa: BLE001 — surface a short phrase; log the rest
-        log.exception("Встреча %s не обработана", meeting_id)
+        log.exception("Встреча остановилась на шаге «%s»", step)
         store.update_meeting(
             meeting_id,
             status="error",
@@ -192,6 +223,7 @@ async def process_meeting(meeting_id: str) -> None:
         )
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting.get("status") == "done":
+        log.info("шаг: почта")
         await asyncio.to_thread(notify_meeting_done, meeting)
 
 

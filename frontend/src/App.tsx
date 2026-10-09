@@ -130,7 +130,6 @@ export default function App() {
   }, [composing, meetings, selectedId]);
 
   const openai = health?.openai;
-  const keyReady = Boolean(openai?.connected);
   const userReady = Boolean(user?.authenticated);
   const showComposer = composing || meetings.length === 0;
   const liveQueue = queueFromMeetings(meetings, health?.queue?.limit || 1);
@@ -246,8 +245,8 @@ export default function App() {
         <p className={`top-status ${userReady ? "ok" : "missing"}`}>
           {userReady ? `${user?.email}` : "Нет входа в профиль"}
         </p>
-        <button type="button" className={`top-key ${connectionClass(openai)}`} onClick={goAdmin}>
-          {connectionLabel(openai)}
+        <button type="button" className={`top-key ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
+          {health ? connectionLabel(openai) : "Проверяю ключ"}
         </button>
         {screen === "admin" ? (
           <button className="ghost" type="button" onClick={goApp}>
@@ -323,14 +322,17 @@ export default function App() {
               Выйти из профиля
             </button>
           )}
-          <button type="button" className={`conn ${connectionClass(openai)}`} onClick={goAdmin}>
+          <button type="button" className={`conn ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
             <span className="conn-dot" />
             <span>
-              <strong>{connectionLabel(openai)}</strong>
-              <small>{connectionDetail(openai)}</small>
+              <strong>{health ? connectionLabel(openai) : "Проверяю ключ"}</strong>
+              {health && <small>{connectionDetail(openai)}</small>}
             </span>
           </button>
           {health && !health.ffmpeg && <p className="health-warn">Не найден ffmpeg.</p>}
+          {health?.disk && !health.disk.ok && (
+            <p className="health-warn">Мало места на диске. Новые записи не принимаются, пока не освободится место.</p>
+          )}
         </aside>
 
         <main className="stage" id="main">
@@ -341,7 +343,12 @@ export default function App() {
               health={adminHealth}
               tab={adminTab}
               onTab={setAdminTab}
-              onAuth={setAuth}
+              onAuth={(next) => {
+                setAuth(next);
+                if (!next.authenticated) {
+                  getHealth().then(setHealth).catch(() => undefined);
+                }
+              }}
               onHealth={(next) => {
                 setAdminHealth(next);
                 setHealth((current) =>
@@ -357,11 +364,13 @@ export default function App() {
                           enabled: Boolean(next.ldap?.enabled),
                           configured: Boolean(next.ldap?.configured),
                         },
+                        disk: next.disk,
                         openai: {
                           ...current.openai,
                           configured: next.openai.configured,
                           connected: next.openai.connected,
                           auth_rejected: next.openai.auth_rejected,
+                          model_unavailable: next.openai.model_unavailable,
                           message: next.openai.message,
                           checked_at: next.openai.checked_at,
                           provider: next.openai.provider,
@@ -385,7 +394,7 @@ export default function App() {
           ) : showComposer ? (
             <Composer
               busy={busy}
-              keyReady={keyReady}
+              keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
               onOpenSettings={goAdmin}
@@ -406,7 +415,7 @@ export default function App() {
           ) : (
             <Composer
               busy={busy}
-              keyReady={keyReady}
+              keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
               onOpenSettings={goAdmin}

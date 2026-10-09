@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 cd /app
-mkdir -p data
+mkdir -p data backups
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -33,4 +33,13 @@ PY
 # load_dotenv does not override variables that are already set.
 export HOST=0.0.0.0
 export PORT="${PORT:-8000}"
+
+# Volumes may be root-owned. Chown them, then run the server as mom.
+if [ "$(id -u)" = "0" ]; then
+  chown -R mom:mom data backups
+  if [ -f .env ]; then
+    chown mom:mom .env || true
+  fi
+  exec runuser -u mom -- python -m backend
+fi
 exec python -m backend

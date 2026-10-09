@@ -7,7 +7,16 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users";
+export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
+
+export type AuditEvent = {
+  id: number;
+  at: string;
+  actor: string;
+  action: string;
+  target: string;
+  detail: string;
+};
 
 export type ActionItem = {
   task: string;
@@ -73,6 +82,7 @@ export type OpenAIStatus = {
   connected: boolean;
   hint: string | null;
   auth_rejected?: boolean;
+  model_unavailable?: boolean;
   denied_models?: string[];
   message: string;
   checked_at: string | null;
@@ -113,6 +123,14 @@ export type LdapStatus = {
   email_attr?: string;
 };
 
+export type DiskStatus = {
+  ok: boolean;
+  free_bytes?: number;
+  total_bytes?: number;
+  recordings_bytes?: number;
+  min_free_bytes?: number;
+};
+
 export type Health = {
   ok: boolean;
   ffmpeg: boolean;
@@ -122,6 +140,7 @@ export type Health = {
   queue?: QueueStatus;
   smtp?: SmtpStatus;
   ldap?: LdapStatus;
+  disk?: DiskStatus;
 };
 
 export type AuthStatus = {

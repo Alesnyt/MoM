@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -113,6 +114,19 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_hits ON rate_hits(key, at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_id ON audit_events(id)")
 
 
 
@@ -219,21 +233,21 @@ def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dic
 ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
 
 
-def prune_user_meetings(user_id: str) -> list[str]:
+def prune_user_meetings(user_id: str) -> list[dict[str, str]]:
     user = get_user(user_id)
     if not user:
         return []
     limit = max(1, int(user["archive_limit"]))
     meetings = list_meetings(user_id)
     over = len(meetings) - limit
-    removed: list[str] = []
+    removed: list[dict[str, str]] = []
     for item in reversed(meetings):
         if over <= 0:
             break
         if item.get("status") in ACTIVE_STATUSES:
             continue
         if delete_meeting(item["id"]):
-            removed.append(item["id"])
+            removed.append({"id": item["id"], "title": item.get("title") or ""})
             over -= 1
     return removed
 
@@ -418,6 +432,24 @@ def rate_allow(key: str, window: float, limit: int) -> bool:
     return True
 
 
+def delete_user(user_id: str) -> list[str] | None:
+    with connect() as conn:
+        user = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user:
+            return None
+        rows = conn.execute(
+            "SELECT id, status FROM meetings WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        if any(row["status"] in {"extracting", "transcribing", "analyzing"} for row in rows):
+            raise ValueError("active")
+        ids = [row["id"] for row in rows]
+        conn.execute("DELETE FROM meetings WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return ids
+
+
 def delete_meeting(meeting_id: str) -> bool:
     with connect() as conn:
         cursor = conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
@@ -546,6 +578,10 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
     return get_user(user_id)
 
 
+def session_id(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def put_session(
     token: str,
     kind: str,
@@ -561,15 +597,18 @@ def put_session(
             INSERT OR REPLACE INTO sessions (token, kind, username, user_id, email, expires)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (token, kind, username, user_id, email, expires),
+            (session_id(token), kind, username, user_id, email, expires),
         )
 
 
 def get_session_row(token: str) -> dict[str, Any] | None:
     now = time.time()
+    stored = session_id(token)
     with connect() as conn:
         conn.execute("DELETE FROM sessions WHERE expires < ?", (now,))
-        row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
+        row = conn.execute("SELECT * FROM sessions WHERE token = ?", (stored,)).fetchone()
+        if row is None and token != stored:
+            row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
     if not row:
         return None
     if float(row["expires"]) < now:
@@ -579,10 +618,62 @@ def get_session_row(token: str) -> dict[str, Any] | None:
 
 
 def drop_session_token(token: str) -> None:
+    stored = session_id(token)
     with connect() as conn:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.execute("DELETE FROM sessions WHERE token = ? OR token = ?", (stored, token))
 
 
 def drop_sessions_for_user(user_id: str) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+
+_AUDIT_KEEP = 2000
+
+
+def _audit_text(value: str, limit: int) -> str:
+    return " ".join((value or "").split())[:limit]
+
+
+def record_audit(actor: str, action: str, target: str = "", detail: str = "") -> None:
+    action_text = _audit_text(action, 80)
+    if not action_text:
+        return
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO audit_events (at, actor, action, target, detail)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now(),
+                _audit_text(actor, 200) or "система",
+                action_text,
+                _audit_text(target, 200),
+                _audit_text(detail, 500),
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM audit_events
+            WHERE id NOT IN (
+                SELECT id FROM audit_events ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (_AUDIT_KEEP,),
+        )
+
+
+def list_audit(limit: int = 200) -> list[dict[str, Any]]:
+    size = max(1, min(int(limit), 500))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, at, actor, action, target, detail
+            FROM audit_events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (size,),
+        ).fetchall()
+    return [dict(row) for row in rows]

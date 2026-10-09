@@ -1,4 +1,4 @@
-import type { AuthStatus, Health, Meeting, PlatformUser, UserSession } from "./types";
+import type { AuditEvent, AuthStatus, Health, Meeting, PlatformUser, UserSession } from "./types";
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -80,6 +80,12 @@ export async function logoutUser(): Promise<UserSession> {
   return response.json();
 }
 
+export async function listAudit(): Promise<AuditEvent[]> {
+  const response = await fetch("/api/admin/audit", { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function listUsers(): Promise<PlatformUser[]> {
   const response = await fetch("/api/admin/users", { credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
@@ -126,6 +132,14 @@ export async function updateUserLimit(id: string, archiveLimit: number): Promise
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  const response = await fetch(`/api/admin/users/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
 }
 
 export async function resetUserPassword(id: string): Promise<{ password: string }> {

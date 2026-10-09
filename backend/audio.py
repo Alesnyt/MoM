@@ -36,14 +36,18 @@ def looks_like_audio(path: Path) -> bool:
 
 def _run(cmd: list[str], timeout: int | None = None) -> str:
     limit = timeout if timeout is not None else config.FFMPEG_TIMEOUT_SECONDS
+    tool = Path(cmd[0]).name if cmd else "ffmpeg"
+    target = Path(cmd[-1]).name if cmd else ""
+    if tool == "ffmpeg":
+        log.info("ffmpeg → %s", target)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
     except subprocess.TimeoutExpired as exc:
-        log.error("ffmpeg timeout after %s s: %s", limit, " ".join(cmd[:8]))
+        log.error("ffmpeg timeout after %s s: %s → %s", limit, tool, target)
         raise AudioError(f"ffmpeg не уложился в {limit} с") from exc
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "unknown ffmpeg error").strip()
-        log.error("ffmpeg failed (%s): %s", result.returncode, err[-4000:])
+        log.error("ffmpeg failed (%s) → %s: %s", result.returncode, target, err[-4000:])
         raise AudioError(
             "Не удалось обработать аудио. Проверьте, что файл — запись, а не повреждённый контейнер."
         )
@@ -70,7 +74,7 @@ def duration_seconds(path: Path) -> float:
     try:
         value = float(out)
     except ValueError as exc:
-        log.error("ffprobe duration parse failed: %s", out)
+        log.error("ffprobe duration parse failed for %s: %s", path.name, out)
         raise AudioError("Не удалось определить длительность записи") from exc
     if not math.isfinite(value) or value <= 0:
         raise AudioError("В записи не найдена звуковая дорожка")

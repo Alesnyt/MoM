@@ -190,10 +190,12 @@ def notify_meeting_done(meeting: dict) -> None:
     try:
         send_mail(to, email_subject(meeting), body)
     except Exception as exc:  # noqa: BLE001 — don't fail the job if mail is down
-        log.warning("Не отправилось письмо по встрече %s: %s", meeting.get("id"), exc)
+        log.warning("Не отправилось письмо: %s", exc)
+        store.record_audit(to, "email.fail", meeting.get("id") or "", "SMTP не принял письмо")
         store.update_meeting(
             meeting["id"],
             status_message="Готово. Письмо не отправилось — проверьте SMTP в админке",
         )
         return
+    store.record_audit(to, "email.send", meeting.get("id") or "", "автоматически")
     store.update_meeting(meeting["id"], status_message="Готово, протокол отправлен на почту")

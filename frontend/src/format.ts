@@ -21,6 +21,20 @@ export function formatDate(iso: string): string {
   }).format(date);
 }
 
+export function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "0 Б";
+  const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+  let number = value;
+  let unit = units[0];
+  for (const name of units) {
+    unit = name;
+    if (number < 1024 || name === units[units.length - 1]) break;
+    number /= 1024;
+  }
+  if (unit === "Б" || number >= 10) return `${Math.round(number)} ${unit}`;
+  return `${number.toFixed(1).replace(".0", "")} ${unit}`;
+}
+
 export function formatDuration(seconds: number): string {
   const total = Math.round(seconds);
   const hours = Math.floor(total / 3600);
@@ -49,8 +63,20 @@ export function connectionLabel(status: OpenAIStatus | undefined): string {
   if (!status?.configured) return "Ключ не задан";
   if (status.connected) return `${name} подключён`;
   if (status.auth_rejected) return `${name}: ключ не принят`;
-  if ((status.message || "").toLowerCase().includes("модел")) return `${name}: модель недоступна`;
+  if (status.model_unavailable || (status.message || "").toLowerCase().includes("модел")) {
+    return `${name}: модель недоступна`;
+  }
   return `${name}: нет связи`;
+}
+
+export function uploadBlockedReason(status: OpenAIStatus | null): string | null {
+  if (status === null || status.connected) return null;
+  if (!status.configured) return "Ключ ещё не подключён. Без рабочего ключа запись обработать нельзя.";
+  if (status.model_unavailable || (status.message || "").toLowerCase().includes("модел")) {
+    return "Выбранная модель недоступна этому ключу. Запись обработать нельзя, пока в админке не выберут другую.";
+  }
+  if (status.auth_rejected) return "Ключ не принят. Запись обработать нельзя, пока в админке не сохранят другой.";
+  return "Нет связи с провайдером. Запись обработать нельзя, пока проверка ключа не пройдёт.";
 }
 
 export function connectionDetail(status: OpenAIStatus | undefined): string {

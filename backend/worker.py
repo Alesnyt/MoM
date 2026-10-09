@@ -5,6 +5,7 @@ import logging
 import time
 
 from . import config, gigaam_asr, local_asr, store
+from .logctx import meeting_scope
 from .pipeline import process_meeting
 
 log = logging.getLogger("mom.queue")
@@ -73,12 +74,17 @@ async def run_worker(stop: asyncio.Event) -> None:
 
 
 async def _run_job(meeting_id: str) -> None:
+    with meeting_scope(meeting_id):
+        await _run_job_scoped(meeting_id)
+
+
+async def _run_job_scoped(meeting_id: str) -> None:
     try:
         await process_meeting(meeting_id)
     except asyncio.CancelledError:
         raise
     except Exception:
-        log.exception("Обработка встречи %s прервалась", meeting_id)
+        log.exception("Обработка прервалась")
         meeting = store.get_meeting(meeting_id)
         if meeting and meeting.get("status") not in {"done", "error"}:
             store.update_meeting(
