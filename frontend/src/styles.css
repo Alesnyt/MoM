@@ -158,6 +158,28 @@ button {
   margin-left: 8px;
 }
 
+.top-key {
+  display: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.top-key.ok {
+  color: var(--ok);
+}
+
+.top-key.bad {
+  color: var(--danger);
+}
+
+.top-key.missing {
+  color: var(--accent);
+}
+
 .top-status.ok {
   color: var(--ok);
 }
@@ -1099,6 +1121,60 @@ select.title-input {
   overflow: auto;
 }
 
+.turns {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.turn {
+  border-left: 3px solid var(--accent);
+  padding: 0 0 0 12px;
+}
+
+.turn-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.turn-head time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.speaker-name {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.speaker-edit,
+.speaker-move select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
 @media (max-width: 860px) {
   .workspace,
   .topbar {
@@ -1108,6 +1184,11 @@ select.title-input {
 
   .rail-toggle {
     display: inline-flex;
+  }
+
+  .top-key {
+    display: inline-flex;
+    width: 100%;
   }
 
   .rail {

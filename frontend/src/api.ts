@@ -89,15 +89,32 @@ export async function listUsers(): Promise<PlatformUser[]> {
 export async function createUser(
   email: string,
   archiveLimit: number,
-): Promise<{ user: PlatformUser; password: string }> {
+  authMode: "local" | "ldap" = "local",
+): Promise<{ user: PlatformUser; password: string | null }> {
   const response = await fetch("/api/admin/users", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, archive_limit: archiveLimit }),
+    body: JSON.stringify({ email, archive_limit: archiveLimit, auth_mode: authMode }),
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
+}
+
+export async function setUserAuthMode(
+  id: string,
+  authMode: "local" | "ldap",
+): Promise<{ user: PlatformUser; password?: string }> {
+  const response = await fetch(`/api/admin/users/${id}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ auth_mode: authMode }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  const data = await response.json();
+  if (data?.user) return data;
+  return { user: data };
 }
 
 export async function updateUserLimit(id: string, archiveLimit: number): Promise<PlatformUser> {
@@ -162,6 +179,38 @@ export async function saveSmtp(payload: {
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function saveLdap(payload: {
+  enabled: boolean;
+  url: string;
+  bind_dn: string;
+  bind_password: string;
+  base_dn: string;
+  user_filter: string;
+  starttls: boolean;
+  tls_verify: boolean;
+  email_attr: string;
+}): Promise<Health> {
+  const response = await fetch("/api/settings/ldap", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function testLdap(username: string): Promise<{ ok: boolean; entries?: number | null; mail?: string | null }> {
+  const response = await fetch("/api/settings/ldap/test", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username }),
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
@@ -240,6 +289,28 @@ export async function deleteMeeting(id: string): Promise<void> {
 
 export async function retryMeeting(id: string): Promise<Meeting> {
   const response = await fetch(`/api/meetings/${id}/retry`, { method: "POST", credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function renameSpeaker(id: string, speakerId: string, name: string): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/speakers/${encodeURIComponent(speakerId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function assignSpeaker(id: string, speakerId: string, segmentIndexes: number[]): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/segments`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ speaker_id: speakerId, segment_indexes: segmentIndexes }),
+  });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

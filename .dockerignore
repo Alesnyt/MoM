@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+node_modules
+frontend/node_modules
+frontend/dist
+backend/static
+data
+.env
+*.log
+.DS_Store
+agent-transcripts

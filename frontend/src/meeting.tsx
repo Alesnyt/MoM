@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { downloadMarkdown, getEmailBody, openMeetingEmail } from "./api";
 import { count, formatClock, formatDate, formatDuration, priorityLabel } from "./format";
+import { TranscriptView } from "./transcript";
 import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
 
 export const STEPS: { id: MeetingStatus; label: string }[] = [
@@ -16,6 +17,7 @@ export function MeetingPane({
   onTab,
   onRetry,
   onDelete,
+  onUpdated,
 }: {
   meeting: Meeting;
   tab: Tab;
@@ -23,6 +25,7 @@ export function MeetingPane({
   onTab: (tab: Tab) => void;
   onRetry: () => void;
   onDelete: () => void;
+  onUpdated: (meeting: Meeting) => void;
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error";
   const result = meeting.result;
@@ -100,7 +103,7 @@ export function MeetingPane({
           )}
           {(meeting.status === "error" || meeting.status === "done") && (
             <button className="ghost" onClick={onRetry}>
-              Повторить
+              {meeting.status === "error" && meeting.transcript ? "Собрать протокол" : "Повторить"}
             </button>
           )}
           {!processing && (
@@ -111,7 +114,7 @@ export function MeetingPane({
         </div>
       </header>
 
-      {mailNote && <div className="banner">{mailNote}</div>}
+      {mailNote && <div className="banner" role="status">{mailNote}</div>}
 
       {processing && <ProcessCard meeting={meeting} mailEnabled={mailEnabled} />}
       {meeting.status === "error" && (
@@ -137,9 +140,7 @@ export function MeetingPane({
           {tab === "overview" && <Overview result={result} />}
           {tab === "actions" && <Actions result={result} />}
           {tab === "mom" && <Minutes meeting={meeting} result={result} />}
-          {tab === "transcript" && (
-            <pre className="transcript">{meeting.transcript || "Транскрипт пуст"}</pre>
-          )}
+          {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
         </>
       )}
     </section>

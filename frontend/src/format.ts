@@ -48,7 +48,18 @@ export function connectionLabel(status: OpenAIStatus | undefined): string {
   const name = status?.provider_label || "API";
   if (!status?.configured) return "Ключ не задан";
   if (status.connected) return `${name} подключён`;
-  return `${name}: ключ не принят`;
+  if (status.auth_rejected) return `${name}: ключ не принят`;
+  if ((status.message || "").toLowerCase().includes("модел")) return `${name}: модель недоступна`;
+  return `${name}: нет связи`;
+}
+
+export function connectionDetail(status: OpenAIStatus | undefined): string {
+  if (!status?.configured) return "Сохраните ключ в админке";
+  if (status.connected) return "Можно загружать записи";
+  const message = (status.message || "").trim();
+  if (message && message.length < 140 && !message.includes("{")) return message;
+  if (status.auth_rejected) return "Проверьте ключ в админке";
+  return "Провайдер не ответил. Повторите проверку в админке";
 }
 
 export function queueFromMeetings(

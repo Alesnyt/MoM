@@ -115,8 +115,7 @@ export function UserLogin({ onLogin }: { onLogin: (session: UserSession) => Prom
       <p className="eyebrow">Профиль</p>
       <h1>Вход</h1>
       <p className="lead">
-        Войдите по email и паролю, которые выдал администратор. В профиле хранятся
-        последние протоколы — лимит архива задаёт администратор.
+        Войдите по email. Пароль выдаёт администратор или, если профиль привязан к каталогу, это пароль LDAP.
       </p>
       <form
         className="key-box"
@@ -154,7 +153,7 @@ export function UserLogin({ onLogin }: { onLogin: (session: UserSession) => Prom
           </button>
         </div>
       </form>
-      {error && <div className="banner">{error}</div>}
+      {error && <div className="banner" role="alert">{error}</div>}
     </section>
   );
 }

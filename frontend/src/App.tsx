@@ -13,7 +13,7 @@ import {
   retryMeeting,
 } from "./api";
 import { Composer, UserLogin } from "./composer";
-import { connectionClass, connectionLabel, formatDate, formatDuration, queueFromMeetings } from "./format";
+import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings } from "./format";
 import { MeetingPane, stepLabel } from "./meeting";
 import type { AdminTab, AuthStatus, Health, Meeting, UserSession } from "./types";
 
@@ -27,12 +27,22 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
     const old = previous.get(row.id);
     if (!old) return row;
     if (row.result == null && old.result) {
-      return { ...row, result: old.result, transcript: old.transcript };
+      return {
+        ...row,
+        result: old.result,
+        transcript: old.transcript,
+        speakers: row.speakers ?? old.speakers,
+        segments: row.segments ?? old.segments,
+        diarization_note: row.diarization_note ?? old.diarization_note,
+      };
     }
     return {
       ...row,
       result: row.result ?? old.result,
       transcript: row.transcript ?? old.transcript,
+      speakers: row.speakers ?? old.speakers,
+      segments: row.segments ?? old.segments,
+      diarization_note: row.diarization_note ?? old.diarization_note,
     };
   });
 }
@@ -236,6 +246,9 @@ export default function App() {
         <p className={`top-status ${userReady ? "ok" : "missing"}`}>
           {userReady ? `${user?.email}` : "Нет входа в профиль"}
         </p>
+        <button type="button" className={`top-key ${connectionClass(openai)}`} onClick={goAdmin}>
+          {connectionLabel(openai)}
+        </button>
         {screen === "admin" ? (
           <button className="ghost" type="button" onClick={goApp}>
             К встречам
@@ -314,14 +327,14 @@ export default function App() {
             <span className="conn-dot" />
             <span>
               <strong>{connectionLabel(openai)}</strong>
-              <small>{openai?.message || "Ключ не задан"}</small>
+              <small>{connectionDetail(openai)}</small>
             </span>
           </button>
           {health && !health.ffmpeg && <p className="health-warn">Не найден ffmpeg.</p>}
         </aside>
 
         <main className="stage" id="main">
-          {error && <div className="banner">{error}</div>}
+          {error && <div className="banner" role="alert">{error}</div>}
           {screen === "admin" ? (
             <AdminSection
               auth={auth}
@@ -340,10 +353,15 @@ export default function App() {
                         theme: next.theme,
                         queue: next.queue,
                         smtp: { configured: Boolean(next.smtp?.configured) },
+                        ldap: {
+                          enabled: Boolean(next.ldap?.enabled),
+                          configured: Boolean(next.ldap?.configured),
+                        },
                         openai: {
                           ...current.openai,
                           configured: next.openai.configured,
                           connected: next.openai.connected,
+                          auth_rejected: next.openai.auth_rejected,
                           message: next.openai.message,
                           checked_at: next.openai.checked_at,
                           provider: next.openai.provider,
@@ -381,6 +399,9 @@ export default function App() {
               onTab={setTab}
               onRetry={() => void onRetry(selected.id)}
               onDelete={() => onDelete(selected.id)}
+              onUpdated={(next) => {
+                setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)));
+              }}
             />
           ) : (
             <Composer

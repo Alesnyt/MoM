@@ -11,8 +11,11 @@ import {
   saveModels,
   saveQueue,
   saveSmtp,
+  saveLdap,
   saveTheme,
+  setUserAuthMode,
   setupAdmin,
+  testLdap,
   testSmtp,
   updateUserLimit,
   verifyApiKey,
@@ -26,6 +29,7 @@ export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "asr", label: "Расшифровка" },
   { id: "queue", label: "Очередь" },
   { id: "smtp", label: "Почта" },
+  { id: "ldap", label: "Каталог" },
   { id: "theme", label: "Вид" },
   { id: "users", label: "Пользователи" },
 ];
@@ -71,7 +75,17 @@ export function AdminSection({
     }
   }
 
-  if (!auth?.authenticated) {
+  if (auth === null) {
+    return (
+      <section className="composer" aria-busy="true">
+        <p className="eyebrow">Доступ</p>
+        <h1>Администрирование</h1>
+        <p className="lead">Проверяю доступ…</p>
+      </section>
+    );
+  }
+
+  if (!auth.authenticated) {
     return (
       <section className="composer">
         <p className="eyebrow">Доступ</p>
@@ -131,7 +145,7 @@ export function AdminSection({
             </button>
           </div>
         </form>
-        {error && <div className="banner">{error}</div>}
+        {error && <div className="banner" role="alert">{error}</div>}
       </section>
     );
   }
@@ -149,7 +163,10 @@ export function AdminSection({
           type="button"
           onClick={() => {
             void logoutAdmin()
-              .then(onAuth)
+              .then((next) => {
+                setPassword("");
+                onAuth(next);
+              })
               .catch((err: Error) => setError(err.message));
           }}
         >
@@ -175,13 +192,18 @@ export function AdminSection({
         <span className={`status-pill ${health?.smtp?.configured ? "ok" : ""}`}>
           {health?.smtp?.configured ? `Почта ${health.smtp.host || "вкл."}` : "Почта выкл."}
         </span>
+        <span className={`status-pill ${health?.ldap?.configured ? "ok" : ""}`}>
+          {health?.ldap?.configured ? "LDAP вкл." : "LDAP выкл."}
+        </span>
       </div>
       {tab === "users" ? (
         <UsersPanel />
+      ) : tab === "ldap" ? (
+        <LdapPanel health={health} onChange={onHealth} />
       ) : (
         <SettingsPanel topic={tab} health={health} onChange={onHealth} />
       )}
-      {error && <div className="banner">{error}</div>}
+      {error && <div className="banner" role="alert">{error}</div>}
     </section>
   );
 }
@@ -191,6 +213,7 @@ function UsersPanel() {
   const [users, setUsers] = useState<PlatformUser[]>([]);
   const [email, setEmail] = useState("");
   const [limit, setLimit] = useState(5);
+  const [authMode, setAuthMode] = useState<"local" | "ldap">("local");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [secret, setSecret] = useState<{ email: string; password: string } | null>(null);
@@ -205,10 +228,11 @@ function UsersPanel() {
 
   async function onCreate() {
     setError(null);
+    setSecret(null);
     setBusy(true);
     try {
-      const created = await createUser(email.trim(), limit);
-      setSecret({ email: created.user.email, password: created.password });
+      const created = await createUser(email.trim(), limit, authMode);
+      if (created.password) setSecret({ email: created.user.email, password: created.password });
       setEmail("");
       await reload();
     } catch (err) {
@@ -226,6 +250,18 @@ function UsersPanel() {
       setSecret({ email: userEmail, password: next.password });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сбросить пароль");
+    }
+  }
+
+  async function onMode(id: string, mode: "local" | "ldap") {
+    setError(null);
+    try {
+      const next = await setUserAuthMode(id, mode);
+      if (next.password) setSecret({ email: next.user.email, password: next.password });
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сменить способ входа");
+      await reload();
     }
   }
 
@@ -248,6 +284,24 @@ function UsersPanel() {
         }}
       >
         <p>Новый пользователь</p>
+        <div className="choice-grid">
+          <button
+            type="button"
+            className={`choice-card ${authMode === "local" ? "active" : ""}`}
+            onClick={() => setAuthMode("local")}
+          >
+            <strong>Локальный</strong>
+            <small>MoM сгенерирует пароль</small>
+          </button>
+          <button
+            type="button"
+            className={`choice-card ${authMode === "ldap" ? "active" : ""}`}
+            onClick={() => setAuthMode("ldap")}
+          >
+            <strong>LDAP</strong>
+            <small>Пароль из каталога</small>
+          </button>
+        </div>
         <input
           className="title-input"
           type="email"
@@ -266,7 +320,7 @@ function UsersPanel() {
         />
         <div className="composer-row">
           <button className="primary" type="submit" disabled={busy || !email.includes("@")}>
-            {busy ? "Создаю…" : "Создать и сгенерировать пароль"}
+            {busy ? "Создаю…" : authMode === "ldap" ? "Создать с входом через LDAP" : "Создать и сгенерировать пароль"}
           </button>
         </div>
       </form>
@@ -297,6 +351,8 @@ function UsersPanel() {
                 <strong>{item.email}</strong>
                 <small>
                   Архив {item.meeting_count ?? 0} / {item.archive_limit}
+                  {" · "}
+                  {item.auth_mode === "ldap" ? "LDAP" : "локальный пароль"}
                 </small>
               </div>
               <input
@@ -310,18 +366,208 @@ function UsersPanel() {
                   if (value !== item.archive_limit) void onLimit(item.id, value);
                 }}
               />
-              <button className="ghost" type="button" onClick={() => void onReset(item.id, item.email)}>
-                Сбросить пароль
-              </button>
+              <select
+                className="title-input"
+                value={item.auth_mode === "ldap" ? "ldap" : "local"}
+                onChange={(event) => {
+                  const mode = event.target.value === "ldap" ? "ldap" : "local";
+                  if (mode !== (item.auth_mode || "local")) void onMode(item.id, mode);
+                }}
+              >
+                <option value="local">Локальный пароль</option>
+                <option value="ldap">LDAP</option>
+              </select>
+              {item.auth_mode !== "ldap" && (
+                <button
+                  className="ghost"
+                  type="button"
+                  aria-label={`Сбросить пароль ${item.email}`}
+                  onClick={() => void onReset(item.id, item.email)}
+                >
+                  Сбросить пароль
+                </button>
+              )}
             </div>
           ))
         )}
       </div>
-      {error && <div className="banner">{error}</div>}
+      {error && <div className="banner" role="alert">{error}</div>}
     </>
   );
 }
 
+function LdapPanel({ health, onChange }: { health: Health | null; onChange: (health: Health) => void }) {
+  const ldap = health?.ldap;
+  const [enabled, setEnabled] = useState(Boolean(ldap?.enabled));
+  const [url, setUrl] = useState(ldap?.url || "");
+  const [bindDn, setBindDn] = useState(ldap?.bind_dn || "");
+  const [bindPassword, setBindPassword] = useState("");
+  const [baseDn, setBaseDn] = useState(ldap?.base_dn || "");
+  const [userFilter, setUserFilter] = useState(ldap?.user_filter || "(mail={username})");
+  const [starttls, setStarttls] = useState(Boolean(ldap?.starttls));
+  const [tlsVerify, setTlsVerify] = useState(ldap?.tls_verify !== false);
+  const [emailAttr, setEmailAttr] = useState(ldap?.email_attr || "mail");
+  const [probe, setProbe] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"save" | "test" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!health?.ldap) return;
+    setEnabled(Boolean(health.ldap.enabled));
+    setUrl(health.ldap.url || "");
+    setBindDn(health.ldap.bind_dn || "");
+    setBaseDn(health.ldap.base_dn || "");
+    setUserFilter(health.ldap.user_filter || "(mail={username})");
+    setStarttls(Boolean(health.ldap.starttls));
+    setTlsVerify(health.ldap.tls_verify !== false);
+    setEmailAttr(health.ldap.email_attr || "mail");
+  }, [health]);
+
+  return (
+    <form
+      className="key-box"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setError(null);
+        setNote(null);
+        setBusy("save");
+        void saveLdap({
+          enabled,
+          url: url.trim(),
+          bind_dn: bindDn.trim(),
+          bind_password: bindPassword,
+          base_dn: baseDn.trim(),
+          user_filter: userFilter.trim() || "(mail={username})",
+          starttls,
+          tls_verify: tlsVerify,
+          email_attr: emailAttr.trim() || "mail",
+        })
+          .then((next) => {
+            setBindPassword("");
+            onChange(next);
+            setNote("Настройки каталога сохранены");
+          })
+          .catch((err: Error) => setError(err.message))
+          .finally(() => setBusy(null));
+      }}
+    >
+      <p>
+        {ldap?.configured
+          ? "Каталог включён. Пользователю можно выбрать вход через LDAP."
+          : "Пока каталог выключен, новые пользователи входят только локальным паролем."}
+      </p>
+      <div className="field-stack">
+        <label className="field-check">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          Включить вход через каталог
+        </label>
+        <label className="field-label">
+          Адрес
+          <input
+            className="title-input"
+            placeholder="ldaps://ldap.example.com:636"
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field-label">
+          Служебная учётная запись (bind DN)
+          <input
+            className="title-input"
+            placeholder="cn=mom,ou=services,dc=example,dc=com"
+            value={bindDn}
+            onChange={(event) => setBindDn(event.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field-label">
+          Пароль bind
+          <input
+            className="title-input"
+            type="password"
+            autoComplete="new-password"
+            placeholder={ldap?.has_password ? "Задан, оставьте пустым чтобы не менять" : "Пароль"}
+            value={bindPassword}
+            onChange={(event) => setBindPassword(event.target.value)}
+          />
+        </label>
+        <label className="field-label">
+          База поиска
+          <input
+            className="title-input"
+            placeholder="ou=people,dc=example,dc=com"
+            value={baseDn}
+            onChange={(event) => setBaseDn(event.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field-label">
+          Фильтр
+          <input
+            className="title-input"
+            placeholder="(mail={username})"
+            value={userFilter}
+            onChange={(event) => setUserFilter(event.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="field-label">
+          Атрибут email
+          <input className="title-input" value={emailAttr} onChange={(event) => setEmailAttr(event.target.value)} />
+        </label>
+        <label className="field-check">
+          <input type="checkbox" checked={starttls} onChange={(event) => setStarttls(event.target.checked)} />
+          STARTTLS (для ldap://, не для ldaps://)
+        </label>
+        <label className="field-check">
+          <input type="checkbox" checked={tlsVerify} onChange={(event) => setTlsVerify(event.target.checked)} />
+          Проверять сертификат
+        </label>
+        <label className="field-label">
+          Проверить поиск по email
+          <input
+            className="title-input"
+            type="email"
+            placeholder="user@example.com"
+            value={probe}
+            onChange={(event) => setProbe(event.target.value)}
+          />
+        </label>
+      </div>
+      <div className="composer-row">
+        <button className="primary" type="submit" disabled={busy !== null}>
+          {busy === "save" ? "Сохраняю…" : "Сохранить каталог"}
+        </button>
+        <button
+          className="ghost"
+          type="button"
+          disabled={busy !== null}
+          onClick={() => {
+            setError(null);
+            setNote(null);
+            setBusy("test");
+            void testLdap(probe.trim())
+              .then((result) =>
+                setNote(
+                  result.entries
+                    ? `Найдена одна запись${result.mail ? `: ${result.mail}` : ""}`
+                    : "Служебная учётная запись подключилась",
+                ),
+              )
+              .catch((err: Error) => setError(err.message))
+              .finally(() => setBusy(null));
+          }}
+        >
+          {busy === "test" ? "Проверяю…" : "Проверить LDAP"}
+        </button>
+      </div>
+      {note && <p>{note}</p>}
+      {error && <div className="banner" role="alert">{error}</div>}
+    </form>
+  );
+}
 
 function adminHeading(tab: AdminTab): { title: string; lead: string } {
   if (tab === "llm") {
@@ -348,6 +594,12 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
       lead: "Когда протокол готов, письмо уходит на email пользователя. Без SMTP обработка не ломается.",
     };
   }
+  if (tab === "ldap") {
+    return {
+      title: "Каталог",
+      lead: "LDAP или LDAPS для выбранных пользователей. Локальные пароли при этом остаются.",
+    };
+  }
   if (tab === "theme") {
     return {
       title: "Вид",
@@ -356,7 +608,7 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
   }
   return {
     title: "Пользователи",
-    lead: "Профиль заводится вручную: указываете email, система генерирует пароль. Лимит архива задаётся отдельно.",
+    lead: "Профиль заводится вручную. Локальный вход получает сгенерированный пароль, LDAP берёт пароль из каталога.",
   };
 }
 
@@ -366,7 +618,7 @@ function SettingsPanel({
   health,
   onChange,
 }: {
-  topic: Exclude<AdminTab, "users">;
+  topic: Exclude<AdminTab, "users" | "ldap">;
   health: Health | null;
   onChange: (health: Health) => void;
 }) {
@@ -435,6 +687,13 @@ function SettingsPanel({
           <div className={`status-card ${connectionClass(openai)}`}>
             <p className="status-kicker">{connectionLabel(openai)}</p>
             <p>{openai?.message || "Статус ещё не получен"}</p>
+            {openai?.denied_models && openai.denied_models.length > 0 && (
+              <ul>
+                {openai.denied_models.map((name) => (
+                  <li key={name}>Недоступна: {name}</li>
+                ))}
+              </ul>
+            )}
             <ul>
               {openai?.provider_label && <li>Провайдер: {openai.provider_label}</li>}
               {openai?.hint && <li>Ключ: {openai.hint}</li>}
@@ -527,7 +786,8 @@ function SettingsPanel({
         >
           <p>
             Сейчас: {formatAsrLabel(openai?.asr_model) || "не задано"}. Token Plan Individual не включает облачный ASR —
-            берите Whisper или GigaAM.
+            берите Whisper или GigaAM. Кто говорил, размечается отдельно: в .env нужен HF_TOKEN и пакет из
+            requirements-diarize.txt. Имена спикеров потом правятся во вкладке «Транскрипт».
           </p>
           <div className="choice-grid">
             <button
@@ -822,7 +1082,7 @@ function SettingsPanel({
         </div>
       )}
 
-      {error && <div className="banner">{error}</div>}
+      {error && <div className="banner" role="alert">{error}</div>}
     </>
   );
 }

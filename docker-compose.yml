@@ -1,0 +1,11 @@
+services:
+  mom:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    # .env монтируется файлом, не через env_file: в ADMIN_PASSWORD_HASH есть символ $,
+    # и Compose иначе подставит его как переменную.
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
+    restart: unless-stopped

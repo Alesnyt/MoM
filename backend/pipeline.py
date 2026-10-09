@@ -11,7 +11,6 @@ from typing import Any
 from . import store
 from .analyze import (
     analyze_long_transcript,
-    format_transcript,
     make_client,
     merge_transcripts,
     transcribe_file,
@@ -20,6 +19,7 @@ from . import config
 from .audio import AudioError, extract_audio_async, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import notify_meeting_done
+from .diarize import apply_diarization
 
 log = logging.getLogger("mom.pipeline")
 
@@ -96,6 +96,10 @@ async def _analyze_with_heartbeat(client, transcript: str, title: str, progress:
         await task
 
 
+def has_saved_transcript(meeting: dict) -> bool:
+    return bool((meeting.get("transcript") or "").strip())
+
+
 async def process_meeting(meeting_id: str) -> None:
     meeting = store.get_meeting(meeting_id)
     if not meeting:
@@ -110,38 +114,54 @@ async def process_meeting(meeting_id: str) -> None:
         )
         return
 
-    src = UPLOAD_DIR / f"{meeting_id}{Path(meeting['filename']).suffix.lower() or '.webm'}"
-    if not src.exists():
-        src = next(UPLOAD_DIR.glob(f"{meeting_id}.*"), None)
-    if not src or not src.exists():
-        store.update_meeting(
-            meeting_id,
-            status="error",
-            status_message="Исходный файл не найден",
-            error="Запись исчезла с диска до начала обработки",
-        )
-        return
-
     audio_path = AUDIO_DIR / f"{meeting_id}.mp3"
     client = make_client(api_key)
     progress = _Progress(meeting_id)
+    resume = has_saved_transcript(meeting)
 
     try:
-        progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
-        duration = await extract_audio_async(src, audio_path)
-        store.update_meeting(meeting_id, duration_seconds=duration)
-        progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
+        if resume:
+            transcript = meeting["transcript"].strip()
+            progress.set(88, "Продолжаю с готовой расшифровки", status="analyzing", force=True)
+        else:
+            src = UPLOAD_DIR / f"{meeting_id}{Path(meeting['filename']).suffix.lower() or '.webm'}"
+            if not src.exists():
+                src = next(UPLOAD_DIR.glob(f"{meeting_id}.*"), None)
+            if not src or not src.exists():
+                store.update_meeting(
+                    meeting_id,
+                    status="error",
+                    status_message="Исходный файл не найден",
+                    error="Запись исчезла с диска до начала обработки",
+                )
+                return
+            progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
+            duration = await extract_audio_async(src, audio_path)
+            store.update_meeting(meeting_id, duration_seconds=duration)
+            progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
 
-        payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
-        transcript = format_transcript(payload)
-        if not transcript:
-            raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
+            payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
+            progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
+            voiced = await asyncio.to_thread(
+                apply_diarization,
+                audio_path,
+                payload,
+                lambda message: progress.set(86, message, status="transcribing", force=True),
+            )
+            transcript = (voiced.get("text") or "").strip()
+            if not transcript:
+                raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
 
-        store.update_meeting(
-            meeting_id,
-            transcript=transcript,
-            language=payload.get("language"),
-        )
+            store.update_meeting(
+                meeting_id,
+                transcript=transcript,
+                transcript_segments={
+                    "speakers": voiced.get("speakers") or [],
+                    "segments": voiced.get("segments") or [],
+                    "note": voiced.get("note"),
+                },
+                language=payload.get("language"),
+            )
         parts = max(1, (len(transcript) + 79_999) // 80_000)
         if parts == 1:
             prefix = "Qwen пишет протокол"
@@ -156,7 +176,7 @@ async def process_meeting(meeting_id: str) -> None:
             meeting_id,
             title=title,
             result=result,
-            language=result.get("language") or payload.get("language"),
+            language=result.get("language") or meeting.get("language"),
             status="done",
             status_message="Готово",
             error=None,
@@ -197,8 +217,8 @@ async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float
             on_progress=on_asr,
         )
 
-    limit = 6 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
-    chunk_seconds = 4 * 60 if config.is_qwen() else CHUNK_SECONDS
+    limit = 2 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
+    chunk_seconds = 2 * 60 if config.is_qwen() else CHUNK_SECONDS
     size = audio_path.stat().st_size
     if size <= limit:
         return await transcribe_file(

@@ -7,7 +7,7 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "theme" | "users";
+export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users";
 
 export type ActionItem = {
   task: string;
@@ -37,6 +37,18 @@ export type MeetingResult = {
   };
 };
 
+export type Speaker = {
+  id: string;
+  name: string;
+};
+
+export type TranscriptSegment = {
+  start: number;
+  end: number;
+  speaker: string;
+  text: string;
+};
+
 export type Meeting = {
   id: string;
   title: string;
@@ -47,6 +59,9 @@ export type Meeting = {
   duration_seconds: number | null;
   language: string | null;
   transcript: string | null;
+  speakers?: Speaker[] | null;
+  segments?: TranscriptSegment[] | null;
+  diarization_note?: string | null;
   result: MeetingResult | null;
   error: string | null;
   progress?: number;
@@ -57,6 +72,8 @@ export type OpenAIStatus = {
   configured: boolean;
   connected: boolean;
   hint: string | null;
+  auth_rejected?: boolean;
+  denied_models?: string[];
   message: string;
   checked_at: string | null;
   provider?: string;
@@ -83,6 +100,19 @@ export type SmtpStatus = {
   public_url?: string | null;
 };
 
+export type LdapStatus = {
+  enabled: boolean;
+  configured: boolean;
+  url?: string | null;
+  bind_dn?: string | null;
+  has_password?: boolean;
+  base_dn?: string | null;
+  user_filter?: string;
+  starttls?: boolean;
+  tls_verify?: boolean;
+  email_attr?: string;
+};
+
 export type Health = {
   ok: boolean;
   ffmpeg: boolean;
@@ -91,6 +121,7 @@ export type Health = {
   openai: OpenAIStatus;
   queue?: QueueStatus;
   smtp?: SmtpStatus;
+  ldap?: LdapStatus;
 };
 
 export type AuthStatus = {
@@ -112,6 +143,7 @@ export type PlatformUser = {
   id: string;
   email: string;
   archive_limit: number;
+  auth_mode?: "local" | "ldap";
   created_at: string;
   meeting_count?: number;
 };

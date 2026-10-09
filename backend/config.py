@@ -59,6 +59,18 @@ WHISPER_DIR = DATA_DIR / "whisper"
 LOGIN_WINDOW_SECONDS = max(15, _int_env("LOGIN_WINDOW_SECONDS", 60))
 LOGIN_MAX_ATTEMPTS = max(3, _int_env("LOGIN_MAX_ATTEMPTS", 8))
 ASR_IDLE_UNLOAD_SECONDS = max(60, _int_env("ASR_IDLE_UNLOAD_SECONDS", 300))
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or os.getenv("HUGGING_FACE_HUB_TOKEN", "").strip()
+DIARIZE_MODEL = os.getenv("DIARIZE_MODEL", "pyannote/speaker-diarization-3.1").strip() or "pyannote/speaker-diarization-3.1"
+DIARIZE_MAX_SPEAKERS = max(1, min(12, _int_env("DIARIZE_MAX_SPEAKERS", 8)))
+LDAP_ENABLED = _bool_env("LDAP_ENABLED", False)
+LDAP_URL = os.getenv("LDAP_URL", "").strip()
+LDAP_BIND_DN = os.getenv("LDAP_BIND_DN", "").strip()
+LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "").strip()
+LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "").strip()
+LDAP_USER_FILTER = os.getenv("LDAP_USER_FILTER", "(mail={username})").strip() or "(mail={username})"
+LDAP_STARTTLS = _bool_env("LDAP_STARTTLS", False)
+LDAP_TLS_VERIFY = _bool_env("LDAP_TLS_VERIFY", True)
+LDAP_EMAIL_ATTR = os.getenv("LDAP_EMAIL_ATTR", "mail").strip() or "mail"
 
 MAX_WHISPER_BYTES = 24 * 1024 * 1024
 CHUNK_SECONDS = 12 * 60
@@ -228,6 +240,10 @@ def migrate_token_plan_asr() -> None:
     if is_local_asr(current) or current == "qwen-audio-3.0-asr-flash":
         return
     apply_connection(get_base_url(), get_chat_model(), default_asr_model())
+
+
+def get_hf_token() -> str:
+    return HF_TOKEN
 
 
 def get_api_key() -> str:
@@ -465,4 +481,97 @@ def set_smtp(
         SMTP_PASSWORD = password
         os.environ["SMTP_PASSWORD"] = SMTP_PASSWORD
         payload["SMTP_PASSWORD"] = SMTP_PASSWORD
+    _upsert_env(payload)
+
+
+def ldap_enabled() -> bool:
+    return LDAP_ENABLED
+
+
+def get_ldap_url() -> str:
+    return LDAP_URL
+
+
+def get_ldap_bind_dn() -> str:
+    return LDAP_BIND_DN
+
+
+def get_ldap_bind_password() -> str:
+    return LDAP_BIND_PASSWORD
+
+
+def get_ldap_base_dn() -> str:
+    return LDAP_BASE_DN
+
+
+def get_ldap_user_filter() -> str:
+    return LDAP_USER_FILTER or "(mail={username})"
+
+
+def get_ldap_starttls() -> bool:
+    return LDAP_STARTTLS
+
+
+def get_ldap_tls_verify() -> bool:
+    return LDAP_TLS_VERIFY
+
+
+def get_ldap_email_attr() -> str:
+    return LDAP_EMAIL_ATTR or "mail"
+
+
+def ldap_configured() -> bool:
+    url = get_ldap_url()
+    return bool(
+        ldap_enabled()
+        and url.startswith(("ldap://", "ldaps://"))
+        and get_ldap_base_dn()
+        and "{username}" in get_ldap_user_filter()
+    )
+
+
+def set_ldap(
+    *,
+    enabled: bool,
+    url: str,
+    bind_dn: str,
+    bind_password: str,
+    base_dn: str,
+    user_filter: str,
+    starttls: bool,
+    tls_verify: bool,
+    email_attr: str,
+) -> None:
+    global LDAP_ENABLED, LDAP_URL, LDAP_BIND_DN, LDAP_BIND_PASSWORD
+    global LDAP_BASE_DN, LDAP_USER_FILTER, LDAP_STARTTLS, LDAP_TLS_VERIFY, LDAP_EMAIL_ATTR
+    LDAP_ENABLED = bool(enabled)
+    LDAP_URL = url.strip()
+    LDAP_BIND_DN = bind_dn.strip()
+    LDAP_BASE_DN = base_dn.strip()
+    LDAP_USER_FILTER = user_filter.strip() or "(mail={username})"
+    LDAP_STARTTLS = bool(starttls)
+    LDAP_TLS_VERIFY = bool(tls_verify)
+    LDAP_EMAIL_ATTR = email_attr.strip() or "mail"
+    os.environ["LDAP_ENABLED"] = "1" if LDAP_ENABLED else "0"
+    os.environ["LDAP_URL"] = LDAP_URL
+    os.environ["LDAP_BIND_DN"] = LDAP_BIND_DN
+    os.environ["LDAP_BASE_DN"] = LDAP_BASE_DN
+    os.environ["LDAP_USER_FILTER"] = LDAP_USER_FILTER
+    os.environ["LDAP_STARTTLS"] = "1" if LDAP_STARTTLS else "0"
+    os.environ["LDAP_TLS_VERIFY"] = "1" if LDAP_TLS_VERIFY else "0"
+    os.environ["LDAP_EMAIL_ATTR"] = LDAP_EMAIL_ATTR
+    payload = {
+        "LDAP_ENABLED": "1" if LDAP_ENABLED else "0",
+        "LDAP_URL": LDAP_URL,
+        "LDAP_BIND_DN": LDAP_BIND_DN,
+        "LDAP_BASE_DN": LDAP_BASE_DN,
+        "LDAP_USER_FILTER": LDAP_USER_FILTER,
+        "LDAP_STARTTLS": "1" if LDAP_STARTTLS else "0",
+        "LDAP_TLS_VERIFY": "1" if LDAP_TLS_VERIFY else "0",
+        "LDAP_EMAIL_ATTR": LDAP_EMAIL_ATTR,
+    }
+    if bind_password:
+        LDAP_BIND_PASSWORD = bind_password
+        os.environ["LDAP_BIND_PASSWORD"] = LDAP_BIND_PASSWORD
+        payload["LDAP_BIND_PASSWORD"] = LDAP_BIND_PASSWORD
     _upsert_env(payload)

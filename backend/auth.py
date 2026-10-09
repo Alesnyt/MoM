@@ -144,3 +144,23 @@ def drop_user_session(token: str | None) -> None:
 
 def drop_user_sessions_for(user_id: str) -> None:
     store.drop_sessions_for_user(user_id)
+
+
+def ldap_password_placeholder() -> str:
+    return "ldap$" + secrets.token_hex(16)
+
+
+def authenticate_platform_user(email: str, password: str) -> dict[str, Any] | None:
+    record = store.get_user_auth(email)
+    if not record:
+        verify_password(password, dummy_hash())
+        return None
+    if record.get("auth_mode") == "ldap":
+        from . import ldap_auth
+
+        if not ldap_auth.authenticate(email, password):
+            return None
+        return record
+    if not verify_password(password, record["password_hash"]):
+        return None
+    return record

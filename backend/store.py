@@ -71,6 +71,8 @@ def init_db() -> None:
         if "queued_at" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN queued_at TEXT")
             conn.execute("UPDATE meetings SET queued_at = created_at WHERE queued_at IS NULL")
+        if "segments_json" not in columns:
+            conn.execute("ALTER TABLE meetings ADD COLUMN segments_json TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_queue ON meetings(status, queued_at)")
         conn.execute(
             """
@@ -84,6 +86,11 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at)")
+        user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "auth_mode" not in user_columns:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'local'"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -150,12 +157,16 @@ def update_meeting(meeting_id: str, **fields: Any) -> None:
         "error",
         "progress",
         "queued_at",
+        "segments_json",
     }
     sets = []
     values: list[Any] = []
     for key, value in fields.items():
         if key == "result":
             key = "result_json"
+            value = json.dumps(value, ensure_ascii=False) if value is not None else None
+        if key == "transcript_segments":
+            key = "segments_json"
             value = json.dumps(value, ensure_ascii=False) if value is not None else None
         if key not in allowed:
             raise ValueError(f"Unknown field: {key}")
@@ -415,15 +426,23 @@ def delete_meeting(meeting_id: str) -> bool:
 
 def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
     data = dict(row)
-    raw = data.pop("result_json")
+    raw = data.pop("result_json", None)
+    raw_segments = data.pop("segments_json", None)
     data["progress"] = int(data.get("progress") or 0)
     data["user_id"] = data.get("user_id")
     if body:
         data["result"] = json.loads(raw) if raw else None
+        parsed = json.loads(raw_segments) if raw_segments else {}
+        data["speakers"] = parsed.get("speakers") or []
+        data["segments"] = parsed.get("segments") or []
+        data["diarization_note"] = parsed.get("note")
     else:
         data.pop("transcript", None)
         data["transcript"] = None
         data["result"] = None
+        data["speakers"] = None
+        data["segments"] = None
+        data["diarization_note"] = None
     return data
 
 
@@ -432,6 +451,7 @@ def _serialize_user(row: sqlite3.Row, meeting_count: int | None = None) -> dict[
         "id": row["id"],
         "email": row["email"],
         "archive_limit": int(row["archive_limit"]),
+        "auth_mode": (row["auth_mode"] if "auth_mode" in row.keys() else None) or "local",
         "created_at": row["created_at"],
     }
     if meeting_count is not None:
@@ -439,17 +459,23 @@ def _serialize_user(row: sqlite3.Row, meeting_count: int | None = None) -> dict[
     return data
 
 
-def create_user(email: str, password_hash: str, archive_limit: int = 5) -> dict[str, Any]:
+def create_user(
+    email: str,
+    password_hash: str,
+    archive_limit: int = 5,
+    auth_mode: str = "local",
+) -> dict[str, Any]:
     user_id = uuid.uuid4().hex
     created = utc_now()
     limit = max(1, min(100, int(archive_limit)))
+    mode = auth_mode if auth_mode in {"local", "ldap"} else "local"
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO users (id, email, password_hash, archive_limit, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO users (id, email, password_hash, archive_limit, created_at, auth_mode)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, email, password_hash, limit, created),
+            (user_id, email, password_hash, limit, created, mode),
         )
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return _serialize_user(row, 0)
@@ -491,11 +517,16 @@ def get_user_auth(email: str) -> dict[str, Any] | None:
         row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not row:
         return None
-    return {"id": row["id"], "email": row["email"], "password_hash": row["password_hash"]}
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "password_hash": row["password_hash"],
+        "auth_mode": (row["auth_mode"] if "auth_mode" in row.keys() else None) or "local",
+    }
 
 
 def update_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
-    allowed = {"password_hash", "archive_limit"}
+    allowed = {"password_hash", "archive_limit", "auth_mode"}
     sets = []
     values: list[Any] = []
     for key, value in fields.items():
@@ -503,6 +534,8 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
             raise ValueError(f"Unknown field: {key}")
         if key == "archive_limit":
             value = max(1, min(100, int(value)))
+        if key == "auth_mode" and value not in {"local", "ldap"}:
+            raise ValueError("Unknown auth mode")
         sets.append(f"{key} = ?")
         values.append(value)
     if not sets:

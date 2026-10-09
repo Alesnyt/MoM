@@ -14,6 +14,7 @@ _local_asr_lock = asyncio.Lock()
 SYSTEM_PROMPT = """Ты — ассистент, который готовит протокол встречи (Minutes of Meeting, MoM).
 По транскрипту созвона верни ТОЛЬКО JSON по схеме ниже.
 Пиши на языке транскрипта. Не выдумывай факты, имена, сроки и решения, которых нет в тексте.
+Реплики помечены именами спикеров («Спикер 1» и т.п.) — это разные люди. Бери эти имена как участников, если в речи не прозвучало настоящее имя.
 Если поле неизвестно — используй null или пустой массив.
 
 Схема:
@@ -205,8 +206,11 @@ async def transcribe_qwen(
 ) -> dict[str, Any]:
     import base64
 
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    raw = path.read_bytes()
+    encoded = base64.b64encode(raw).decode("ascii")
+    del raw
     data_uri = f"data:audio/mpeg;base64,{encoded}"
+    del encoded
     last_error: Exception | None = None
     for candidate in config.asr_model_candidates(model):
         try:

@@ -15,11 +15,12 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, config, keys, store, worker
+from . import auth, config, keys, ldap_auth, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
+from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label
 
 ALLOWED_SUFFIXES = {".webm", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -64,6 +65,31 @@ class QueueIn(BaseModel):
     max_jobs: int = Field(ge=1, le=8)
 
 
+class LdapIn(BaseModel):
+    enabled: bool = False
+    url: str = ""
+    bind_dn: str = ""
+    bind_password: str = ""
+    base_dn: str = ""
+    user_filter: str = "(mail={username})"
+    starttls: bool = False
+    tls_verify: bool = True
+    email_attr: str = "mail"
+
+
+class LdapTestIn(BaseModel):
+    username: str = ""
+
+
+class SpeakerNameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class SpeakerAssignIn(BaseModel):
+    speaker_id: str = Field(min_length=1, max_length=40)
+    segment_indexes: list[int] = Field(min_length=1, max_length=500)
+
+
 class SmtpTestIn(BaseModel):
     to: str = ""
 
@@ -82,6 +108,12 @@ class UserLoginIn(BaseModel):
 class UserCreateIn(BaseModel):
     email: str = Field(min_length=3, max_length=200)
     archive_limit: int = Field(default=5, ge=1, le=100)
+    auth_mode: str = "local"
+
+
+class UserPatchIn(BaseModel):
+    archive_limit: int | None = Field(default=None, ge=1, le=100)
+    auth_mode: str | None = None
 
 
 class UserLimitIn(BaseModel):
@@ -183,6 +215,46 @@ def _owned(meeting: dict | None, user: dict) -> dict:
     return meeting
 
 
+def ldap_snapshot(*, full: bool = False) -> dict:
+    data = {"enabled": config.ldap_enabled(), "configured": config.ldap_configured()}
+    if not full:
+        return data
+    data.update(
+        {
+            "url": config.get_ldap_url() or None,
+            "bind_dn": config.get_ldap_bind_dn() or None,
+            "has_password": bool(config.get_ldap_bind_password()),
+            "base_dn": config.get_ldap_base_dn() or None,
+            "user_filter": config.get_ldap_user_filter(),
+            "starttls": config.get_ldap_starttls(),
+            "tls_verify": config.get_ldap_tls_verify(),
+            "email_attr": config.get_ldap_email_attr(),
+        }
+    )
+    return data
+
+
+def _check_ldap_settings(payload: LdapIn) -> None:
+    url = payload.url.strip()
+    filt = payload.user_filter.strip() or "(mail={username})"
+    if payload.enabled:
+        if not url.startswith(("ldap://", "ldaps://")):
+            raise HTTPException(status_code=400, detail="Адрес каталога должен начинаться с ldap:// или ldaps://")
+        if not payload.base_dn.strip():
+            raise HTTPException(status_code=400, detail="Укажите базу поиска, например ou=people,dc=example,dc=com")
+        if "{username}" not in filt:
+            raise HTTPException(status_code=400, detail="В фильтре должен быть плейсхолдер {username}")
+
+
+def _normalize_auth_mode(value: str) -> str:
+    mode = (value or "local").strip().lower()
+    if mode not in {"local", "ldap"}:
+        raise HTTPException(status_code=400, detail="Режим входа: local или ldap")
+    if mode == "ldap" and not config.ldap_configured():
+        raise HTTPException(status_code=400, detail="Сначала сохраните и включите LDAP в админке")
+    return mode
+
+
 def _health(*, full: bool = False) -> dict:
     return {
         "ok": True,
@@ -192,6 +264,7 @@ def _health(*, full: bool = False) -> dict:
         "openai": keys.snapshot() if full else keys.public_snapshot(),
         "queue": store.queue_stats(),
         "smtp": smtp_snapshot(full=full),
+        "ldap": ldap_snapshot(full=full),
     }
 
 @asynccontextmanager
@@ -202,9 +275,9 @@ async def lifespan(_app: FastAPI):
     config.migrate_token_plan_asr()
     if config.get_api_key():
         try:
-            await asyncio.wait_for(keys.verify_key(), timeout=float(config.VERIFY_TIMEOUT_SECONDS) * 3)
+            await asyncio.wait_for(keys.verify_key(thorough=False), timeout=float(config.VERIFY_TIMEOUT_SECONDS) + 5)
         except Exception:
-            keys.reset_status("Не удалось проверить ключ при запуске — сохраните его снова в админке")
+            keys.note_check_failed("Не удалось связаться с провайдером при запуске.")
     else:
         keys.reset_status()
     stop = asyncio.Event()
@@ -323,10 +396,11 @@ def user_session(mom_user: str | None = Cookie(default=None)) -> dict:
 def user_login(payload: UserLoginIn, request: Request, response: Response) -> dict:
     _rate_or_429(request, "user")
     email = _normalize_email(payload.email)
-    record = store.get_user_auth(email)
-    stored = record["password_hash"] if record else auth.dummy_hash()
-    ok = auth.verify_password(payload.password, stored)
-    if not record or not ok:
+    try:
+        record = auth.authenticate_platform_user(email, payload.password)
+    except ldap_auth.LdapError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not record:
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
     token = auth.create_user_session(record["id"], record["email"])
     response.set_cookie(auth.USER_COOKIE, token, **_cookie_kw(request))
@@ -361,11 +435,13 @@ def admin_create_user(payload: UserCreateIn, _admin: dict = Depends(require_admi
     email = _normalize_email(payload.email)
     if not _valid_email(email):
         raise HTTPException(status_code=400, detail="Укажите корректный email")
+    mode = _normalize_auth_mode(payload.auth_mode)
     if store.get_user_by_email(email):
         raise HTTPException(status_code=409, detail="Пользователь с таким email уже есть")
-    password = auth.generate_password()
+    password = None if mode == "ldap" else auth.generate_password()
+    password_hash = auth.ldap_password_placeholder() if mode == "ldap" else auth.hash_password(password or "")
     try:
-        user = store.create_user(email, auth.hash_password(password), payload.archive_limit)
+        user = store.create_user(email, password_hash, payload.archive_limit, mode)
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail="Пользователь с таким email уже есть")
     return {"user": user, "password": password}
@@ -374,23 +450,45 @@ def admin_create_user(payload: UserCreateIn, _admin: dict = Depends(require_admi
 @app.patch("/api/admin/users/{user_id}")
 def admin_update_user(
     user_id: str,
-    payload: UserLimitIn,
+    payload: UserPatchIn,
     _admin: dict = Depends(require_admin),
 ) -> dict:
-    user = store.update_user(user_id, archive_limit=payload.archive_limit)
-    if not user:
+    current = store.get_user(user_id)
+    if not current:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-    removed = store.prune_user_meetings(user_id)
-    for meeting_id in removed:
-        _purge_files(meeting_id)
+    fields: dict = {}
+    generated = None
+    if payload.archive_limit is not None:
+        fields["archive_limit"] = payload.archive_limit
+    if payload.auth_mode is not None:
+        mode = _normalize_auth_mode(payload.auth_mode)
+        fields["auth_mode"] = mode
+        if mode == "ldap":
+            fields["password_hash"] = auth.ldap_password_placeholder()
+        elif current.get("auth_mode") != "local":
+            generated = auth.generate_password()
+            fields["password_hash"] = auth.hash_password(generated)
+        if mode != current.get("auth_mode"):
+            auth.drop_user_sessions_for(user_id)
+    if fields:
+        store.update_user(user_id, **fields)
+    if payload.archive_limit is not None:
+        removed = store.prune_user_meetings(user_id)
+        for meeting_id in removed:
+            _purge_files(meeting_id)
     user = store.get_user(user_id)
+    if generated:
+        return {"user": user, "password": generated}
     return user
 
 
 @app.post("/api/admin/users/{user_id}/reset-password")
 def admin_reset_password(user_id: str, _admin: dict = Depends(require_admin)) -> dict:
-    if not store.get_user(user_id):
+    user = store.get_user(user_id)
+    if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if user.get("auth_mode") == "ldap":
+        raise HTTPException(status_code=409, detail="Пароль этого пользователя хранится в каталоге")
     password = auth.generate_password()
     store.update_user(user_id, password_hash=auth.hash_password(password))
     auth.drop_user_sessions_for(user_id)
@@ -443,6 +541,31 @@ def save_smtp(payload: SmtpIn, _admin: dict = Depends(require_admin)) -> dict:
     )
     config.set_public_base_url(payload.public_url)
     return _health(full=True)
+
+
+@app.post("/api/settings/ldap")
+def save_ldap(payload: LdapIn, _admin: dict = Depends(require_admin)) -> dict:
+    _check_ldap_settings(payload)
+    config.set_ldap(
+        enabled=payload.enabled,
+        url=payload.url,
+        bind_dn=payload.bind_dn,
+        bind_password=payload.bind_password,
+        base_dn=payload.base_dn,
+        user_filter=payload.user_filter,
+        starttls=payload.starttls,
+        tls_verify=payload.tls_verify,
+        email_attr=payload.email_attr,
+    )
+    return _health(full=True)
+
+
+@app.post("/api/settings/ldap/test")
+def test_ldap(payload: LdapTestIn, _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return ldap_auth.test_connection(payload.username)
+    except ldap_auth.LdapError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/settings/queue")
@@ -566,17 +689,20 @@ async def retry_meeting(
             status_code=400,
             detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
         )
-    store.update_meeting(
-        meeting_id,
-        status="queued",
-        status_message="Повторная обработка в очереди",
-        error=None,
-        transcript=None,
-        result=None,
-        language=None,
-        progress=0,
-        queued_at=store.utc_now(),
-    )
+    keep_transcript = meeting["status"] == "error" and (meeting.get("transcript") or "").strip()
+    fields: dict = {
+        "status": "queued",
+        "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
+        "error": None,
+        "result": None,
+        "progress": 88 if keep_transcript else 0,
+        "queued_at": store.utc_now(),
+    }
+    if not keep_transcript:
+        fields["transcript"] = None
+        fields["transcript_segments"] = None
+        fields["language"] = None
+    store.update_meeting(meeting_id, **fields)
     store.refresh_queue_messages()
     worker.notify_work()
     updated = store.get_meeting(meeting_id)
@@ -597,6 +723,90 @@ def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
         raise HTTPException(status_code=404, detail="Встреча не найдена")
     _purge_files(meeting_id)
     return {"ok": True}
+
+
+def _segments_doc(meeting: dict) -> dict:
+    if not meeting.get("segments"):
+        raise HTTPException(status_code=409, detail="В этой записи нет разметки спикеров. Повторите обработку.")
+    if meeting["status"] in store.ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="Подождите, пока встреча обрабатывается")
+    return {
+        "speakers": meeting.get("speakers") or [],
+        "segments": meeting.get("segments") or [],
+        "note": meeting.get("diarization_note"),
+    }
+
+
+def _save_segments(meeting_id: str, document: dict, result: dict | None, *, replace_from: str | None = None, replace_to: str | None = None) -> dict:
+    stored_result = result
+    if stored_result is not None and replace_from and replace_to:
+        stored_result = replace_speaker_label(stored_result, replace_from, replace_to)
+    store.update_meeting(
+        meeting_id,
+        transcript=render_transcript(document),
+        transcript_segments=document,
+        result=stored_result,
+    )
+    updated = store.get_meeting(meeting_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Встреча не найдена")
+    return updated
+
+
+def _queue_protocol(meeting_id: str, message: str) -> dict:
+    store.update_meeting(
+        meeting_id,
+        status="queued",
+        status_message=message,
+        error=None,
+        result=None,
+        progress=88,
+        queued_at=store.utc_now(),
+    )
+    store.refresh_queue_messages()
+    worker.notify_work()
+    updated = store.get_meeting(meeting_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Встреча не найдена")
+    return updated
+
+
+@app.patch("/api/meetings/{meeting_id}/speakers/{speaker_id}")
+def rename_meeting_speaker(
+    meeting_id: str,
+    speaker_id: str,
+    payload: SpeakerNameIn,
+    user: dict = Depends(require_user),
+) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    document = _segments_doc(meeting)
+    try:
+        updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name)
+    except SpeakerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _save_segments(
+        meeting_id,
+        updated,
+        meeting.get("result"),
+        replace_from=old_name,
+        replace_to=new_name,
+    )
+
+
+@app.patch("/api/meetings/{meeting_id}/segments")
+def reassign_meeting_segments(
+    meeting_id: str,
+    payload: SpeakerAssignIn,
+    user: dict = Depends(require_user),
+) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    document = _segments_doc(meeting)
+    try:
+        updated = reassign_segments(document, payload.segment_indexes, payload.speaker_id)
+    except SpeakerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _save_segments(meeting_id, updated, None)
+    return _queue_protocol(meeting_id, "Обновляю протокол после правки спикеров")
 
 
 @app.get("/api/meetings/{meeting_id}/export.md", response_class=PlainTextResponse)
