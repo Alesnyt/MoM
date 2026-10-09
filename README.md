@@ -1,8 +1,8 @@
 # MoM — протоколы встреч из записей
 
-Self-hosted приложение: загружаете запись созвона (**webm**, также mp4/mp3/wav/m4a/ogg), локальный Whisper или Сбер GigaAM Multilingual расшифровывает речь, Qwen или OpenAI собирает саммари, поручения и протокол (Minutes of Meeting).
+Self-hosted сервис: запись созвона (**webm**, mp4, mp3, wav, m4a, ogg) остаётся на машине. Локальный Whisper или Сбер GigaAM расшифровывает речь, Qwen или OpenAI собирает саммари, поручения и протокол (Minutes of Meeting). В транскрипте спикеров можно назвать и поправить. Пользователи входят локальным паролем или через LDAP/LDAPS.
 
-Данные остаются на машине (SQLite в `data/`). Есть администратор, пользователи и архив встреч. Один процесс FastAPI раздаёт API и интерфейс.
+Данные — SQLite в `data/`. Один процесс FastAPI раздаёт API и интерфейс. Для установки в контуре компании достаточно Docker: Python, ffmpeg и PyTorch уже внутри образа.
 
 ## Системные требования
 
@@ -23,7 +23,7 @@ Self-hosted приложение: загружаете запись созвон
 
 Для доступа с браузера достаточно обычного Chrome/Firefox/Safari. Порт по умолчанию **8000**.
 
-## Установка на Linux (виртуальная машина)
+## Установка на Linux без Docker
 
 Нужен исходящий доступ в интернет при установке (пакеты, npm, PyTorch, модель Whisper ~500 МБ).
 
@@ -67,7 +67,36 @@ docker compose up -d
 docker compose logs mom
 ```
 
-Откройте `http://<IP>:8000`. Каталог `data/` и файл `.env` переживают пересборку контейнера. Whisper `small` скачается в `data/whisper/` при первой расшифровке, не при сборке образа.
+Откройте `http://<IP>:8000`. Каталог `data/` и файл `.env` переживают пересборку контейнера. Whisper `small` скачается в `data/whisper/` при первой расшифровке, не при сборке образа. Обновление образа: `git pull && docker compose up -d --build`.
+
+### Контур, где наружу ходит только GitHub
+
+`docker compose build` на целевой машине снова тянет Docker Hub, PyPI, npm и Hugging Face. Если эти адреса закрыты, образ и веса собирают там, где они открыты (или в GitHub Actions), и привозят файлами.
+
+На машине с доступом к этим адресам:
+
+```bash
+docker compose build
+docker compose up -d
+docker compose exec mom python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8', download_root='/app/data/whisper')"
+docker compose down
+docker save "$(docker compose images -q mom)" -o mom-image.tar
+tar czf mom-models.tgz data/whisper data/hf
+```
+
+Если в админке выбран GigaAM, на той же машине заранее скачайте его в `data/hf` (`ai-sage/GigaAM-Multilingual`, ревизия `ctc` или `large_ctc`). Иначе первая расшифровка снова пойдёт на Hugging Face.
+
+В контуре:
+
+```bash
+git clone https://github.com/Alesnyt/MoM.git
+cd MoM
+cp .env.example .env
+docker load -i mom-image.tar
+tar xzf mom-models.tgz
+```
+
+В `.env` добавьте `HF_HUB_OFFLINE=1` и `TRANSFORMERS_OFFLINE=1`. Запуск без повторной сборки: `docker compose up -d` (без `--build`). Облачный чат Qwen или OpenAI по-прежнему нужен исходящий HTTPS.
 
 Не публикуйте порт 8000 в интернет. Для доступа снаружи поставьте Caddy или nginx с TLS — cookie `Secure` ставится только за HTTPS (или если запрос пришёл с localhost через доверенный прокси).
 
@@ -121,7 +150,7 @@ mom.example.com {
 
 Если порт занят: остановите другой процесс или `MOM_KILL_PORT=1 ./start.sh`.
 
-Не запускайте несколько worker-процессов uvicorn: модель Whisper/GigaAM живёт в памяти одного процесса. Внутри процесса очередь (`MAX_JOBS`, по умолчанию 1) запускает несколько встреч сразу, если задать больше: вырезание аудио и запросы к Qwen параллелятся, локальное распознавание берёт модель по очереди, чтобы не грузить GigaAM дважды. После рестарта незавершённые встречи снова встают в очередь, а не помечаются ошибкой. Сессии сохраняются в SQLite.
+Не запускайте несколько worker-процессов uvicorn: модель Whisper/GigaAM живёт в памяти одного процесса. Внутри процесса очередь (`MAX_JOBS`, по умолчанию 1) запускает несколько встреч сразу, если задать больше: вырезание аудио и запросы к Qwen параллелятся, локальное распознавание берёт модель по очереди, чтобы не грузить GigaAM дважды. После рестарта встреча с уже сохранённой расшифровкой продолжает только сборку протокола, а не гоняет Whisper заново. Сессии сохраняются в SQLite.
 
 ## Обновление с GitHub
 
