@@ -45,6 +45,14 @@ def test_disk_refuses_when_reserve_is_gone(db: Path, monkeypatch: pytest.MonkeyP
     with pytest.raises(disk.DiskError, match="не помещается"):
         disk.ensure_space(1024)
 
+    def _walk() -> int:
+        raise AssertionError("public disk check walked recordings")
+
+    monkeypatch.setattr(disk, "_recordings_bytes", _walk)
+    assert disk.has_room() is False
+    with pytest.raises(disk.DiskError):
+        disk.ensure_space()
+
 
 def test_snapshot_roundtrip_and_rejects_data_dir(db: Path) -> None:
     user = store.create_user("a@example.com", auth.hash_password("secret-pass"), 5)

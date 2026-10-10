@@ -5,6 +5,7 @@ import logging
 import math
 import shutil
 import subprocess
+import wave
 from pathlib import Path
 
 from . import config
@@ -127,6 +128,32 @@ def extract_wav(src: Path, dst: Path) -> float:
     if not dst.exists() or dst.stat().st_size == 0:
         raise AudioError("Не удалось подготовить WAV для распознавания")
     return duration_seconds(dst)
+
+
+def cut_pcm(src: Path, dst: Path, start: float, end: float) -> None:
+    """Slice a prepared 16 kHz WAV in process. Other files go through ffmpeg."""
+    try:
+        _slice_pcm(src, dst, start, end)
+    except (wave.Error, EOFError):
+        cut_wav(src, dst, start, end)
+
+
+def _slice_pcm(src: Path, dst: Path, start: float, end: float) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(src), "rb") as source:
+        if source.getnchannels() != 1 or source.getsampwidth() != 2 or source.getframerate() != 16000:
+            raise wave.Error("not a prepared recording")
+        rate = source.getframerate()
+        first = min(source.getnframes(), max(0, int(start * rate)))
+        last = min(source.getnframes(), max(first, int(end * rate)))
+        source.setpos(first)
+        frames = source.readframes(last - first)
+        if not frames:
+            raise wave.Error("empty slice")
+        params = source.getparams()
+    with wave.open(str(dst), "wb") as target:
+        target.setparams(params)
+        target.writeframes(frames)
 
 
 def cut_wav(src: Path, dst: Path, start: float, end: float) -> None:

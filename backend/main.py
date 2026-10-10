@@ -117,10 +117,6 @@ class UserPatchIn(BaseModel):
     auth_mode: str | None = None
 
 
-class UserLimitIn(BaseModel):
-    archive_limit: int = Field(ge=1, le=100)
-
-
 def _peer_trusted(request: Request) -> bool:
     host = (request.client.host if request.client else "") or ""
     return host in _LOOPBACK
@@ -283,9 +279,10 @@ def _normalize_auth_mode(value: str) -> str:
 
 
 def _health(*, full: bool = False) -> dict:
-    disk_status = disk.snapshot()
-    if not full:
-        disk_status = {"ok": disk_status["ok"]}
+    if full:
+        disk_status = disk.snapshot()
+    else:
+        disk_status = {"ok": disk.has_room()}
     return {
         "ok": True,
         "ffmpeg": ffmpeg_available(),

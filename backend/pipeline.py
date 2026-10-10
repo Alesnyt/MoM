@@ -16,11 +16,13 @@ from .analyze import (
     transcribe_file,
 )
 from . import config
-from .audio import AudioError, extract_audio_async, split_audio_async
+from .audio import AudioError, extract_audio_async, extract_wav, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import notify_meeting_done
-from .diarize import apply_diarization
+from .diarize import DiarizeUnavailable, apply_diarization, available as diarization_available, diarize_turns
+from .gigaam_asr import transcribe_spans
 from .logctx import meeting_scope
+from .speakers import assign_speakers, render_transcript, speaker_spans
 
 log = logging.getLogger("mom.pipeline")
 
@@ -162,20 +164,70 @@ async def _process_meeting(meeting_id: str) -> None:
             progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
             duration = await extract_audio_async(src, audio_path)
             store.update_meeting(meeting_id, duration_seconds=duration)
-            step = "расшифровка"
-            log.info("шаг: расшифровка model=%s", config.get_asr_model())
             progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
 
-            payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
-            step = "спикеры"
-            log.info("шаг: спикеры")
-            progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
-            voiced = await asyncio.to_thread(
-                apply_diarization,
-                audio_path,
-                payload,
-                lambda message: progress.set(86, message, status="transcribing", force=True),
-            )
+            voiced = None
+            payload: dict = {"language": meeting.get("language")}
+            known_turns: list | None = None
+            known_note: str | None = None
+            if config.is_gigaam_asr() and diarization_available():
+                step = "спикеры"
+                log.info("шаг: спикеры до расшифровки")
+                progress.set(20, "Размечаю спикеров", status="transcribing", force=True)
+                prepared = audio_path.with_name(f"{audio_path.stem}.voices.wav")
+                try:
+                    await asyncio.to_thread(extract_wav, audio_path, prepared)
+                    try:
+                        known_turns = await asyncio.to_thread(diarize_turns, audio_path, prepared=prepared)
+                    except DiarizeUnavailable as exc:
+                        known_turns = []
+                        known_note = str(exc)
+                        log.info("Спикеры не размечены: %s", exc)
+                    except Exception:
+                        known_turns = []
+                        known_note = (
+                            "Не удалось разметить спикеров. Реплики собраны в одного, имя можно задать вручную."
+                        )
+                        log.exception("Разметка спикеров не удалась")
+                    spans = speaker_spans(known_turns or [])
+                    if spans:
+                        step = "расшифровка"
+                        log.info("шаг: расшифровка по голосам, реплик %s", len(spans))
+                        progress.set(30, "Расшифровываю реплики по голосам", status="transcribing", force=True)
+
+                        def on_slice(pct: int, message: str) -> None:
+                            progress.set(30 + int(max(0, min(100, pct)) * 0.55), message, status="transcribing")
+
+                        payload = await asyncio.to_thread(
+                            transcribe_spans,
+                            prepared,
+                            spans,
+                            meeting.get("language"),
+                            on_slice,
+                        )
+                        voiced = assign_speakers(payload.get("segments") or [], known_turns or [])
+                        voiced["note"] = known_note
+                        voiced["text"] = render_transcript(voiced)
+                finally:
+                    prepared.unlink(missing_ok=True)
+            if voiced is None:
+                step = "расшифровка"
+                log.info("шаг: расшифровка model=%s", config.get_asr_model())
+                payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
+                if known_turns is not None:
+                    voiced = assign_speakers(payload.get("segments") or [], known_turns)
+                    voiced["note"] = known_note
+                    voiced["text"] = render_transcript(voiced)
+                else:
+                    step = "спикеры"
+                    log.info("шаг: спикеры")
+                    progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
+                    voiced = await asyncio.to_thread(
+                        apply_diarization,
+                        audio_path,
+                        payload,
+                        lambda message: progress.set(86, message, status="transcribing", force=True),
+                    )
             transcript = (voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")

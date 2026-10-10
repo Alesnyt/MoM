@@ -61,13 +61,20 @@ def vendor_code_sha256() -> str:
     return hashlib.sha256(vendor_code_path().read_bytes()).hexdigest()
 
 
+_vendor_checked = False
+
+
 def assert_vendor_code() -> None:
+    global _vendor_checked
+    if _vendor_checked:
+        return
     digest = vendor_code_sha256()
     if digest != config.GIGAAM_CODE_SHA256:
         raise RuntimeError(
             "Код GigaAM в репозитории не совпадает с зафиксированным хешем. "
             "Файл modeling_gigaam.py менять нельзя."
         )
+    _vendor_checked = True
 
 
 def gigaam_pin(revision: str | None = None) -> dict[str, Any]:
@@ -226,15 +233,50 @@ def transcribe_gigaam_sync(
 
 
 def transcribe_span(src: Path, start: float, end: float) -> str:
-    """Recognize one voice slice cut out of a longer GigaAM chunk."""
+    """Recognize one voice slice cut out of a longer recording."""
     if end - start < 0.3:
         return ""
-    from .audio import cut_wav
+    return _transcribe_loaded(_load(), src, start, end)
 
-    model = _load()
+
+def transcribe_spans(
+    src: Path,
+    spans: list[dict[str, float]],
+    language: str | None = None,
+    on_progress: ProgressFn | None = None,
+) -> dict[str, Any]:
+    """Recognize each voice slice once. Used when diarization already knows the boundaries."""
+    model = _load(on_progress)
+    texts: list[str] = []
+    timed: list[dict[str, Any]] = []
+    count = max(1, len(spans))
+    for index, span in enumerate(spans):
+        if on_progress:
+            pct = min(99, int(index / count * 100))
+            on_progress(pct, f"GigaAM: реплика {index + 1} из {count}")
+        start = float(span["start"])
+        end = float(span["end"])
+        try:
+            text = _transcribe_loaded(model, src, start, end)
+        except Exception as exc:
+            log.exception("gigaam реплика %.2f–%.2f", start, end)
+            raise RuntimeError(f"GigaAM не смог расшифровать реплику {index + 1}: {exc}") from exc
+        if not text:
+            continue
+        texts.append(text)
+        timed.append({"start": start, "end": end, "text": text})
+    if on_progress:
+        on_progress(100, "Расшифровка завершена")
+    log.info("gigaam готово реплик %s", len(timed))
+    return {"language": language, "text": " ".join(texts).strip(), "segments": timed}
+
+
+def _transcribe_loaded(model: Any, src: Path, start: float, end: float) -> str:
+    from .audio import cut_pcm
+
     dst = src.parent / f"{src.stem}_{start:.2f}_{end:.2f}.wav"
     try:
-        cut_wav(src, dst, start, end)
+        cut_pcm(src, dst, start, end)
         return _text_of(model.transcribe(str(dst)))
     finally:
         dst.unlink(missing_ok=True)

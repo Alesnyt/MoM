@@ -18,6 +18,40 @@ COARSE_SECONDS = 8.0
 MIN_SLICE_SECONDS = 0.45
 
 
+def speaker_spans(turns: list[dict[str, Any]], *, max_seconds: float = 20.0) -> list[dict[str, float]]:
+    """One recognition slice per stretch of the same voice, never longer than GigaAM allows."""
+    cleaned = [_turn(item) for item in turns if item.get("speaker")]
+    cleaned.sort(key=lambda item: (item["start"], item["end"]))
+    merged: list[dict[str, Any]] = []
+    for turn in cleaned:
+        if turn["end"] - turn["start"] < MIN_SLICE_SECONDS:
+            continue
+        if (
+            merged
+            and merged[-1]["speaker"] == turn["speaker"]
+            and turn["start"] - merged[-1]["end"] <= 0.3
+        ):
+            merged[-1]["end"] = max(merged[-1]["end"], turn["end"])
+        else:
+            merged.append(dict(turn))
+    spans: list[dict[str, float]] = []
+    step = max(MIN_SLICE_SECONDS, float(max_seconds))
+    for turn in merged:
+        cursor = float(turn["start"])
+        end = float(turn["end"])
+        made = False
+        while cursor < end:
+            if end - cursor < MIN_SLICE_SECONDS:
+                if made:
+                    spans[-1]["end"] = end
+                break
+            stop = min(end, cursor + step)
+            spans.append({"start": cursor, "end": stop})
+            made = True
+            cursor = stop
+    return spans
+
+
 def plan_cuts(segment: dict[str, Any], turns: list[dict[str, Any]]) -> list[dict[str, float]] | None:
     """Time slices of a long chunk that contains more than one voice.
 

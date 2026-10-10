@@ -57,6 +57,19 @@ def format_bytes(value: int) -> str:
     return f"{text} {unit}"
 
 
+def free_bytes() -> int:
+    path = config.DATA_DIR if config.DATA_DIR.exists() else config.DATA_DIR.parent
+    try:
+        return int(_usage(path).free)
+    except FileNotFoundError:
+        config.ensure_dirs()
+        return int(_usage(config.DATA_DIR).free)
+
+
+def has_room() -> bool:
+    return free_bytes() >= config.MIN_FREE_BYTES
+
+
 def snapshot() -> dict:
     config.ensure_dirs()
     usage = _usage(config.DATA_DIR)
@@ -72,10 +85,10 @@ def snapshot() -> dict:
 
 
 def ensure_space(extra: int = 0) -> None:
-    current = snapshot()
+    free = free_bytes()
     incoming = max(0, int(extra))
-    need = current["min_free_bytes"] + incoming
-    free = current["free_bytes"]
+    minimum = config.MIN_FREE_BYTES
+    need = minimum + incoming
     if free >= need:
         return
     if incoming:
@@ -85,5 +98,5 @@ def ensure_space(extra: int = 0) -> None:
         )
     raise DiskError(
         f"На диске свободно {format_bytes(free)}. "
-        f"Нужно хотя бы {format_bytes(current['min_free_bytes'])}, чтобы расшифровка не оборвалась."
+        f"Нужно хотя бы {format_bytes(minimum)}, чтобы расшифровка не оборвалась."
     )

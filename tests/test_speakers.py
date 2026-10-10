@@ -5,6 +5,7 @@ from backend.speakers import (
     expand_coarse_segments,
     plan_cuts,
     reassign_segments,
+    speaker_spans,
     rename_speaker,
     render_transcript,
     replace_speaker_label,
@@ -44,6 +45,24 @@ def test_long_chunk_is_cut_on_voice_boundaries() -> None:
     assert [item["text"] for item in expanded] == ["первая", "вторая"]
     document = assign_speakers(expanded, turns)
     assert [item["speaker"] for item in document["segments"]] == ["S1", "S2"]
+
+
+def test_speaker_spans_follow_one_voice_and_stay_short() -> None:
+    turns = [
+        {"start": 0.0, "end": 10.0, "speaker": "A"},
+        {"start": 10.2, "end": 18.0, "speaker": "A"},
+        {"start": 19.0, "end": 64.0, "speaker": "B"},
+    ]
+    assert speaker_spans(turns) == [
+        {"start": 0.0, "end": 18.0},
+        {"start": 19.0, "end": 39.0},
+        {"start": 39.0, "end": 59.0},
+        {"start": 59.0, "end": 64.0},
+    ]
+    assert speaker_spans([{"start": 0.0, "end": 20.3, "speaker": "A"}]) == [
+        {"start": 0.0, "end": 20.3}
+    ]
+    assert speaker_spans([{"start": 0.0, "end": 0.2, "speaker": "A"}]) == []
 
 
 def test_short_phrase_stays_whole() -> None:

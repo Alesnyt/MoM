@@ -323,20 +323,6 @@ def merge_transcripts(chunks: list[tuple[float, dict[str, Any]]]) -> dict[str, A
     }
 
 
-def format_transcript(payload: dict[str, Any]) -> str:
-    segments = payload.get("segments") or []
-    if not segments:
-        return (payload.get("text") or "").strip()
-    lines = []
-    for segment in segments:
-        start = float(segment.get("start") or 0)
-        minutes = int(start // 60)
-        seconds = int(start % 60)
-        text = (segment.get("text") or "").strip()
-        lines.append(f"[{minutes:02d}:{seconds:02d}] {text}")
-    return "\n".join(lines)
-
-
 async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: str | None) -> dict[str, Any]:
     model = config.get_chat_model()
     log.info("llm model=%s символов %s", model, len(transcript))

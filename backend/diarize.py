@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from . import config
 from .audio import extract_wav
-from .speakers import assign_speakers, expand_coarse_segments, plan_cuts, render_transcript
+from .speakers import assign_speakers, expand_coarse_segments, render_transcript
 
 log = logging.getLogger("mom.diarize")
 
@@ -43,16 +43,16 @@ def apply_diarization(
             log.exception("Разметка спикеров не удалась")
             note = "Не удалось разметить спикеров. Реплики собраны в одного, имя можно задать вручную."
     if turns and config.is_gigaam_asr():
-        mixed = sum(1 for segment in segments if plan_cuts(segment, turns))
-        if mixed:
+        before = len(segments)
+        segments = expand_coarse_segments(
+            segments,
+            turns,
+            lambda start, end: _transcribe_voice_slice(audio_path, start, end),
+        )
+        if len(segments) != before:
             if on_progress:
                 on_progress("Режу реплики по голосам")
-            log.info("gigaam смешанных кусков %s, режу по границам голоса", mixed)
-            segments = expand_coarse_segments(
-                segments,
-                turns,
-                lambda start, end: _transcribe_voice_slice(audio_path, start, end),
-            )
+            log.info("gigaam реплик стало %s вместо %s", len(segments), before)
     document = assign_speakers(segments, turns)
     document["note"] = note
     document["text"] = render_transcript(document)
@@ -66,6 +66,10 @@ def _transcribe_voice_slice(audio_path: Path, start: float, end: float) -> str:
     return transcribe_span(audio_path, start, end)
 
 
+def available() -> bool:
+    return _unavailable_reason() is None
+
+
 def _unavailable_reason() -> str | None:
     if not config.get_hf_token():
         return "Нет HF_TOKEN — все реплики собраны в одного спикера"
@@ -76,7 +80,7 @@ def _unavailable_reason() -> str | None:
     return None
 
 
-def diarize_turns(audio_path: Path) -> list[dict[str, Any]]:
+def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dict[str, Any]]:
     token = config.get_hf_token()
     if not token:
         raise DiarizeUnavailable("Нет HF_TOKEN — все реплики собраны в одного спикера")
@@ -86,15 +90,17 @@ def diarize_turns(audio_path: Path) -> list[dict[str, Any]]:
         raise DiarizeUnavailable(
             "Модель спикеров не установлена. Выполните: pip install -r requirements-diarize.txt"
         ) from exc
-    wav = audio_path.with_name(f"{audio_path.stem}.diarize.wav")
+    wav = prepared or audio_path.with_name(f"{audio_path.stem}.diarize.wav")
     pipeline = None
     try:
-        extract_wav(audio_path, wav)
+        if prepared is None:
+            extract_wav(audio_path, wav)
         pipeline = _load_pipeline(Pipeline, token)
         output = _run_pipeline(pipeline, wav)
         return _read_turns(output)
     finally:
-        wav.unlink(missing_ok=True)
+        if prepared is None:
+            wav.unlink(missing_ok=True)
         del pipeline
         gc.collect()
 
