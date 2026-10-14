@@ -241,7 +241,13 @@ async def _process_meeting(meeting_id: str) -> None:
                     "note": voiced.get("note"),
                 },
                 language=payload.get("language"),
+                status="review",
+                status_message="Расшифровка готова. Разметьте спикеров или соберите протокол.",
+                progress=100,
+                error=None,
             )
+            log.info("шаг: проверка спикеров")
+            return
         step = "протокол"
         parts = max(1, (len(transcript) + 79_999) // 80_000)
         label = config.chat_label()

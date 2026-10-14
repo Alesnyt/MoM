@@ -18,6 +18,7 @@ STATUSES = (
     "extracting",
     "transcribing",
     "analyzing",
+    "review",
     "done",
     "error",
 )
@@ -628,7 +629,7 @@ def drop_sessions_for_user(user_id: str) -> None:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
 
-_AUDIT_KEEP = 2000
+AUDIT_KEEP = 2000
 
 
 def _audit_text(value: str, limit: int) -> str:
@@ -660,12 +661,12 @@ def record_audit(actor: str, action: str, target: str = "", detail: str = "") ->
                 SELECT id FROM audit_events ORDER BY id DESC LIMIT ?
             )
             """,
-            (_AUDIT_KEEP,),
+            (AUDIT_KEEP,),
         )
 
 
 def list_audit(limit: int = 200) -> list[dict[str, Any]]:
-    size = max(1, min(int(limit), 500))
+    size = max(1, min(int(limit), AUDIT_KEEP))
     with connect() as conn:
         rows = conn.execute(
             """

@@ -26,6 +26,27 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+def test_audit_page_is_short_and_export_keeps_the_rest(db: Path) -> None:
+    import io
+    import zipfile
+
+    from backend import audit
+
+    for index in range(25):
+        store.record_audit("boss", "user.login", f"user{index}@example.com", "вход")
+    page = audit.page(20)
+    assert len(page) == 20
+    assert page[0]["target"] == "user24@example.com"
+    assert page[0]["label"] == "Вход пользователя"
+    text = audit.export_csv().decode("utf-8-sig")
+    assert "user0@example.com" in text
+    assert text.count("@example.com") == 25
+    with zipfile.ZipFile(io.BytesIO(audit.export_xlsx())) as workbook:
+        sheet = workbook.read("xl/worksheets/sheet1.xml").decode()
+    assert "user0@example.com" in sheet
+    assert "Вход пользователя" in sheet
+
+
 def test_audit_keeps_short_text_newest_first(db: Path) -> None:
     store.record_audit("boss", "user.create", "a@example.com", "первая\nстрока")
     store.record_audit("boss", "ldap.save", "ldap", "x" * 800)
@@ -122,6 +143,7 @@ def test_admin_journal_hides_secrets(db: Path, monkeypatch: pytest.MonkeyPatch) 
 
     with TestClient(app) as client:
         assert client.get("/api/admin/audit").status_code == 401
+        assert client.get("/api/admin/audit/export").status_code == 401
         admin = "admin-token"
         store.put_session(admin, "admin", username="boss", expires=time.time() + 3600)
         client.cookies.set(auth.COOKIE_NAME, admin)
@@ -186,6 +208,22 @@ def test_admin_journal_hides_secrets(db: Path, monkeypatch: pytest.MonkeyPatch) 
         fresh = reset.json()["password"]
 
         journal = client.get("/api/admin/audit").json()
+        assert client.get("/api/admin/audit", params={"limit": 15}).status_code == 400
+        exported = client.get("/api/admin/audit/export", params={"format": "csv"})
+        assert exported.status_code == 200, exported.text
+        assert exported.headers["content-type"].startswith("text/csv")
+        assert "Сброшен пароль" in exported.text
+        assert "super-secret-bind" not in exported.text
+        workbook = client.get("/api/admin/audit/export", params={"format": "xlsx"})
+        assert workbook.status_code == 200
+        assert workbook.content[:2] == b"PK"
+        import io
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            sheet = archive.read("xl/worksheets/sheet1.xml").decode()
+        assert "Сброшен пароль" in sheet
+        assert "super-secret-bind" not in sheet
 
     blob = " ".join(f"{row['actor']} {row['action']} {row['target']} {row['detail']}" for row in journal)
     assert password not in blob

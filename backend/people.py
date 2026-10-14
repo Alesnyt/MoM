@@ -43,3 +43,28 @@ def suggest(query: str = "") -> dict:
         except ldap_auth.LdapError:
             log.warning("Каталог не отдал подсказки имён, остаются пользователи MoM")
     return {"people": people[:40], "ldap": config.ldap_configured()}
+
+
+def directory(query: str = "") -> dict:
+    """LDAP people with an email, for the admin form that creates a catalog user."""
+    needle = query.strip()
+    if not config.ldap_configured():
+        return {"people": [], "ldap": False}
+    if len(needle) < 2:
+        return {"people": [], "ldap": True}
+    try:
+        found = ldap_auth.search_people(needle)
+    except ldap_auth.LdapError as exc:
+        return {"people": [], "ldap": True, "error": str(exc)}
+    people: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for person in found:
+        email = (person.get("email") or "").strip()
+        if "@" not in email or " " in email:
+            continue
+        key = email.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        people.append({"name": (person.get("name") or email).strip() or email, "email": email})
+    return {"people": people, "ldap": True}

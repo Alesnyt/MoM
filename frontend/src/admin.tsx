@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   createUser,
+  listDirectory,
+  type DirectoryPerson,
   deleteApiKey,
   getSettings,
   listAudit,
+  downloadAudit,
   listUsers,
   loginAdmin,
   logoutAdmin,
@@ -213,7 +216,7 @@ export function AdminSection({
         )}
       </div>
       {tab === "users" ? (
-        <UsersPanel />
+        <UsersPanel ldapConfigured={Boolean(health?.ldap?.configured)} />
       ) : tab === "ldap" ? (
         <LdapPanel health={health} onChange={onHealth} />
       ) : tab === "audit" ? (
@@ -227,7 +230,7 @@ export function AdminSection({
 }
 
 
-function UsersPanel() {
+function UsersPanel({ ldapConfigured }: { ldapConfigured: boolean }) {
   const [users, setUsers] = useState<PlatformUser[]>([]);
   const [email, setEmail] = useState("");
   const [limit, setLimit] = useState(5);
@@ -235,6 +238,9 @@ function UsersPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [secret, setSecret] = useState<{ email: string; password: string } | null>(null);
+  const [directory, setDirectory] = useState<DirectoryPerson[]>([]);
+  const [directoryState, setDirectoryState] = useState<"idle" | "loading" | "empty" | "error">("idle");
+  const [directoryNote, setDirectoryNote] = useState<string | null>(null);
 
   async function reload() {
     setUsers(await listUsers());
@@ -243,6 +249,45 @@ function UsersPanel() {
   useEffect(() => {
     reload().catch((err: Error) => setError(err.message));
   }, []);
+
+  useEffect(() => {
+    if (authMode !== "ldap" || !ldapConfigured) {
+      setDirectory([]);
+      setDirectoryState("idle");
+      setDirectoryNote(null);
+      return;
+    }
+    const query = email.trim();
+    if (query.length < 2) {
+      setDirectory([]);
+      setDirectoryState("idle");
+      setDirectoryNote(null);
+      return;
+    }
+    let cancelled = false;
+    setDirectoryState("loading");
+    const timer = window.setTimeout(() => {
+      listDirectory(query)
+        .then((found) => {
+          if (cancelled) return;
+          const taken = new Set(users.map((item) => item.email.toLowerCase()));
+          const fresh = found.people.filter((item) => item.email && !taken.has(item.email.toLowerCase()));
+          setDirectory(fresh);
+          setDirectoryNote(found.error || null);
+          setDirectoryState(found.error ? "error" : fresh.length ? "idle" : "empty");
+        })
+        .catch((err: Error) => {
+          if (cancelled) return;
+          setDirectory([]);
+          setDirectoryNote(err.message);
+          setDirectoryState("error");
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [authMode, email, ldapConfigured, users]);
 
   async function onCreate() {
     setError(null);
@@ -334,11 +379,39 @@ function UsersPanel() {
         </div>
         <input
           className="title-input"
-          type="email"
-          placeholder="email@company.com"
+          type={authMode === "ldap" ? "text" : "email"}
+          inputMode={authMode === "ldap" ? "email" : undefined}
+          autoComplete="off"
+          placeholder={authMode === "ldap" ? "Имя или email из каталога" : "email@company.com"}
+          aria-label={authMode === "ldap" ? "Сотрудник из каталога" : "Email"}
+          list={authMode === "ldap" ? "ldap-people" : undefined}
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
+        {authMode === "ldap" && (
+          <>
+            <datalist id="ldap-people">
+              {directory.map((person) => (
+                <option key={person.email} value={person.email}>
+                  {person.name !== person.email ? person.name : person.email}
+                </option>
+              ))}
+            </datalist>
+            <p className="progress-hint">
+              {!ldapConfigured
+                ? "Каталог не подключён. Сначала включите LDAP во вкладке «Каталог»."
+                : directoryState === "loading"
+                  ? "Ищу в каталоге…"
+                  : directoryState === "error"
+                    ? directoryNote || "Каталог не ответил. Email можно вписать целиком."
+                    : directoryState === "empty"
+                      ? "В каталоге никого не нашлось. Email можно вписать целиком."
+                      : directory.length
+                        ? "Выберите сотрудника из списка или впишите email целиком."
+                        : "Начните вводить имя или почту — варианты подтянутся из каталога."}
+            </p>
+          </>
+        )}
         <input
           className="title-input"
           style={{ marginTop: 10 }}
@@ -647,7 +720,7 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
   if (tab === "audit") {
     return {
       title: "Журнал",
-      lead: "Входы, пользователи, ключ, каталог, удаление встреч, спикеры и отправка протокола.",
+      lead: "Последние 20, 40 или 100 событий. CSV и XLSX выгружают весь журнал.",
     };
   }
   return {
@@ -680,13 +753,17 @@ const AUDIT_LABELS: Record<string, string> = {
   "smtp.save": "Изменена почта",
 };
 
+const AUDIT_PAGE_SIZES = [20, 40, 100] as const;
+
 function AuditPanel() {
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
+  const [limit, setLimit] = useState<(typeof AUDIT_PAGE_SIZES)[number]>(20);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<"csv" | "xlsx" | null>(null);
 
-  function load() {
+  function load(size = limit) {
     setError(null);
-    listAudit()
+    listAudit(size)
       .then(setEvents)
       .catch((err: Error) => {
         setEvents([]);
@@ -694,15 +771,49 @@ function AuditPanel() {
       });
   }
 
-  useEffect(load, []);
+  useEffect(() => {
+    load(limit);
+  }, [limit]);
+
+  async function onExport(format: "csv" | "xlsx") {
+    setError(null);
+    setExporting(format);
+    try {
+      await downloadAudit(format);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось выгрузить журнал");
+    } finally {
+      setExporting(null);
+    }
+  }
 
   return (
     <div className="audit-panel">
       <div className="actions-row">
-        <button className="ghost" type="button" onClick={load}>
+        <label className="audit-size">
+          Показать
+          <select
+            value={limit}
+            onChange={(event) => setLimit(Number(event.target.value) as (typeof AUDIT_PAGE_SIZES)[number])}
+          >
+            {AUDIT_PAGE_SIZES.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="ghost" type="button" onClick={() => load()} disabled={exporting !== null}>
           Обновить
         </button>
+        <button className="ghost" type="button" onClick={() => void onExport("csv")} disabled={exporting !== null}>
+          {exporting === "csv" ? "Готовлю CSV…" : "CSV"}
+        </button>
+        <button className="ghost" type="button" onClick={() => void onExport("xlsx")} disabled={exporting !== null}>
+          {exporting === "xlsx" ? "Готовлю XLSX…" : "XLSX"}
+        </button>
       </div>
+      <p className="progress-hint">На экране последние {limit}. Файлы содержат весь журнал.</p>
       {error && <div className="banner" role="alert">{error}</div>}
       {events === null ? (
         <p>Загружаю журнал…</p>
@@ -714,7 +825,7 @@ function AuditPanel() {
             <article className="audit-row" key={event.id}>
               <time dateTime={event.at}>{formatDate(event.at)}</time>
               <div>
-                <strong>{AUDIT_LABELS[event.action] || event.action}</strong>
+                <strong>{event.label || AUDIT_LABELS[event.action] || event.action}</strong>
                 <span>{event.actor}</span>
                 {(event.detail || event.target) && (
                   <small>

@@ -80,16 +80,42 @@ export async function logoutUser(): Promise<UserSession> {
   return response.json();
 }
 
-export async function listAudit(): Promise<AuditEvent[]> {
-  const response = await fetch("/api/admin/audit", { credentials: "include" });
+export async function listAudit(limit = 20): Promise<AuditEvent[]> {
+  const response = await fetch(`/api/admin/audit?limit=${limit}`, { credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
+}
+
+export async function downloadAudit(format: "csv" | "xlsx"): Promise<void> {
+  const response = await fetch(`/api/admin/audit/export?format=${format}`, { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = format === "xlsx" ? "mom-zhurnal.xlsx" : "mom-zhurnal.csv";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function listUsers(): Promise<PlatformUser[]> {
   const response = await fetch("/api/admin/users", { credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
+}
+
+export type DirectoryPerson = {
+  name: string;
+  email: string;
+};
+
+export async function listDirectory(query: string): Promise<{ people: DirectoryPerson[]; ldap: boolean; error?: string }> {
+  const response = await fetch(`/api/admin/directory?q=${encodeURIComponent(query)}`, { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  const data = await response.json();
+  return { people: data.people ?? [], ldap: Boolean(data.ldap), error: data.error || undefined };
 }
 
 export async function createUser(
@@ -299,6 +325,12 @@ export async function createMeeting(file: File, title: string): Promise<Meeting>
 export async function deleteMeeting(id: string): Promise<void> {
   const response = await fetch(`/api/meetings/${id}`, { method: "DELETE", credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
+}
+
+export async function startProtocol(id: string): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/protocol`, { method: "POST", credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
 }
 
 export async function retryMeeting(id: string): Promise<Meeting> {

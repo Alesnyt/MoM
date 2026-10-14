@@ -33,7 +33,13 @@ def user_filter(username: str) -> str:
 def people_filter(query: str) -> str:
     escaped = escape_filter(query.strip())
     mail = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-    clauses = [f"(cn=*{escaped}*)", f"(displayName=*{escaped}*)", f"({mail}=*{escaped}*)"]
+    clauses = [
+        f"(cn=*{escaped}*)",
+        f"(displayName=*{escaped}*)",
+        f"(givenName=*{escaped}*)",
+        f"(sn=*{escaped}*)",
+        f"({mail}=*{escaped}*)",
+    ]
     if mail.lower() != "mail":
         clauses.append(f"(mail=*{escaped}*)")
     return "(|" + "".join(clauses) + ")"

@@ -3,6 +3,7 @@ export type MeetingStatus =
   | "extracting"
   | "transcribing"
   | "analyzing"
+  | "review"
   | "done"
   | "error";
 
@@ -15,6 +16,7 @@ export type AuditEvent = {
   actor: string;
   action: string;
   target: string;
+  label?: string;
   detail: string;
 };
 

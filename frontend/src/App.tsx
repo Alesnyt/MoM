@@ -134,7 +134,7 @@ export default function App() {
   const showComposer = composing || meetings.length === 0;
   const liveQueue = queueFromMeetings(meetings, health?.queue?.limit || 1);
   const processingKey = meetings
-    .filter((item) => item.status !== "done" && item.status !== "error")
+    .filter((item) => item.status !== "done" && item.status !== "error" && item.status !== "review")
     .map((item) => item.id)
     .join(",");
 
@@ -155,8 +155,10 @@ export default function App() {
     if (!userReady || !selectedId) return;
     const current = meetings.find((item) => item.id === selectedId);
     if (!current) return;
-    if (current.status !== "done" && current.status !== "error") return;
-    if (current.result) return;
+    if (current.status !== "done" && current.status !== "error" && current.status !== "review") return;
+    if (current.status === "review") {
+      if (current.transcript) return;
+    } else if (current.result) return;
     void getMeeting(selectedId)
       .then((full) => {
         setMeetings((rows) => rows.map((row) => (row.id === full.id ? full : row)));
@@ -294,7 +296,9 @@ export default function App() {
                   <span className="meeting-copy">
                     <strong>{item.title}</strong>
                     <small>
-                      {item.status !== "done" && item.status !== "error"
+                      {item.status === "review"
+                        ? "Проверьте спикеров"
+                        : item.status !== "done" && item.status !== "error"
                         ? item.status === "queued"
                           ? item.status_message || stepLabel(item.status)
                           : `${item.status_message || stepLabel(item.status)}${typeof item.progress === "number" ? ` · ${item.progress}%` : ""}`

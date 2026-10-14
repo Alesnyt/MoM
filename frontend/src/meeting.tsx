@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { downloadMarkdown, getEmailBody, openMeetingEmail } from "./api";
+import { downloadMarkdown, getEmailBody, openMeetingEmail, startProtocol } from "./api";
 import { count, formatClock, formatDate, formatDuration, priorityLabel } from "./format";
 import { TranscriptView } from "./transcript";
 import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
@@ -27,9 +27,12 @@ export function MeetingPane({
   onDelete: () => void;
   onUpdated: (meeting: Meeting) => void;
 }) {
-  const processing = meeting.status !== "done" && meeting.status !== "error";
+  const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
   const result = meeting.result;
   const [mailNote, setMailNote] = useState<string | null>(null);
+  const [marking, setMarking] = useState(false);
+  const [protocolBusy, setProtocolBusy] = useState(false);
+  const [protocolError, setProtocolError] = useState<string | null>(null);
 
   async function sendByEmail() {
     setMailNote(null);
@@ -60,6 +63,23 @@ export function MeetingPane({
       setMailNote("Не удалось скопировать. Разрешите сайту доступ к буферу обмена.");
     }
   }
+
+  async function buildProtocol() {
+    setProtocolError(null);
+    setProtocolBusy(true);
+    try {
+      onUpdated(await startProtocol(meeting.id));
+    } catch (err) {
+      setProtocolError(err instanceof Error ? err.message : "Не удалось собрать протокол");
+    } finally {
+      setProtocolBusy(false);
+    }
+  }
+
+  const automaticNames = (meeting.speakers || []).some((speaker) => {
+    const name = speaker.name.trim();
+    return name === "Неясно" || name.startsWith("Спикер ");
+  });
 
   return (
     <section className="pane">
@@ -117,6 +137,34 @@ export function MeetingPane({
       {mailNote && <div className="banner" role="status">{mailNote}</div>}
 
       {processing && <ProcessCard meeting={meeting} mailEnabled={mailEnabled} />}
+      {meeting.status === "review" && (
+        <div className="review-choice">
+          <strong>Расшифровка готова</strong>
+          <p>
+            {marking
+              ? "Поправьте имена и чужие реплики, затем соберите протокол."
+              : "Можно разметить спикеров или сразу собрать протокол по текущим именам."}
+            {automaticNames ? " Сейчас в записи есть автоматические имена." : ""}
+          </p>
+          {protocolError && <div className="banner" role="alert">{protocolError}</div>}
+          <div className="composer-row">
+            {!marking && (
+              <button className="primary" type="button" disabled={protocolBusy} onClick={() => setMarking(true)}>
+                Разметить спикеров
+              </button>
+            )}
+            <button
+              className={marking ? "primary" : "ghost"}
+              type="button"
+              disabled={protocolBusy}
+              onClick={() => void buildProtocol()}
+            >
+              {protocolBusy ? "Ставлю в очередь…" : marking ? "Собрать протокол" : "Продолжить без разметки"}
+            </button>
+          </div>
+          {marking && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
+        </div>
+      )}
       {meeting.status === "error" && (
         <div className="error-card">
           <strong>Обработка не удалась</strong>
@@ -247,6 +295,7 @@ function ProcessCard({ meeting, mailEnabled }: { meeting: Meeting; mailEnabled: 
 
 export function stepLabel(status: MeetingStatus): string {
   if (status === "queued") return "В очереди";
+  if (status === "review") return "Проверьте спикеров";
   const step = STEPS.find((item) => item.id === status);
   return step?.label || status;
 }

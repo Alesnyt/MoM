@@ -10,13 +10,13 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, config, disk, keys, ldap_auth, people, store, worker
+from . import audit, auth, config, disk, keys, ldap_auth, people, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -459,13 +459,43 @@ def user_logout(
 
 
 @app.get("/api/admin/audit")
-def admin_audit(limit: int = 200, _admin: dict = Depends(require_admin)) -> list[dict]:
-    return store.list_audit(limit)
+def admin_audit(limit: int = 20, _admin: dict = Depends(require_admin)) -> list[dict]:
+    if limit not in audit.PAGE_SIZES:
+        raise HTTPException(status_code=400, detail="Можно показать 20, 40 или 100 записей")
+    return audit.page(limit)
+
+
+@app.get("/api/admin/audit/export")
+def admin_audit_export(
+    fmt: str = Query(default="csv", alias="format"),
+    _admin: dict = Depends(require_admin),
+) -> Response:
+    kind = fmt.strip().lower()
+    if kind == "csv":
+        body = audit.export_csv()
+        media = "text/csv; charset=utf-8"
+        filename = "mom-zhurnal.csv"
+    elif kind == "xlsx":
+        body = audit.export_xlsx()
+        media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "mom-zhurnal.xlsx"
+    else:
+        raise HTTPException(status_code=400, detail="Формат: csv или xlsx")
+    return Response(
+        content=body,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/admin/users")
 def admin_list_users(_admin: dict = Depends(require_admin)) -> list[dict]:
     return store.list_users()
+
+
+@app.get("/api/admin/directory")
+def admin_directory(q: str = "", _admin: dict = Depends(require_admin)) -> dict:
+    return people.directory(q)
 
 
 @app.post("/api/admin/users")
@@ -834,6 +864,22 @@ async def retry_meeting(
     return updated
 
 
+@app.post("/api/meetings/{meeting_id}/protocol")
+def start_protocol(meeting_id: str, user: dict = Depends(require_user)) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    if meeting["status"] != "review":
+        raise HTTPException(status_code=409, detail="Протокол собирается после готовой расшифровки")
+    if not (meeting.get("transcript") or "").strip():
+        raise HTTPException(status_code=409, detail="Нет расшифровки")
+    if not keys.snapshot()["connected"]:
+        status = keys.snapshot()
+        raise HTTPException(
+            status_code=400,
+            detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
+        )
+    return _queue_protocol(meeting_id, "Собираю протокол")
+
+
 @app.delete("/api/meetings/{meeting_id}")
 def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
     meeting = _owned(store.get_meeting(meeting_id), user)
@@ -948,6 +994,11 @@ def reassign_meeting_segments(
         meeting_id,
         f"{len(payload.segment_indexes)} реплик → {label}",
     )
+    if meeting["status"] == "review":
+        saved = store.get_meeting(meeting_id)
+        if not saved:
+            raise HTTPException(status_code=404, detail="Встреча не найдена")
+        return saved
     return _queue_protocol(meeting_id, "Обновляю протокол после правки спикеров")
 
 

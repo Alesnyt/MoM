@@ -22,6 +22,15 @@ def _user() -> str:
     return user["id"]
 
 
+def test_review_is_not_claimed(db: Path) -> None:
+    user_id = _user()
+    store.create_meeting("rev1", "проверка", "a.webm", user_id)
+    store.update_meeting("rev1", status="review", transcript="Спикер 1: привет")
+    assert store.claim_next_meeting(1) is None
+    meeting = store.get_meeting("rev1")
+    assert meeting and meeting["status"] == "review"
+
+
 def test_claim_fifo(db: Path) -> None:
     user_id = _user()
     store.create_meeting("aaa", "первая", "a.webm", user_id)
