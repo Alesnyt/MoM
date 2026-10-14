@@ -155,6 +155,19 @@ def provider_label(provider: str | None = None) -> str:
     return "API"
 
 
+def chat_label(model: str | None = None) -> str:
+    """Short name of the configured chat model, for progress text."""
+    name = (model if model is not None else get_chat_model()).strip()
+    folded = name.lower()
+    if "minimax" in folded or folded.startswith("abab"):
+        return "Minimax"
+    if "qwen" in folded:
+        return "Qwen"
+    if folded.startswith("gpt") or "openai" in folded:
+        return "OpenAI"
+    return name or "Модель"
+
+
 def default_base_url(key: str) -> str:
     if key.startswith("sk-sp-"):
         return TOKEN_PLAN_BASE

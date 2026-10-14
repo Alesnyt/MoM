@@ -165,6 +165,13 @@ function TabButton({
   );
 }
 
+function protocolHint(message: string | null | undefined): string {
+  const lead = (message || "").split("·")[0].trim();
+  const named = lead.match(/^(.+?) пишет протокол/);
+  const who = named?.[1] || "Модель";
+  return `${who} пишет протокол. Процент обновится, когда она ответит — для длинной записи это несколько минут.`;
+}
+
 function transcribeHint(message: string | null | undefined): string {
   const text = (message || "").toLowerCase();
   if (text.includes("gigaam") || text.includes("сбер")) {
@@ -198,7 +205,7 @@ function ProcessCard({ meeting, mailEnabled }: { meeting: Meeting; mailEnabled: 
       ? "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка, готовый протокол придёт на почту."
       : "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка. Результат появится в MoM."
     : meeting.status === "analyzing"
-      ? "Qwen пишет протокол. Процент обновится, когда модель ответит — для длинной записи это несколько минут."
+      ? protocolHint(meeting.status_message)
       : meeting.status === "transcribing"
         ? transcribeHint(meeting.status_message)
         : "Обработка идёт.";

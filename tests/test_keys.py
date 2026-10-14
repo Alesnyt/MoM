@@ -2,6 +2,15 @@ from backend import config
 from backend.keys import chat_models_for_check
 
 
+def test_chat_label_uses_the_saved_model(monkeypatch) -> None:
+    monkeypatch.setattr(config, "OPENAI_MODEL", "MiniMax-M2")
+    assert config.chat_label() == "Minimax"
+    monkeypatch.setattr(config, "OPENAI_MODEL", "qwen3.7-plus")
+    assert config.chat_label() == "Qwen"
+    monkeypatch.setattr(config, "OPENAI_MODEL", "")
+    assert config.chat_label("local-minimax") == "Minimax"
+
+
 def test_startup_checks_only_saved_model(monkeypatch) -> None:
     monkeypatch.setattr(config, "OPENAI_MODEL", "qwen3.7-plus")
     monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-sp-test")

@@ -88,7 +88,7 @@ async def _analyze_with_heartbeat(client, transcript: str, title: str, progress:
             base = 88 + int((index - 1) / max(1, total) * 10)
             progress.set(
                 min(97, base),
-                f"Qwen: часть {index} из {total} · {_clock(elapsed)}",
+                f"{config.chat_label()}: часть {index} из {total} · {_clock(elapsed)}",
                 status="analyzing",
                 force=True,
             )
@@ -244,12 +244,13 @@ async def _process_meeting(meeting_id: str) -> None:
             )
         step = "протокол"
         parts = max(1, (len(transcript) + 79_999) // 80_000)
+        label = config.chat_label()
         if parts == 1:
-            prefix = "Qwen пишет протокол"
+            prefix = f"{label} пишет протокол"
         elif parts < 5:
-            prefix = f"Qwen пишет протокол ({parts} запроса)"
+            prefix = f"{label} пишет протокол ({parts} запроса)"
         else:
-            prefix = f"Qwen пишет протокол ({parts} запросов)"
+            prefix = f"{label} пишет протокол ({parts} запросов)"
         progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
         log.info("шаг: протокол model=%s частей %s", config.get_chat_model(), parts)
         result = await _analyze_with_heartbeat(client, transcript, meeting["title"], progress, prefix)

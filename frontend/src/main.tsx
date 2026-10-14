@@ -10,7 +10,10 @@ import "@fontsource/newsreader/400.css";
 import "@fontsource/newsreader/500.css";
 import "@fontsource/newsreader/600.css";
 import App from "./App";
+import { installPlainCopy } from "./copy";
 import "./styles.css";
+
+installPlainCopy();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
