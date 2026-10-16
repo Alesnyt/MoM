@@ -278,6 +278,13 @@ export async function testSmtp(to: string): Promise<{ ok: boolean; to: string }>
   return response.json();
 }
 
+export async function listChatModels(): Promise<string[]> {
+  const response = await fetch("/api/settings/chat-models", { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  const data = await response.json();
+  return data.manual ? [] : (data.models ?? []);
+}
+
 export async function saveModels(chatModel: string, asrModel: string): Promise<Health> {
   const response = await fetch("/api/settings/models", {
     method: "POST",

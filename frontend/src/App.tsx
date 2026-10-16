@@ -160,6 +160,8 @@ export default function App() {
     if (current.status !== "done" && current.status !== "error" && current.status !== "review") return;
     if (current.status === "review") {
       if (current.transcript) return;
+    } else if (current.status === "error") {
+      if (current.transcript != null || current.segments != null) return;
     } else if (current.result) return;
     void getMeeting(selectedId)
       .then((full) => {

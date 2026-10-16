@@ -60,6 +60,15 @@ def public_snapshot() -> dict[str, Any]:
     return data
 
 
+def _message() -> str:
+    message = str(_status.get("message") or "")
+    model = config.get_chat_model()
+    if _status.get("connected") and model and "Модель:" in message:
+        prefix, _, _old = message.partition("Модель:")
+        return f"{prefix}Модель: {model}"
+    return message
+
+
 def snapshot() -> dict[str, Any]:
     key = config.get_api_key()
     provider = config.detect_provider()
@@ -85,7 +94,7 @@ def snapshot() -> dict[str, Any]:
         "auth_rejected": bool(_status.get("auth_rejected")),
         "denied_models": list(_status.get("denied_models") or []),
         "hint": mask_api_key(key),
-        "message": _status["message"],
+        "message": _message(),
         "checked_at": _status["checked_at"],
         "provider": provider,
         "provider_label": label,
@@ -147,9 +156,70 @@ def note_check_failed(message: str) -> None:
 
 def chat_models_for_check(*, thorough: bool) -> list[str]:
     current = config.get_chat_model()
-    if thorough and config.detect_provider() == "qwen":
+    provider = config.detect_provider()
+    if provider == "gemini" and not current.startswith("gemini"):
+        current = config.GEMINI_CHAT_MODELS[0]
+    if provider == "openrouter" and "/" not in current:
+        current = config.OPENROUTER_CHAT_MODEL
+    if thorough and provider == "qwen":
         return list(dict.fromkeys([current, *config.QWEN_CHAT_MODELS]))
+    if thorough and provider == "gemini":
+        return list(dict.fromkeys([current, *config.GEMINI_CHAT_MODELS]))
     return [current]
+
+
+def _model_id(raw: object) -> str:
+    if isinstance(raw, str):
+        name = raw.strip()
+    elif isinstance(raw, dict):
+        name = str(raw.get("id") or "").strip()
+    else:
+        name = str(getattr(raw, "id", None) or "").strip()
+    if name.startswith("models/"):
+        name = name[len("models/") :]
+    return name
+
+
+def chat_model_ids(raw_ids: list[str], *, provider: str, private: bool = False) -> list[str]:
+    """Keep models that can write a protocol. Image, audio and embedding models stay out."""
+    skip = ("image", "audio", "live", "tts", "embed", "aqa", "veo", "lyria", "banana", "research", "whisper")
+    picked: list[str] = []
+    for raw in raw_ids:
+        name = _model_id(raw)
+        folded = name.lower()
+        if not name or any(part in folded for part in skip):
+            continue
+        if provider == "gemini" and not (folded.startswith("gemini") and ("flash" in folded or folded.endswith("-pro") or "-pro-" in folded)):
+            continue
+        if provider == "qwen" and not (folded.startswith("qwen") and "asr" not in folded):
+            continue
+        if provider == "openai" and not private and not folded.startswith(("gpt-", "gpt", "o1", "o3", "o4", "chatgpt")):
+            continue
+        if provider == "openrouter" and "/" not in name:
+            continue
+        picked.append(name)
+    return list(dict.fromkeys(picked))
+
+
+async def list_chat_models() -> list[str]:
+    secret = config.get_api_key().strip()
+    if not secret:
+        return []
+    provider = config.detect_provider()
+    client = make_client(secret, base_url=config.get_base_url() or None, timeout=float(config.VERIFY_TIMEOUT_SECONDS))
+    listed = await client.models.list()
+    data = getattr(listed, "data", None)
+    raw = [_model_id(item) for item in (data or [])]
+    names = chat_model_ids(raw, provider=provider, private=config.is_private_base())
+    if provider == "openrouter":
+        names.sort(key=str.lower)
+    current = config.get_chat_model()
+    if current and current not in names:
+        names.insert(0, current)
+    elif current in names:
+        names.remove(current)
+        names.insert(0, current)
+    return names
 
 
 def _denied_message(denied: list[str]) -> str:
@@ -186,6 +256,10 @@ async def verify_key(key: str | None = None, *, thorough: bool = True) -> dict[s
         bases = [config.QWEN_BASE_INTL, config.QWEN_BASE_CN]
         if current and current not in bases:
             bases.insert(0, current)
+    elif provider == "gemini":
+        bases = [current or config.GEMINI_BASE]
+    elif provider == "openrouter":
+        bases = [current or config.OPENROUTER_BASE]
     else:
         bases = [current] if current else [""]
     models = chat_models_for_check(thorough=thorough)

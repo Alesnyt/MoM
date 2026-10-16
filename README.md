@@ -119,7 +119,7 @@ mom.example.com {
 | `HOST` | По умолчанию `0.0.0.0` (доступ с других машин) |
 | `PORT` | По умолчанию `8000` |
 | `SETUP_TOKEN` | Токен первого создания администратора (`install.sh` генерирует сам) |
-| `OPENAI_API_KEY` | Ключ Qwen (`sk-sp-…` / `sk-ws-…`) или OpenAI |
+| `OPENAI_API_KEY` | Ключ Qwen (`sk-sp-…` / `sk-ws-…`), OpenAI, Gemini (`AIza…` / `AQ.…`) или OpenRouter (`sk-or-…`) |
 | `WHISPER_MODEL` | `local-whisper` / `local-whisper-medium` или `gigaam-multilingual` / `gigaam-multilingual-large` |
 | `LOCAL_WHISPER_SIZE` | `tiny` / `base` / `small` (по умолчанию) / `medium` / `large-v2` / `large-v3` |
 | `MAX_UPLOAD_MB` | Лимит загрузки, по умолчанию 512 |

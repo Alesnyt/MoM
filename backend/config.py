@@ -116,6 +116,14 @@ GIGAAM_PINS = {
 }
 QWEN_ASR_MODELS = TOKEN_PLAN_ASR_MODELS + PAYG_ASR_MODELS
 TOKEN_PLAN_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+GEMINI_CHAT_MODELS = (
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+)
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_CHAT_MODEL = "openai/gpt-4o-mini"
 
 
 def restrict_path(path: Path, mode: int) -> None:
@@ -135,12 +143,50 @@ def ensure_dirs() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 
+def is_gemini_key(key: str) -> bool:
+    secret = key.strip()
+    return secret.startswith("AIza") or secret.startswith("AQ.")
+
+
+def is_openrouter_key(key: str) -> bool:
+    return key.strip().startswith("sk-or-")
+
+
+def is_cloud_base(url: str) -> bool:
+    folded = (url or "").lower()
+    return any(
+        part in folded
+        for part in (
+            "api.openai.com",
+            "generativelanguage.googleapis.com",
+            "dashscope",
+            "token-plan",
+            "openrouter.ai",
+        )
+    )
+
+
+def is_private_base(url: str | None = None) -> bool:
+    base = OPENAI_BASE_URL if url is None else url
+    base = (base or "").strip()
+    return bool(base) and not is_cloud_base(base)
+
+
 def detect_provider(key: str | None = None) -> str:
     secret = (key if key is not None else OPENAI_API_KEY).strip()
     if secret.startswith(("sk-ws-", "sk-sp-")):
         return "qwen"
-    if OPENAI_BASE_URL and "dashscope" in OPENAI_BASE_URL:
+    if is_gemini_key(secret):
+        return "gemini"
+    if is_openrouter_key(secret):
+        return "openrouter"
+    base = OPENAI_BASE_URL or ""
+    if "dashscope" in base or "token-plan" in base:
         return "qwen"
+    if "generativelanguage.googleapis.com" in base:
+        return "gemini"
+    if "openrouter.ai" in base:
+        return "openrouter"
     if secret:
         return "openai"
     return "none"
@@ -150,6 +196,12 @@ def provider_label(provider: str | None = None) -> str:
     name = provider or detect_provider()
     if name == "qwen":
         return "Qwen"
+    if name == "gemini":
+        return "Gemini"
+    if name == "openrouter":
+        return "OpenRouter"
+    if name == "openai" and is_private_base():
+        return "Локальный API"
     if name == "openai":
         return "OpenAI"
     return "API"
@@ -159,12 +211,20 @@ def chat_label(model: str | None = None) -> str:
     """Short name of the configured chat model, for progress text."""
     name = (model if model is not None else get_chat_model()).strip()
     folded = name.lower()
-    if "minimax" in folded or folded.startswith("abab"):
+    vendor, _, rest = folded.partition("/")
+    target = rest or folded
+    if "minimax" in target or target.startswith("abab"):
         return "Minimax"
-    if "qwen" in folded:
+    if "claude" in target or vendor == "anthropic":
+        return "Claude"
+    if "gemini" in target:
+        return "Gemini"
+    if "qwen" in target:
         return "Qwen"
-    if folded.startswith("gpt") or "openai" in folded:
+    if target.startswith("gpt") or vendor == "openai" or "openai" in target:
         return "OpenAI"
+    if "/" in name:
+        return name.split("/", 1)[1] or name
     return name or "Модель"
 
 
@@ -173,6 +233,10 @@ def default_base_url(key: str) -> str:
         return TOKEN_PLAN_BASE
     if key.startswith("sk-ws-"):
         return QWEN_BASE_INTL
+    if is_gemini_key(key):
+        return GEMINI_BASE
+    if is_openrouter_key(key):
+        return OPENROUTER_BASE
     return ""
 
 
@@ -181,15 +245,21 @@ def is_token_plan() -> bool:
 
 
 def default_chat_model() -> str:
-    if is_token_plan() or detect_provider() == "qwen":
+    provider = detect_provider()
+    if provider == "gemini":
+        return GEMINI_CHAT_MODELS[0]
+    if provider == "openrouter":
+        return OPENROUTER_CHAT_MODEL
+    if is_token_plan() or provider == "qwen":
         return "qwen3.7-plus"
     return "gpt-4o"
 
 
 def default_asr_model() -> str:
-    if is_token_plan():
+    provider = detect_provider()
+    if is_token_plan() or provider in {"gemini", "openrouter"}:
         return LOCAL_ASR_MODEL
-    if detect_provider() == "qwen":
+    if provider == "qwen":
         return QWEN_ASR_MODEL
     return "whisper-1"
 
@@ -326,8 +396,7 @@ def _upsert_env(values: dict[str, str]) -> None:
 def set_runtime(key: str, base_url: str = "", chat_model: str = "", asr_model: str = "") -> None:
     global OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, WHISPER_MODEL
     OPENAI_API_KEY = key
-    if base_url:
-        OPENAI_BASE_URL = base_url
+    OPENAI_BASE_URL = base_url
     if chat_model:
         OPENAI_MODEL = chat_model
     if asr_model:
@@ -335,6 +404,8 @@ def set_runtime(key: str, base_url: str = "", chat_model: str = "", asr_model: s
     os.environ["OPENAI_API_KEY"] = key
     if OPENAI_BASE_URL:
         os.environ["OPENAI_BASE_URL"] = OPENAI_BASE_URL
+    else:
+        os.environ.pop("OPENAI_BASE_URL", None)
     if OPENAI_MODEL:
         os.environ["OPENAI_MODEL"] = OPENAI_MODEL
     if WHISPER_MODEL:
@@ -353,6 +424,30 @@ def set_openai_api_key(key: str) -> None:
                 payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
         elif not (WHISPER_MODEL or "").startswith("qwen") and not is_local_asr(WHISPER_MODEL):
             payload["WHISPER_MODEL"] = QWEN_ASR_MODEL
+    elif is_gemini_key(key):
+        payload["OPENAI_BASE_URL"] = GEMINI_BASE
+        if not (OPENAI_MODEL or "").startswith("gemini"):
+            payload["OPENAI_MODEL"] = GEMINI_CHAT_MODELS[0]
+        if not is_local_asr(WHISPER_MODEL):
+            payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
+    elif is_openrouter_key(key):
+        payload["OPENAI_BASE_URL"] = OPENROUTER_BASE
+        if "/" not in (OPENAI_MODEL or ""):
+            payload["OPENAI_MODEL"] = OPENROUTER_CHAT_MODEL
+        if not is_local_asr(WHISPER_MODEL):
+            payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
+    elif OPENAI_BASE_URL and (
+        "generativelanguage.googleapis.com" in OPENAI_BASE_URL
+        or "dashscope" in OPENAI_BASE_URL
+        or "token-plan" in OPENAI_BASE_URL
+        or "openrouter.ai" in OPENAI_BASE_URL
+    ):
+        payload["OPENAI_BASE_URL"] = ""
+        model = OPENAI_MODEL or ""
+        if model.startswith(("qwen", "gemini")) or "/" in model:
+            payload["OPENAI_MODEL"] = "gpt-4o"
+        if (WHISPER_MODEL or "").startswith("qwen"):
+            payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
     set_runtime(
         key,
         payload.get("OPENAI_BASE_URL", OPENAI_BASE_URL),

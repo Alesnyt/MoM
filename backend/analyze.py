@@ -51,6 +51,12 @@ SYSTEM_PROMPT = """Ты — ассистент, который готовит п
 """
 
 
+def _chat_kwargs() -> dict[str, Any]:
+    if config.detect_provider() == "qwen":
+        return {"extra_body": {"enable_thinking": False}}
+    return {}
+
+
 def make_client(
     api_key: str,
     base_url: str | None = None,
@@ -63,6 +69,10 @@ def make_client(
     }
     if url:
         kwargs["base_url"] = url
+    if config.is_gemini_key(api_key) or (url and "generativelanguage.googleapis.com" in url):
+        kwargs["default_headers"] = {"x-goog-api-key": api_key}
+    elif config.is_openrouter_key(api_key) or (url and "openrouter.ai" in url):
+        kwargs["default_headers"] = {"HTTP-Referer": "https://github.com/Alesnyt/MoM", "X-Title": "MoM"}
     return AsyncOpenAI(**kwargs)
 
 
@@ -334,22 +344,22 @@ async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: s
             model=model,
             temperature=0.2,
             response_format={"type": "json_object"},
-            extra_body={"enable_thinking": False},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ],
+            **_chat_kwargs(),
         )
     except Exception:
         log.warning("llm model=%s без json_object, повтор запроса", model)
         response = await client.chat.completions.create(
             model=model,
             temperature=0.2,
-            extra_body={"enable_thinking": False},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user + "\n\nВерни только JSON."},
             ],
+            **_chat_kwargs(),
         )
     content = response.choices[0].message.content or "{}"
     return _parse_result(content)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import logging
 import shutil
 import sqlite3
 import threading
@@ -22,6 +23,8 @@ from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
 from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label
+
+log = logging.getLogger("mom.api")
 
 ALLOWED_SUFFIXES = {".webm", ".mkv", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -632,6 +635,18 @@ def save_models(payload: ModelsIn, _admin: dict = Depends(require_admin)) -> dic
     config.apply_connection(config.get_base_url(), chat, asr)
     store.record_audit(_actor_name(_admin), "models.save", "llm", f"чат {chat}, расшифровка {asr}")
     return _health(full=True)
+
+
+@app.get("/api/settings/chat-models")
+async def chat_model_catalog(_admin: dict = Depends(require_admin)) -> dict:
+    if not config.get_api_key():
+        return {"models": [], "manual": True}
+    try:
+        models = await keys.list_chat_models()
+    except Exception:
+        log.exception("Каталог моделей не открылся")
+        return {"models": [], "manual": True}
+    return {"models": models, "manual": not models}
 
 
 @app.post("/api/settings/theme")

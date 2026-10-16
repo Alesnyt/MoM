@@ -13,6 +13,7 @@ import {
   deleteUser,
   resetUserPassword,
   saveApiKey,
+  listChatModels,
   saveModels,
   saveQueue,
   saveSmtp,
@@ -684,7 +685,7 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
   if (tab === "llm") {
     return {
       title: "LLM и ключ",
-      lead: "Ключ Qwen или OpenAI и модель чата. Она пишет саммари и протокол.",
+      lead: "Ключ Qwen, OpenAI, Gemini или OpenRouter и модель чата. Она пишет саммари и протокол.",
     };
   }
   if (tab === "asr") {
@@ -855,6 +856,7 @@ function SettingsPanel({
 }) {
   const [apiKey, setApiKey] = useState("");
   const [chatModel, setChatModel] = useState(health?.openai.chat_model || "");
+  const [chatCatalog, setChatCatalog] = useState<string[] | null>(null);
   const [asrModel, setAsrModel] = useState(health?.openai.asr_model || "");
   const [smtpHost, setSmtpHost] = useState(health?.smtp?.host || "");
   const [smtpPort, setSmtpPort] = useState(String(health?.smtp?.port || 587));
@@ -883,6 +885,30 @@ function SettingsPanel({
     }
     if (health?.queue?.limit) setMaxJobs(String(health.queue.limit));
   }, [health]);
+
+  useEffect(() => {
+    if (topic !== "llm" || !health?.openai.configured) {
+      setChatCatalog(null);
+      return;
+    }
+    let cancelled = false;
+    listChatModels()
+      .then((models) => {
+        if (!cancelled) setChatCatalog(models);
+      })
+      .catch(() => {
+        if (!cancelled) setChatCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [topic, health?.openai.configured, health?.openai.checked_at]);
+
+  useEffect(() => {
+    if (chatCatalog && chatCatalog.length > 0 && !chatCatalog.includes(chatModel)) {
+      setChatModel(chatCatalog[0]);
+    }
+  }, [chatCatalog, chatModel]);
 
   async function run(
     kind: "save" | "verify" | "delete" | "models" | "theme" | "smtp" | "queue",
@@ -941,13 +967,13 @@ function SettingsPanel({
               void run("save", () => saveApiKey(apiKey.trim()));
             }}
           >
-            <p>{openai?.configured ? "Заменить ключ" : "Добавить ключ Qwen или OpenAI"}</p>
+            <p>{openai?.configured ? "Заменить ключ" : "Добавить ключ Qwen, OpenAI, Gemini или OpenRouter"}</p>
             <div className="composer-row">
               <input
                 className="title-input"
                 type="password"
                 autoComplete="off"
-                placeholder="sk-ws-… или sk-…"
+                placeholder="sk-ws-…, sk-…, sk-or-…, AIza… или AQ.…"
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
               />
@@ -967,13 +993,30 @@ function SettingsPanel({
             <p>Модель, которая собирает протокол.</p>
             <label className="field-label">
               Чат
-              <input
-                className="title-input"
-                placeholder="Например qwen3.7-plus"
-                value={chatModel}
-                onChange={(event) => setChatModel(event.target.value)}
-              />
+              {health?.openai.configured && chatCatalog === null ? (
+                <input className="title-input" value="Загружаю модели этого ключа…" disabled />
+              ) : chatCatalog && chatCatalog.length > 0 ? (
+                <select className="title-input" value={chatModel} onChange={(event) => setChatModel(event.target.value)}>
+                  {chatCatalog.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="title-input"
+                  placeholder="Например gemini-3.8-flash или qwen3.7-plus"
+                  value={chatModel}
+                  onChange={(event) => setChatModel(event.target.value)}
+                />
+              )}
             </label>
+            <p className="progress-hint">
+              {chatCatalog && chatCatalog.length > 0
+                ? "Список моделей, которые открывает этот ключ."
+                : "Каталог моделей недоступен — впишите имя вручную."}
+            </p>
             <div className="composer-row">
               <button className="primary" type="submit" disabled={busy !== null || !chatModel.trim()}>
                 {busy === "models" ? "Сохраняю…" : "Сохранить модель"}
@@ -1016,8 +1059,8 @@ function SettingsPanel({
           }}
         >
           <p>
-            Сейчас: {formatAsrLabel(openai?.asr_model) || "не задано"}. Token Plan Individual не включает облачный ASR —
-            берите Whisper или GigaAM. Кто говорил, размечается отдельно: в .env нужен HF_TOKEN и пакет из
+            Сейчас: {formatAsrLabel(openai?.asr_model) || "не задано"}. Token Plan, Gemini и OpenRouter не включают облачный ASR
+            в этом приложении — берите Whisper или GigaAM. Кто говорил, размечается отдельно: в .env нужен HF_TOKEN и пакет из
             requirements-diarize.txt. Имена спикеров потом правятся во вкладке «Транскрипт».
           </p>
           <div className="choice-grid">
