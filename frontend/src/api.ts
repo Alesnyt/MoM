@@ -333,6 +333,18 @@ export async function startProtocol(id: string): Promise<Meeting> {
   return response.json();
 }
 
+export async function stopMeeting(id: string): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/stop`, { method: "POST", credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function restartMeeting(id: string): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/restart`, { method: "POST", credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function retryMeeting(id: string): Promise<Meeting> {
   const response = await fetch(`/api/meetings/${id}/retry`, { method: "POST", credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));

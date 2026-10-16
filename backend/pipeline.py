@@ -20,6 +20,7 @@ from .audio import AudioError, extract_audio_async, extract_wav, split_audio_asy
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import notify_meeting_done
 from .diarize import DiarizeUnavailable, apply_diarization, available as diarization_available, diarize_turns
+from . import control
 from .gigaam_asr import transcribe_spans
 from .logctx import meeting_scope
 from .speakers import assign_speakers, render_transcript, speaker_spans
@@ -35,6 +36,8 @@ class _Progress:
         self.last_message = ""
 
     def set(self, percent: int, message: str, status: str | None = None, force: bool = False) -> None:
+        if control.is_stopped(self.meeting_id):
+            raise control.ProcessingStopped()
         percent = max(0, min(100, int(percent)))
         now = time.monotonic()
         if (
@@ -70,12 +73,15 @@ async def _analyze_with_heartbeat(client, transcript: str, title: str, progress:
         while not stop.is_set():
             elapsed = int(time.monotonic() - start)
             creep = min(8, elapsed // 20)
-            progress.set(
-                88 + creep,
-                f"{prefix} · {_clock(elapsed)}",
-                status="analyzing",
-                force=True,
-            )
+            try:
+                progress.set(
+                    88 + creep,
+                    f"{prefix} · {_clock(elapsed)}",
+                    status="analyzing",
+                    force=True,
+                )
+            except control.ProcessingStopped:
+                return
             try:
                 await asyncio.wait_for(stop.wait(), 3.0)
             except TimeoutError:
@@ -272,7 +278,13 @@ async def _process_meeting(meeting_id: str) -> None:
             progress=100,
         )
         log.info("готово")
+    except control.ProcessingStopped:
+        control.finish(meeting_id)
+        return
     except Exception as exc:  # noqa: BLE001 — surface a short phrase; log the rest
+        if control.is_stopped(meeting_id):
+            control.finish(meeting_id)
+            return
         log.exception("Встреча остановилась на шаге «%s»", step)
         store.update_meeting(
             meeting_id,

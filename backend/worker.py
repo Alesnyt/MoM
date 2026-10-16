@@ -5,6 +5,7 @@ import logging
 import time
 
 from . import config, gigaam_asr, local_asr, store
+from . import control
 from .logctx import meeting_scope
 from .pipeline import process_meeting
 
@@ -42,7 +43,9 @@ async def run_worker(stop: asyncio.Event) -> None:
                     break
                 idle_since = None
                 await asyncio.to_thread(store.refresh_queue_messages)
-                running.add(asyncio.create_task(_run_job(meeting_id), name=f"mom-job-{meeting_id[:8]}"))
+                task = asyncio.create_task(_run_job(meeting_id), name=f"mom-job-{meeting_id[:8]}")
+                control.bind_job(meeting_id, task)
+                running.add(task)
             if running:
                 idle_since = None
                 _done, running = await asyncio.wait(
@@ -74,8 +77,15 @@ async def run_worker(stop: asyncio.Event) -> None:
 
 
 async def _run_job(meeting_id: str) -> None:
-    with meeting_scope(meeting_id):
-        await _run_job_scoped(meeting_id)
+    try:
+        with meeting_scope(meeting_id):
+            await _run_job_scoped(meeting_id)
+    except asyncio.CancelledError:
+        control.finish(meeting_id)
+        raise
+    finally:
+        control.release(meeting_id)
+        notify_work()
 
 
 async def _run_job_scoped(meeting_id: str) -> None:

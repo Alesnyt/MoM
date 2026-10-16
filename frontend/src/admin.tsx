@@ -737,6 +737,8 @@ const AUDIT_LABELS: Record<string, string> = {
   "user.limit": "Изменён архив",
   "ldap.save": "Изменён каталог",
   "meeting.delete": "Удалена встреча",
+  "meeting.stop": "Обработка остановлена",
+  "meeting.restart": "Обработка запущена заново",
   "speaker.rename": "Переименован спикер",
   "speaker.reassign": "Реплики перенесены",
   "email.send": "Протокол отправлен",

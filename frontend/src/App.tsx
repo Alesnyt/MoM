@@ -11,6 +11,8 @@ import {
   listMeetings,
   logoutUser,
   retryMeeting,
+  stopMeeting,
+  restartMeeting,
 } from "./api";
 import { Composer, UserLogin } from "./composer";
 import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings } from "./format";
@@ -201,6 +203,27 @@ export default function App() {
       setComposing(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось повторить обработку");
+    }
+  }
+
+  async function onStop(id: string) {
+    setError(null);
+    try {
+      const updated = await stopMeeting(id);
+      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось остановить обработку");
+    }
+  }
+
+  async function onRestart(id: string) {
+    if (!window.confirm("Остановить текущую обработку и начать распознавание заново?")) return;
+    setError(null);
+    try {
+      const updated = await restartMeeting(id);
+      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось запустить обработку заново");
     }
   }
 
@@ -411,6 +434,8 @@ export default function App() {
               mailEnabled={Boolean(health?.smtp?.configured)}
               onTab={setTab}
               onRetry={() => void onRetry(selected.id)}
+              onStop={() => void onStop(selected.id)}
+              onRestart={() => void onRestart(selected.id)}
               onDelete={() => onDelete(selected.id)}
               onUpdated={(next) => {
                 setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)));

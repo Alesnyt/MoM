@@ -880,6 +880,47 @@ def start_protocol(meeting_id: str, user: dict = Depends(require_user)) -> dict:
     return _queue_protocol(meeting_id, "Собираю протокол")
 
 
+def _halt_processing(meeting_id: str, meeting: dict, *, restart: bool) -> dict:
+    if meeting["status"] not in store.ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="Эта встреча сейчас не обрабатывается")
+    if restart and not keys.snapshot()["connected"]:
+        status = keys.snapshot()
+        raise HTTPException(
+            status_code=400,
+            detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
+        )
+    from . import control
+
+    control.request_stop(meeting_id, restart=restart)
+    if control.cancel_job(meeting_id):
+        store.update_meeting(
+            meeting_id,
+            status_message="Останавливаю, чтобы запустить заново…" if restart else "Останавливаю…",
+        )
+    else:
+        control.finish(meeting_id)
+    updated = store.get_meeting(meeting_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Встреча не найдена")
+    return updated
+
+
+@app.post("/api/meetings/{meeting_id}/stop")
+def stop_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    updated = _halt_processing(meeting_id, meeting, restart=False)
+    store.record_audit(_actor_name(user), "meeting.stop", meeting_id, meeting.get("title") or "")
+    return updated
+
+
+@app.post("/api/meetings/{meeting_id}/restart")
+def restart_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    updated = _halt_processing(meeting_id, meeting, restart=True)
+    store.record_audit(_actor_name(user), "meeting.restart", meeting_id, meeting.get("title") or "")
+    return updated
+
+
 @app.delete("/api/meetings/{meeting_id}")
 def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
     meeting = _owned(store.get_meeting(meeting_id), user)

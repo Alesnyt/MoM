@@ -22,6 +22,33 @@ def _user() -> str:
     return user["id"]
 
 
+def test_stop_and_restart_apply_once(db: Path) -> None:
+    from backend import control
+    from backend.pipeline import _Progress
+
+    user_id = _user()
+    store.create_meeting("job1", "Запись", "a.webm", user_id)
+    store.update_meeting("job1", status="transcribing", transcript="черновик", progress=40)
+    control.request_stop("job1", restart=False)
+    with pytest.raises(control.ProcessingStopped):
+        _Progress("job1").set(50, "ещё идёт", status="transcribing")
+    assert control.finish("job1") == "stop"
+    assert control.finish("job1") == ""
+    stopped = store.get_meeting("job1")
+    assert stopped and stopped["status"] == "error"
+    assert stopped["error"] == "Обработка остановлена"
+    assert stopped["progress"] == 0
+
+    control.release("job1")
+    store.update_meeting("job1", status="transcribing", transcript="черновик", progress=20)
+    control.request_stop("job1", restart=True)
+    assert control.finish("job1") == "restart"
+    again = store.get_meeting("job1")
+    assert again and again["status"] == "queued"
+    assert not (again.get("transcript") or "").strip()
+    control.release("job1")
+
+
 def test_review_is_not_claimed(db: Path) -> None:
     user_id = _user()
     store.create_meeting("rev1", "проверка", "a.webm", user_id)

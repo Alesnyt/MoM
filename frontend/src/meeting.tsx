@@ -16,6 +16,8 @@ export function MeetingPane({
   mailEnabled,
   onTab,
   onRetry,
+  onStop,
+  onRestart,
   onDelete,
   onUpdated,
 }: {
@@ -24,6 +26,8 @@ export function MeetingPane({
   mailEnabled: boolean;
   onTab: (tab: Tab) => void;
   onRetry: () => void;
+  onStop: () => void;
+  onRestart: () => void;
   onDelete: () => void;
   onUpdated: (meeting: Meeting) => void;
 }) {
@@ -136,7 +140,9 @@ export function MeetingPane({
 
       {mailNote && <div className="banner" role="status">{mailNote}</div>}
 
-      {processing && <ProcessCard meeting={meeting} mailEnabled={mailEnabled} />}
+      {processing && (
+        <ProcessCard meeting={meeting} mailEnabled={mailEnabled} onStop={onStop} onRestart={onRestart} />
+      )}
       {meeting.status === "review" && (
         <div className="review-choice">
           <strong>Расшифровка готова</strong>
@@ -231,7 +237,17 @@ function transcribeHint(message: string | null | undefined): string {
   return "Расшифровка идёт по записи, процент растёт по ходу.";
 }
 
-function ProcessCard({ meeting, mailEnabled }: { meeting: Meeting; mailEnabled: boolean }) {
+function ProcessCard({
+  meeting,
+  mailEnabled,
+  onStop,
+  onRestart,
+}: {
+  meeting: Meeting;
+  mailEnabled: boolean;
+  onStop: () => void;
+  onRestart: () => void;
+}) {
   const current = STEPS.findIndex((step) => step.id === meeting.status);
   const index = meeting.status === "queued" ? -1 : current;
   const queued = meeting.status === "queued";
@@ -289,6 +305,14 @@ function ProcessCard({ meeting, mailEnabled }: { meeting: Meeting; mailEnabled: 
         ))}
       </ol>
       <p className="progress-hint">{hint}</p>
+      <div className="composer-row">
+        <button className="ghost danger" type="button" onClick={onStop}>
+          Остановить
+        </button>
+        <button className="ghost" type="button" onClick={onRestart}>
+          Запустить заново
+        </button>
+      </div>
     </div>
   );
 }
