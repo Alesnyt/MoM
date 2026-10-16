@@ -108,6 +108,9 @@ def test_rename_and_reassign() -> None:
     assert old == "Спикер 1"
     assert new == "Анна"
     assert renamed["speakers"][0]["name"] == "Анна"
+    text = render_transcript(renamed)
+    assert text.count("Анна:") == 2
+    assert "Спикер 1" not in text
     moved = reassign_segments(renamed, [1], "new")
     assert moved["segments"][1]["speaker"] == "S2"
     assert moved["speakers"][1]["name"] == "Спикер 2"

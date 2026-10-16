@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
-import type { Meeting, TranscriptSegment } from "./types";
+import type { Meeting, Speaker, TranscriptSegment } from "./types";
 
 const COLORS = ["#c9843e", "#7f9d6e", "#6e8caf", "#c46b63", "#b089c4", "#d4a017", "#5ec98a", "#e07a5f"];
 
@@ -36,6 +36,108 @@ function speakerColor(id: string): string {
   return COLORS[(number - 1) % COLORS.length];
 }
 
+function SpeakerNameEditor({
+  speaker,
+  disabled,
+  onRename,
+}: {
+  speaker: Speaker;
+  disabled: boolean;
+  onRename: (speakerId: string, name: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(speaker.name);
+  const [open, setOpen] = useState(false);
+  const [people, setPeople] = useState<Person[]>([]);
+
+  useEffect(() => {
+    setDraft(speaker.name);
+    setOpen(false);
+    setPeople([]);
+  }, [speaker.id, speaker.name]);
+
+  useEffect(() => {
+    const query = draft.trim();
+    if (!open || query.length < 2 || query === speaker.name.trim()) {
+      setPeople([]);
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      listPeople(query)
+        .then(setPeople)
+        .catch(() => setPeople([]));
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [draft, open, speaker.name]);
+
+  async function save(next = draft) {
+    const cleaned = next.trim();
+    if (!cleaned || cleaned === speaker.name.trim()) {
+      setDraft(speaker.name);
+      setOpen(false);
+      return;
+    }
+    try {
+      await onRename(speaker.id, cleaned);
+      setOpen(false);
+    } catch {
+      /* Ошибку показывает список реплик. */
+    }
+  }
+
+  return (
+    <div className="speaker-rename">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <input
+          className="speaker-edit"
+          value={draft}
+          disabled={disabled}
+          aria-label={`Имя спикера ${speaker.name}`}
+          placeholder="Имя из каталога или своё"
+          onFocus={() => setOpen(true)}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setOpen(true);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setDraft(speaker.name);
+              setOpen(false);
+            }
+          }}
+        />
+        <button className="ghost" type="submit" disabled={disabled || draft.trim() === speaker.name.trim()}>
+          Сохранить
+        </button>
+      </form>
+      {open && people.length > 0 && (
+        <ul className="speaker-suggest">
+          {people.map((person) => (
+            <li key={`${person.source}-${person.email || person.name}`}>
+              <button
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  setDraft(person.name);
+                  setOpen(false);
+                  void save(person.name);
+                }}
+              >
+                <strong>{person.name}</strong>
+                {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function TranscriptView({
   meeting,
   onUpdated,
@@ -45,30 +147,12 @@ export function TranscriptView({
 }) {
   const segments = meeting.segments || [];
   const speakers = meeting.speakers || [];
-  const [editing, setEditing] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-  const [origin, setOrigin] = useState("");
-  const [people, setPeople] = useState<Person[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const saving = useRef(false);
-
   useEffect(() => {
-    setEditing(null);
     setError(null);
   }, [meeting.id]);
-
-  useEffect(() => {
-    if (!editing) return;
-    const query = draft.trim() === origin.trim() ? "" : draft.trim();
-    const handle = window.setTimeout(() => {
-      listPeople(query.length >= 2 ? query : "")
-        .then(setPeople)
-        .catch(() => setPeople([]));
-    }, query.length >= 2 ? 250 : 0);
-    return () => window.clearTimeout(handle);
-  }, [editing, draft, origin]);
 
   if (!segments.length) {
     return (
@@ -82,18 +166,15 @@ export function TranscriptView({
   const names = new Map(speakers.map((item) => [item.id, item.name]));
   const turns = turnsOf(segments);
 
-  async function saveName(speakerId: string) {
-    if (saving.current) return;
-    saving.current = true;
+  async function saveName(speakerId: string, name: string) {
     setBusy(true);
     setError(null);
     try {
-      onUpdated(await renameSpeaker(meeting.id, speakerId, draft));
-      setEditing(null);
+      onUpdated(await renameSpeaker(meeting.id, speakerId, name));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось переименовать спикера");
+      throw err;
     } finally {
-      saving.current = false;
       setBusy(false);
     }
   }
@@ -111,61 +192,24 @@ export function TranscriptView({
   }
 
   return (
-    <div className="turns">
+    <div className="speaker-markup">
       <p className="progress-hint">
-        Имя можно выбрать из пользователей или вписать гостя. Оно меняется у всех реплик этого человека и в протоколе. Если реплика чужая — выберите другого спикера.
+        Имя можно выбрать из каталога или вписать своё. Оно встанет на все реплики этого спикера и появится в списке выбора.
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
       {error && <div className="banner" role="alert">{error}</div>}
+      <div className="speaker-roster">
+        {speakers.map((speaker) => (
+          <SpeakerNameEditor key={speaker.id} speaker={speaker} disabled={busy} onRename={saveName} />
+        ))}
+      </div>
+      <div className="turns">
       {turns.map((turn) => {
         const name = names.get(turn.speaker) || turn.speaker;
         return (
           <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
             <header className="turn-head">
-              {editing === turn.speaker ? (
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void saveName(turn.speaker);
-                  }}
-                >
-                  <input
-                    className="speaker-edit"
-                    value={draft}
-                    autoFocus
-                    disabled={busy}
-                    aria-label="Имя спикера"
-                    placeholder="Имя пользователя или гость"
-                    list={`people-${turn.speaker}`}
-                    onChange={(event) => setDraft(event.target.value)}
-                    onBlur={() => {
-                      if (draft.trim() && draft.trim() !== name) void saveName(turn.speaker);
-                      else setEditing(null);
-                    }}
-                  />
-                  <datalist id={`people-${turn.speaker}`}>
-                    {people.map((person) => (
-                      <option key={`${person.source}-${person.email || person.name}`} value={person.name}>
-                        {person.email && person.email !== person.name ? person.email : person.name}
-                      </option>
-                    ))}
-                  </datalist>
-                  <span className="speaker-hint">Можно выбрать пользователя или вписать гостя</span>
-                </form>
-              ) : (
-                <button
-                  type="button"
-                  className="speaker-name"
-                  disabled={busy}
-                  onClick={() => {
-                    setEditing(turn.speaker);
-                    setOrigin(name);
-                    setDraft(name);
-                  }}
-                >
-                  {name}
-                </button>
-              )}
+              <strong className="speaker-name">{name}</strong>
               <time>{formatClock(turn.start)}</time>
               <label className="speaker-move">
                 <span className="sr-only">Кто говорит эту реплику</span>
@@ -191,6 +235,7 @@ export function TranscriptView({
           </article>
         );
       })}
+      </div>
     </div>
   );
 }

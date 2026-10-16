@@ -1211,6 +1211,60 @@ select.title-input {
   overflow: auto;
 }
 
+.speaker-markup {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.speaker-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.speaker-rename form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.speaker-rename .speaker-edit {
+  flex: 1;
+}
+
+.speaker-suggest {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  max-height: 180px;
+  overflow: auto;
+}
+
+.speaker-suggest button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.speaker-suggest button:hover {
+  background: var(--hover);
+}
+
+.speaker-suggest small {
+  color: var(--muted);
+}
+
 .turns {
   display: flex;
   flex-direction: column;
