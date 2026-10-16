@@ -23,7 +23,7 @@ from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
 from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label
 
-ALLOWED_SUFFIXES = {".webm", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
+ALLOWED_SUFFIXES = {".webm", ".mkv", ".mp4", ".mp3", ".wav", ".m4a", ".ogg"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 _setup_lock = threading.Lock()
 _LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient", "localhost"}
@@ -776,7 +776,7 @@ async def create_meeting(
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=400,
-            detail="Нужен файл записи: webm, mp4, mp3, wav, m4a или ogg",
+            detail="Нужен файл записи: webm, mkv, mp4, mp3, wav, m4a или ogg",
         )
 
     meeting_id = uuid.uuid4().hex
@@ -818,7 +818,7 @@ async def create_meeting(
         dest.unlink(missing_ok=True)
         raise HTTPException(
             status_code=400,
-            detail="Файл не похож на запись (webm, mp4, mp3, wav, m4a или ogg)",
+            detail="Файл не похож на запись (webm, mkv, mp4, mp3, wav, m4a или ogg)",
         )
 
     display_title = (title or "").strip() or Path(original).stem

@@ -4,7 +4,7 @@ import { loginUser } from "./api";
 import { uploadBlockedReason } from "./format";
 import type { OpenAIStatus, UserSession } from "./types";
 
-export const ACCEPT = ".webm,.mp4,.mp3,.wav,.m4a,.ogg,audio/webm,video/webm";
+export const ACCEPT = ".webm,.mkv,.mp4,.mp3,.wav,.m4a,.ogg,audio/webm,video/webm,video/x-matroska";
 
 export function Composer({
   busy,
@@ -38,7 +38,7 @@ export function Composer({
   return (
     <section className="composer">
       <p className="eyebrow">Обработка записей</p>
-      <h1>Из webm — саммари, поручения и протокол</h1>
+      <h1>Саммари, поручения и протокол</h1>
       <p className="lead">
         Загрузите запись. Если слоты заняты, встреча встанет в очередь.
         Сколько обрабатывается сразу, задаёт администратор. {mailReady
@@ -78,7 +78,7 @@ export function Composer({
           accept={ACCEPT}
           onChange={(event) => takeFile(event.target.files?.[0] ?? null)}
         />
-        <span className="drop-kicker">webm, mp4, mp3, wav</span>
+        <span className="drop-kicker">webm, mkv, mp4, mp3, wav</span>
         <strong>{file ? file.name : "Перетащите запись сюда"}</strong>
         <small>
           {file

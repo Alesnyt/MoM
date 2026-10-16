@@ -9,6 +9,12 @@ from backend.mail import email_body
 from backend.pipeline import public_error
 
 
+def test_looks_like_mkv(tmp_path: Path) -> None:
+    path = tmp_path / "a.mkv"
+    path.write_bytes(b"\x1aE\xdf\xa3" + b"\x00" * 20)
+    assert looks_like_audio(path)
+
+
 def test_looks_like_webm(tmp_path: Path) -> None:
     path = tmp_path / "a.webm"
     path.write_bytes(b"\x1aE\xdf\xa3" + b"\x00" * 20)
