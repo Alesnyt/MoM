@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
 import type { Meeting, Speaker, TranscriptSegment } from "./types";
@@ -36,18 +36,35 @@ function speakerColor(id: string): string {
   return COLORS[(number - 1) % COLORS.length];
 }
 
+function distinctName(desired: string, email: string | undefined, taken: string[]): string {
+  const used = new Set(taken.map((item) => item.trim().toLowerCase()));
+  const base = desired.trim();
+  if (!used.has(base.toLowerCase())) return base;
+  if (email) {
+    const withMail = `${base} (${email})`;
+    if (!used.has(withMail.toLowerCase())) return withMail;
+  }
+  let number = 2;
+  while (used.has(`${base} (${number})`.toLowerCase())) number += 1;
+  return `${base} (${number})`;
+}
+
 function SpeakerNameEditor({
   speaker,
+  taken,
   disabled,
   onRename,
 }: {
   speaker: Speaker;
+  taken: string[];
   disabled: boolean;
   onRename: (speakerId: string, name: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(speaker.name);
   const [open, setOpen] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
+  const cancelRef = useRef(false);
+  const savingRef = useRef(false);
 
   useEffect(() => {
     setDraft(speaker.name);
@@ -69,18 +86,28 @@ function SpeakerNameEditor({
     return () => window.clearTimeout(handle);
   }, [draft, open, speaker.name]);
 
-  async function save(next = draft) {
+  function closeList() {
+    setOpen(false);
+    setPeople([]);
+  }
+
+  async function save(next = draft, email?: string) {
+    if (savingRef.current) return;
     const cleaned = next.trim();
     if (!cleaned || cleaned === speaker.name.trim()) {
       setDraft(speaker.name);
-      setOpen(false);
+      closeList();
       return;
     }
+    const unique = distinctName(cleaned, email, taken);
+    savingRef.current = true;
     try {
-      await onRename(speaker.id, cleaned);
-      setOpen(false);
+      await onRename(speaker.id, unique);
+      closeList();
     } catch {
       /* Ошибку показывает список реплик. */
+    } finally {
+      savingRef.current = false;
     }
   }
 
@@ -105,12 +132,26 @@ function SpeakerNameEditor({
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
+              cancelRef.current = true;
               setDraft(speaker.name);
-              setOpen(false);
+              closeList();
+              event.currentTarget.blur();
             }
           }}
+          onBlur={() => {
+            if (cancelRef.current) {
+              cancelRef.current = false;
+              return;
+            }
+            void save();
+          }}
         />
-        <button className="ghost" type="submit" disabled={disabled || draft.trim() === speaker.name.trim()}>
+        <button
+          className="ghost"
+          type="submit"
+          disabled={disabled || draft.trim() === speaker.name.trim()}
+          onMouseDown={(event) => event.preventDefault()}
+        >
           Сохранить
         </button>
       </form>
@@ -123,8 +164,8 @@ function SpeakerNameEditor({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
                   setDraft(person.name);
-                  setOpen(false);
-                  void save(person.name);
+                  closeList();
+                  void save(person.name, person.email);
                 }}
               >
                 <strong>{person.name}</strong>
@@ -164,6 +205,8 @@ export function TranscriptView({
   }
 
   const names = new Map(speakers.map((item) => [item.id, item.name]));
+  const namedSpeakers = speakers.filter((item) => item.id !== "unknown" && item.name !== "Неясно");
+  const hasUnclear = namedSpeakers.length !== speakers.length;
   const turns = turnsOf(segments);
 
   async function saveName(speakerId: string, name: string) {
@@ -195,12 +238,19 @@ export function TranscriptView({
     <div className="speaker-markup">
       <p className="progress-hint">
         Имя можно выбрать из каталога или вписать своё. Оно встанет на все реплики этого спикера и появится в списке выбора.
+        {hasUnclear ? " «Неясно» — это не один человек: такие реплики назначайте по одной в списке справа." : ""}
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
       {error && <div className="banner" role="alert">{error}</div>}
       <div className="speaker-roster">
-        {speakers.map((speaker) => (
-          <SpeakerNameEditor key={speaker.id} speaker={speaker} disabled={busy} onRename={saveName} />
+        {namedSpeakers.map((speaker) => (
+          <SpeakerNameEditor
+            key={speaker.id}
+            speaker={speaker}
+            taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
+            disabled={busy}
+            onRename={saveName}
+          />
         ))}
       </div>
       <div className="turns">
