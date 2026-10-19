@@ -158,3 +158,93 @@ def test_protocol_still_completes_when_not_cancelled(
     assert doc is not None
     assert doc["status"] == "done"
     assert doc["result"] == _result()
+
+
+def test_restart_during_llm_queues_fresh_processing_without_stale_result(
+    recording_db: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meeting_id = "restart-llm-1"
+    store.create_meeting(meeting_id, "До обработки", "test.webm", recording_db)
+    store.update_meeting(meeting_id, status="analyzing", transcript="[00:00] Спикер 1: привет")
+
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        complete = asyncio.Event()
+
+        async def fake_analysis(*args, **kwargs):
+            entered.set()
+            await complete.wait()
+            return _result()
+
+        monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", fake_analysis)
+        task = asyncio.create_task(pipeline.process_meeting(meeting_id))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            control.request_stop(meeting_id, restart=True)
+            complete.set()
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            complete.set()
+            control.release(meeting_id)
+
+    asyncio.run(scenario())
+    meeting = store.get_meeting(meeting_id)
+    assert meeting is not None
+    assert meeting["status"] == "queued"
+    assert meeting["result"] is None
+    assert meeting["transcript"] is None
+    assert store.claim_next_meeting(1) == meeting_id
+
+
+def test_parallel_gigaam_uses_a_single_model_slot(
+    recording_db: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "is_gigaam_asr", lambda model=None: True)
+    monkeypatch.setattr(pipeline, "diarization_available", lambda: True)
+
+    async def fake_extract(src, dst):
+        dst.write_bytes(b"mp3")
+        return 10.0
+
+    def fake_wav(src, dst):
+        dst.write_bytes(b"wav")
+        return 10.0
+
+    monkeypatch.setattr(pipeline, "extract_audio_async", fake_extract)
+    monkeypatch.setattr(pipeline, "extract_wav", fake_wav)
+    monkeypatch.setattr(
+        pipeline, "diarize_turns",
+        lambda audio_path, prepared=None: [{"start": 0, "end": 10, "speaker": "original"}],
+    )
+    running = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake_spans(src, spans, language, callback):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        try:
+            time.sleep(0.15)
+            return {
+                "language": "ru",
+                "text": "привет",
+                "segments": [{"start": 0, "end": 10, "text": "привет"}],
+            }
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(pipeline, "transcribe_spans", fake_spans)
+    ids = ["parallel-1", "parallel-2"]
+    for meeting_id in ids:
+        store.create_meeting(meeting_id, "Параллельная", "test.webm", recording_db)
+        (config.UPLOAD_DIR / f"{meeting_id}.webm").write_bytes(b"test audio input")
+
+    async def scenario() -> None:
+        await asyncio.gather(*(pipeline.process_meeting(mid) for mid in ids))
+
+    asyncio.run(scenario())
+    assert peak == 1, "Two simultaneous GigaAM calls share the same model"
+    assert [store.get_meeting(mid)["status"] for mid in ids] == ["review", "review"]

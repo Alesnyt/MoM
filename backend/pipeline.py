@@ -12,6 +12,7 @@ from . import disk, store
 from .analyze import (
     analyze_long_transcript,
     make_client,
+    local_asr_slot,
     merge_transcripts,
     transcribe_file,
 )
@@ -184,7 +185,8 @@ async def _process_meeting(meeting_id: str) -> None:
                 try:
                     await asyncio.to_thread(extract_wav, audio_path, prepared)
                     try:
-                        known_turns = await asyncio.to_thread(diarize_turns, audio_path, prepared=prepared)
+                        async with local_asr_slot():
+                            known_turns = await asyncio.to_thread(diarize_turns, audio_path, prepared=prepared)
                     except DiarizeUnavailable as exc:
                         known_turns = []
                         known_note = str(exc)
@@ -204,13 +206,14 @@ async def _process_meeting(meeting_id: str) -> None:
                         def on_slice(pct: int, message: str) -> None:
                             progress.set(30 + int(max(0, min(100, pct)) * 0.55), message, status="transcribing")
 
-                        payload = await asyncio.to_thread(
-                            transcribe_spans,
-                            prepared,
-                            spans,
-                            meeting.get("language"),
-                            on_slice,
-                        )
+                        async with local_asr_slot():
+                            payload = await asyncio.to_thread(
+                                transcribe_spans,
+                                prepared,
+                                spans,
+                                meeting.get("language"),
+                                on_slice,
+                            )
                         if control.is_stopped(meeting_id):
                             raise control.ProcessingStopped()
                         voiced = assign_speakers(payload.get("segments") or [], known_turns or [])
@@ -230,12 +233,13 @@ async def _process_meeting(meeting_id: str) -> None:
                     step = "спикеры"
                     log.info("шаг: спикеры")
                     progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
-                    voiced = await asyncio.to_thread(
-                        apply_diarization,
-                        audio_path,
-                        payload,
-                        lambda message: progress.set(86, message, status="transcribing", force=True),
-                    )
+                    async with local_asr_slot():
+                        voiced = await asyncio.to_thread(
+                            apply_diarization,
+                            audio_path,
+                            payload,
+                            lambda message: progress.set(86, message, status="transcribing", force=True),
+                        )
             transcript = (voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
