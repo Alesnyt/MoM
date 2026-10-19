@@ -15,7 +15,10 @@ jobs:
       - name: Compile backend
         run: python -m compileall -q backend
       - name: Install test deps
-        run: pip install fastapi python-multipart python-dotenv openai pytest ldap3
+        run: |
+          python -m pip install pytest \
+            "fastapi==0.141.1" "python-multipart==0.0.32" \
+            "python-dotenv==1.2.3" "openai==3.2.0" "ldap3==2.9.1"
       - name: Pytest
         run: python -m pytest -q
 
