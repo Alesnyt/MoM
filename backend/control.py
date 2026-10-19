@@ -31,12 +31,14 @@ def bind_job(meeting_id: str, task: object) -> None:
 
 
 def cancel_job(meeting_id: str) -> bool:
+    """Request cooperative cancellation without orphaning asyncio.to_thread work.
+
+    Cancelling the asyncio task does not stop ffmpeg/ASR already executing in
+    a thread. Keep the worker slot occupied until the old work actually exits,
+    so a restarted job cannot race against its predecessor.
+    """
     task = _jobs.get(meeting_id)
-    cancel = getattr(task, "cancel", None)
-    if cancel is None or getattr(task, "done", lambda: True)():
-        return False
-    cancel()
-    return True
+    return task is not None and not getattr(task, "done", lambda: True)()
 
 
 def release(meeting_id: str) -> None:
@@ -72,6 +74,10 @@ def finish(meeting_id: str) -> str:
             queued_at=store.utc_now(),
         )
         store.refresh_queue_messages()
+        # Queued jobs have no running task to release their cancellation flags.
+        # Active jobs are cleaned up in worker._run_job.finally.
+        if meeting_id not in _jobs:
+            release(meeting_id)
         return "restart"
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting.get("status") != "done":
@@ -82,4 +88,6 @@ def finish(meeting_id: str) -> str:
             error="Обработка остановлена",
             progress=0,
         )
+    if meeting_id not in _jobs:
+        release(meeting_id)
     return "stop"
