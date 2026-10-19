@@ -25,6 +25,64 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build -t mom:ci .
+      - name: Smoke-test running Docker service
+        run: |
+          set -euo pipefail
+          docker run -d --name mom-smoke -e SETUP_TOKEN=ci-stage1-setup-token -p 127.0.0.1:18080:8000 mom:ci
+          trap 'docker logs mom-smoke || true; docker rm -f mom-smoke || true' EXIT
+          ready=0
+          for i in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:18080/api/health >/tmp/mom-health.json; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" -eq 1
+          python3 - <<'PY'
+          import http.cookiejar
+          import json
+          import urllib.request
+
+          root = "http://127.0.0.1:18080"
+          opener = urllib.request.build_opener(
+              urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+          )
+
+          def call(method, path, payload=None):
+              data = json.dumps(payload).encode() if payload is not None else None
+              req = urllib.request.Request(
+                  root + path,
+                  data=data,
+                  headers={"Content-Type": "application/json"},
+                  method=method,
+              )
+              with opener.open(req, timeout=8) as response:
+                  assert response.status == 200, (method, path, response.status)
+                  return json.load(response)
+
+          health = call("GET", "/api/health")
+          assert health["ok"] and health["ffmpeg"] and health["ui"], health
+          assert not call("GET", "/api/auth/status")["configured"]
+          setup = call("POST", "/api/auth/setup", {
+              "username": "testadmin",
+              "password": "container-test-password",
+              "setup_token": "ci-stage1-setup-token",
+          })
+          assert setup["authenticated"]
+          user = call("POST", "/api/admin/users", {
+              "email": "smoke@example.com",
+              "archive_limit": 5,
+              "auth_mode": "local",
+          })
+          assert user["password"]
+          session = call("POST", "/api/session/login", {
+              "email": "smoke@example.com",
+              "password": user["password"],
+          })
+          assert session["authenticated"]
+          assert call("GET", "/api/meetings") == []
+          PY
 
   frontend:
     runs-on: ubuntu-latest
