@@ -19,7 +19,8 @@ class AudioError(RuntimeError):
 
 def looks_like_audio(path: Path) -> bool:
     try:
-        data = path.read_bytes()[:64]
+        with path.open("rb") as source:
+            data = source.read(64)
     except OSError:
         return False
     if len(data) < 12:

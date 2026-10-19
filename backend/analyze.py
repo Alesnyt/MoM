@@ -14,6 +14,11 @@ log = logging.getLogger("mom.llm")
 
 _local_asr_lock = asyncio.Lock()
 
+
+def local_asr_slot() -> asyncio.Lock:
+    """Serialize local ASR and diarization, including GigaAM speaker spans."""
+    return _local_asr_lock
+
 SYSTEM_PROMPT = """Ты — ассистент, который готовит протокол встречи (Minutes of Meeting, MoM).
 По транскрипту созвона верни ТОЛЬКО JSON по схеме ниже.
 Пиши на языке транскрипта. Не выдумывай факты, имена, сроки и решения, которых нет в тексте.

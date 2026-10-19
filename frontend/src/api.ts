@@ -326,7 +326,11 @@ export async function createMeeting(file: File, title: string): Promise<Meeting>
   if (title.trim()) body.append("title", title.trim());
   const response = await fetch("/api/meetings", { method: "POST", credentials: "include", body });
   if (!response.ok) throw new Error(await parseError(response));
-  return response.json();
+  const created: Partial<Meeting> | null = await response.json();
+  if (!created || typeof created.id !== "string" || !created.id || typeof created.status !== "string") {
+    throw new Error("Сервер не создал встречу: API загрузки вернул некорректный ответ.");
+  }
+  return created as Meeting;
 }
 
 export async function deleteMeeting(id: string): Promise<void> {

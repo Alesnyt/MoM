@@ -105,3 +105,52 @@ def test_rate_allow_persists(db: Path) -> None:
     assert store.rate_allow("login:1.1.1.1", window=60, limit=2)
     assert store.rate_allow("login:1.1.1.1", window=60, limit=2)
     assert store.rate_allow("login:1.1.1.1", window=60, limit=2) is False
+
+
+def test_queued_stop_does_not_poison_future_restart(db: Path) -> None:
+    from backend import control
+
+    user_id = _user()
+    store.create_meeting("queued1", "Очередь", "queued.webm", user_id)
+    control.request_stop("queued1", restart=False)
+    assert control.cancel_job("queued1") is False
+    assert control.finish("queued1") == "stop"
+    assert not control.is_stopped("queued1")
+    store.update_meeting("queued1", status="queued")
+    assert store.claim_next_meeting(1) == "queued1"
+    control.release("queued1")
+
+
+def test_queued_restart_clears_cancellation_flags(db: Path) -> None:
+    from backend import control
+
+    user_id = _user()
+    store.create_meeting("queued2", "Очередь", "queued.webm", user_id)
+    control.request_stop("queued2", restart=True)
+    assert control.finish("queued2") == "restart"
+    assert not control.is_stopped("queued2")
+    assert store.claim_next_meeting(1) == "queued2"
+    control.release("queued2")
+
+
+def test_cancel_job_does_not_cancel_background_thread(db: Path) -> None:
+    from backend import control
+
+    class RunningTask:
+        cancelled = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancelled = True
+
+    task = RunningTask()
+    control.bind_job("inflight", task)
+    try:
+        control.request_stop("inflight", restart=False)
+        assert control.cancel_job("inflight") is True
+        assert task.cancelled is False
+        assert control.is_stopped("inflight")
+    finally:
+        control.release("inflight")

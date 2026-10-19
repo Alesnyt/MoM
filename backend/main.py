@@ -763,7 +763,6 @@ def get_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
     return _owned(store.get_meeting(meeting_id), user)
 
 
-@app.post("/api/meetings")
 def _disk_or_507(extra: int = 0) -> None:
     try:
         disk.ensure_space(extra)
@@ -771,6 +770,7 @@ def _disk_or_507(extra: int = 0) -> None:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
 
 
+@app.post("/api/meetings")
 async def create_meeting(
     request: Request,
     file: UploadFile = File(...),
