@@ -777,7 +777,7 @@ def _disk_or_507(extra: int = 0) -> None:
 async def import_transcript(request: Request, user: dict = Depends(require_user)) -> dict:
     # Authentication runs before multipart parsing. The ASGI guard bounds the
     # entire request before Starlette can spool any uploaded file to disk.
-    async with request.form(max_files=1, max_fields=2, max_part_size=transcript_import.MAX_TEXT_BYTES) as form:
+    async with request.form(max_files=1, max_fields=2, max_part_size=transcript_import.MAX_REQUEST_BYTES) as form:
         if any(key not in {"text", "file", "title"} or len(form.getlist(key)) != 1 for key in form):
             raise HTTPException(400, "Нужен один текст или один файл и название")
         text, file, title = form.get("text"), form.get("file"), form.get("title", "")

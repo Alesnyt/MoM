@@ -146,6 +146,7 @@ def test_auth_and_owner_isolation(client):
     ({"files": {"file": ("x.txt", b"a" * (ti.MAX_TEXT_BYTES + 1))}}, 413),
     ({"files": {"file": ("x.txt", b"A: B")}, "data": {"text": "A: B"}}, 400),
     ({"data": {"text": "Я" * ti.MAX_TEXT_BYTES}}, 413),
+    ({"files": {"text": (None, "x" * (ti.MAX_TEXT_BYTES + 1))}}, 413),
     ({"files": [("text", (None, "A: B")), ("text", (None, "C: D"))]}, 400),
 ])
 def test_invalid_input_leaves_no_meetings_or_files(client, kwargs, status):
