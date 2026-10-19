@@ -211,6 +211,8 @@ async def _process_meeting(meeting_id: str) -> None:
                             meeting.get("language"),
                             on_slice,
                         )
+                        if control.is_stopped(meeting_id):
+                            raise control.ProcessingStopped()
                         voiced = assign_speakers(payload.get("segments") or [], known_turns or [])
                         voiced["note"] = known_note
                         voiced["text"] = render_transcript(voiced)
@@ -237,6 +239,10 @@ async def _process_meeting(meeting_id: str) -> None:
             transcript = (voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
+            # Cancellation can arrive while ASR/diarization runs in a thread.
+            # Never publish a completed transcript after its owner stopped the job.
+            if control.is_stopped(meeting_id):
+                raise control.ProcessingStopped()
 
             store.update_meeting(
                 meeting_id,
@@ -266,6 +272,10 @@ async def _process_meeting(meeting_id: str) -> None:
         progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
         log.info("шаг: протокол model=%s частей %s", config.get_chat_model(), parts)
         result = await _analyze_with_heartbeat(client, transcript, meeting["title"], progress, prefix)
+        # A cloud LLM request cannot always be interrupted immediately. Ignore
+        # its late response when the user has requested stop/restart.
+        if control.is_stopped(meeting_id):
+            raise control.ProcessingStopped()
         title = (result.get("title") or meeting["title"]).strip() or meeting["title"]
         store.update_meeting(
             meeting_id,
