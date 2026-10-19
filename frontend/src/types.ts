@@ -54,8 +54,8 @@ export type Speaker = {
 };
 
 export type TranscriptSegment = {
-  start: number;
-  end: number;
+  start: number | null;
+  end: number | null;
   speaker: string;
   text: string;
 };
@@ -64,6 +64,7 @@ export type Meeting = {
   id: string;
   title: string;
   filename: string;
+  source_type?: "audio" | "text";
   status: MeetingStatus;
   status_message: string;
   created_at: string;

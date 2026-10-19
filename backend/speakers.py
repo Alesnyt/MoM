@@ -159,7 +159,8 @@ def render_transcript(document: dict[str, Any]) -> str:
         start = float(segment.get("start") or 0)
         minutes, seconds = divmod(int(start), 60)
         name = names.get(segment.get("speaker"), "Спикер")
-        lines.append(f"[{minutes:02d}:{seconds:02d}] {name}: {text}")
+        prefix = "" if segment.get("start") is None else f"[{minutes:02d}:{seconds:02d}] "
+        lines.append(f"{prefix}{name}: {text}")
     return "\n".join(lines)
 
 

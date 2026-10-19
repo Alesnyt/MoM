@@ -158,6 +158,23 @@ def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> 
     return meeting
 
 
+def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str, document: dict) -> dict:
+    """Publish review + transcript atomically; never expose an ASR queue job."""
+    from .speakers import render_transcript
+
+    now = utc_now()
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO meetings
+               (id, title, filename, user_id, status, status_message, created_at,
+                queued_at, progress, transcript, segments_json)
+               VALUES (?, ?, ?, ?, 'review', 'Транскрипт импортирован. Проверьте спикеров', ?, ?, 85, ?, ?)""",
+            (meeting_id, title, filename, user_id, now, now,
+             render_transcript(document), json.dumps(document, ensure_ascii=False)),
+        )
+    return get_meeting(meeting_id)
+
+
 def update_meeting(meeting_id: str, **fields: Any) -> None:
     if not fields:
         return
@@ -469,6 +486,7 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
         data["speakers"] = parsed.get("speakers") or []
         data["segments"] = parsed.get("segments") or []
         data["diarization_note"] = parsed.get("note")
+        data["source_type"] = parsed.get("source_type", "audio")
     else:
         data.pop("transcript", None)
         data["transcript"] = None

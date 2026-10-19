@@ -19,14 +19,23 @@ export function Composer({
   queue?: { active: number; waiting: number; limit: number };
   mailReady: boolean;
   onOpenSettings: () => void;
-  onUpload: (file: File, title: string) => Promise<void>;
+  onUpload: (file: File | null, title: string, text?: string) => Promise<void>;
 }) {
+  const [mode, setMode] = useState<"audio" | "text">("audio");
+  const [text, setText] = useState("");
+  const [fileError, setFileError] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [over, setOver] = useState(false);
 
   function takeFile(next: File | null) {
     if (!next) return;
+    setFileError(null);
+    if (mode === "text" && (!/\.(txt|md|srt|vtt)$/i.test(next.name) || next.size > 1024 * 1024)) {
+      setFileError("Выберите .txt, .md, .srt или .vtt в UTF-8 размером до 1 МБ");
+      setFile(null);
+      return;
+    }
     setFile(next);
     if (!title) setTitle(next.name.replace(/\.[^.]+$/, ""));
   }
@@ -51,7 +60,28 @@ export function Composer({
           {(queue?.waiting ?? 0) > 0 ? `, в очереди ${queue?.waiting}` : ""}.
         </p>
       )}
-      {blocked && (
+      <div className="composer-row" role="group" aria-label="Источник встречи">
+        {(["audio", "text"] as const).map((value) => (
+          <button key={value} type="button" className={mode === value ? "primary" : "ghost"}
+            aria-pressed={mode === value} disabled={busy}
+            onClick={() => { setMode(value); setFile(null); setFileError(null); }}>
+            {value === "audio" ? "Аудио / видео" : "Готовый транскрипт"}
+          </button>
+        ))}
+      </div>
+      {mode === "text" && <>
+        <p className="lead">Вставьте текст или выберите файл в UTF-8 до 1 МБ. Имена сохранятся.
+          После импорта проверьте спикеров и нажмите «Собрать протокол».</p>
+        <label htmlFor="transcript-input">Текст транскрипта</label>
+        <textarea id="transcript-input" className="title-input" rows={9}
+          style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+          disabled={busy || Boolean(file)} value={text} maxLength={1024 * 1024}
+          placeholder={"[00:05] Анна: Обсудим план.\nИван: Подготовлю к пятнице."}
+          onChange={(event) => setText(event.target.value)} />
+        {file && <button className="ghost" disabled={busy} onClick={() => setFile(null)}>Убрать файл и вставить текст</button>}
+      </>}
+      {fileError && <div className="banner" role="alert">{fileError}</div>}
+      {blocked && mode === "audio" && (
         <div className="key-box">
           <p>{blocked}</p>
           <button className="primary" type="button" onClick={onOpenSettings}>
@@ -74,12 +104,14 @@ export function Composer({
         }}
       >
         <input
+          key={mode + (file?.name || "")}
           type="file"
-          accept={ACCEPT}
+          disabled={busy}
+          accept={mode === "text" ? ".txt,.md,.srt,.vtt" : ACCEPT}
           onChange={(event) => takeFile(event.target.files?.[0] ?? null)}
         />
-        <span className="drop-kicker">webm, mkv, mp4, mp3, wav</span>
-        <strong>{file ? file.name : "Перетащите запись сюда"}</strong>
+        <span className="drop-kicker">{mode === "text" ? "txt, md, srt, vtt · до 1 МБ" : "webm, mkv, mp4, mp3, wav"}</span>
+        <strong>{file ? file.name : mode === "text" ? "Выбрать файл транскрипта" : "Перетащите запись сюда"}</strong>
         <small>
           {file
             ? `${(file.size / (1024 * 1024)).toFixed(1)} МБ`
@@ -92,14 +124,16 @@ export function Composer({
           className="title-input"
           placeholder="Название встречи (необязательно)"
           value={title}
+          maxLength={200}
+          aria-label="Название встречи"
           onChange={(event) => setTitle(event.target.value)}
         />
         <button
           className="primary"
-          disabled={!file || busy || !keyReady}
-          onClick={() => file && onUpload(file, title)}
+          disabled={busy || (mode === "audio" ? !file || !keyReady : !file && !text.trim())}
+          onClick={() => onUpload(file, title, mode === "text" ? text : undefined)}
         >
-          {busy ? "Загружаю…" : "Обработать"}
+          {busy ? "Загружаю…" : mode === "text" ? "Импортировать транскрипт" : "Обработать"}
         </button>
       </div>
     </section>

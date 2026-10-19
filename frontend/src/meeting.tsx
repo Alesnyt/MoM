@@ -127,7 +127,7 @@ export function MeetingPane({
           )}
           {(meeting.status === "error" || meeting.status === "done") && (
             <button className="ghost" onClick={onRetry}>
-              {meeting.status === "error" && meeting.transcript ? "Собрать протокол" : "Повторить"}
+              {(meeting.status === "error" || meeting.source_type === "text") && meeting.transcript ? "Собрать протокол" : "Повторить"}
             </button>
           )}
           {!processing && (
@@ -154,7 +154,7 @@ export function MeetingPane({
           </p>
           {protocolError && <div className="banner" role="alert">{protocolError}</div>}
           <div className="composer-row">
-            {!marking && (
+            {!marking && meeting.source_type !== "text" && (
               <button className="primary" type="button" disabled={protocolBusy} onClick={() => setMarking(true)}>
                 Разметить спикеров
               </button>
@@ -165,10 +165,10 @@ export function MeetingPane({
               disabled={protocolBusy}
               onClick={() => void buildProtocol()}
             >
-              {protocolBusy ? "Ставлю в очередь…" : marking ? "Собрать протокол" : "Продолжить без разметки"}
+              {protocolBusy ? "Ставлю в очередь…" : "Собрать протокол"}
             </button>
           </div>
-          {marking && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
+          {(marking || meeting.source_type === "text") && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
         </div>
       )}
       {meeting.status === "error" && (
@@ -248,7 +248,8 @@ function ProcessCard({
   onStop: () => void;
   onRestart: () => void;
 }) {
-  const current = STEPS.findIndex((step) => step.id === meeting.status);
+  const steps = meeting.source_type === "text" ? STEPS.filter((step) => step.id === "analyzing") : STEPS;
+  const current = steps.findIndex((step) => step.id === meeting.status);
   const index = meeting.status === "queued" ? -1 : current;
   const queued = meeting.status === "queued";
   const pct = Math.max(0, Math.min(100, meeting.progress ?? fallbackProgress(meeting.status)));
@@ -264,7 +265,9 @@ function ProcessCard({
   }, [meeting.id]);
   const elapsed = Math.max(0, Math.floor((now - started.current.at) / 1000));
   const waiting = meeting.status === "analyzing" || elapsed >= 4;
-  const hint = queued
+  const hint = queued && meeting.source_type === "text"
+    ? "Транскрипт сохранён. Когда освободится слот, начнётся сборка протокола."
+    : queued
     ? mailEnabled
       ? "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка, готовый протокол придёт на почту."
       : "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка. Результат появится в MoM."
@@ -293,7 +296,7 @@ function ProcessCard({
         {!queued && waiting ? " · процесс живой, ждём ответ" : ""}
       </p>
       <ol>
-        {STEPS.map((step, i) => (
+        {steps.map((step, i) => (
           <li
             key={step.id}
             className={i < index ? "done" : i === index ? "now" : ""}

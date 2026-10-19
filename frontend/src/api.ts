@@ -333,6 +333,16 @@ export async function createMeeting(file: File, title: string): Promise<Meeting>
   return created as Meeting;
 }
 
+export async function createTranscript(file: File | null, text: string, title: string): Promise<Meeting> {
+  const body = new FormData();
+  if (file) body.append("file", file);
+  else body.append("text", text);
+  if (title.trim()) body.append("title", title.trim());
+  const response = await fetch("/api/meetings/transcript", { method: "POST", credentials: "include", body });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function deleteMeeting(id: string): Promise<void> {
   const response = await fetch(`/api/meetings/${id}`, { method: "DELETE", credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));

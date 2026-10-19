@@ -7,7 +7,7 @@ const COLORS = ["#c9843e", "#7f9d6e", "#6e8caf", "#c46b63", "#b089c4", "#d4a017"
 
 type Turn = {
   speaker: string;
-  start: number;
+  start: number | null;
   indexes: number[];
   text: string;
 };
@@ -16,7 +16,7 @@ function turnsOf(segments: TranscriptSegment[]): Turn[] {
   const turns: Turn[] = [];
   segments.forEach((segment, index) => {
     const last = turns[turns.length - 1];
-    if (last && last.speaker === segment.speaker) {
+    if (last && last.speaker === segment.speaker && last.indexes.length < 500) {
       last.indexes.push(index);
       last.text = `${last.text} ${segment.text}`.trim();
       return;
@@ -260,7 +260,7 @@ export function TranscriptView({
           <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
             <header className="turn-head">
               <strong className="speaker-name">{name}</strong>
-              <time>{formatClock(turn.start)}</time>
+              {turn.start !== null && <time>{formatClock(turn.start)}</time>}
               <label className="speaker-move">
                 <span className="sr-only">Кто говорит эту реплику</span>
                 <select

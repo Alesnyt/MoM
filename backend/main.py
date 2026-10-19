@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 
 from . import audit, auth, config, disk, keys, ldap_auth, people, store, worker
 from .audio import ffmpeg_available, looks_like_audio
+from . import transcript_import
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
@@ -329,6 +331,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MoM", version="1.0.0", lifespan=lifespan)
+app.add_middleware(transcript_import.TranscriptBodyLimit)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -770,6 +773,50 @@ def _disk_or_507(extra: int = 0) -> None:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
 
 
+@app.post("/api/meetings/transcript")
+async def import_transcript(request: Request, user: dict = Depends(require_user)) -> dict:
+    # Authentication runs before multipart parsing. The ASGI guard bounds the
+    # entire request before Starlette can spool any uploaded file to disk.
+    async with request.form(max_files=1, max_fields=2, max_part_size=transcript_import.MAX_TEXT_BYTES) as form:
+        if any(key not in {"text", "file", "title"} or len(form.getlist(key)) != 1 for key in form):
+            raise HTTPException(400, "Нужен один текст или один файл и название")
+        text, file, title = form.get("text"), form.get("file"), form.get("title", "")
+        if not isinstance(title, str) or len(title) > 200:
+            raise HTTPException(400, "Название должно быть не длиннее 200 символов")
+        if (text is None) == (file is None):
+            raise HTTPException(400, "Передайте либо текст, либо файл")
+        original, suffix = "transcript.txt", ".txt"
+        if file is not None:
+            if not isinstance(file, StarletteUploadFile):
+                raise HTTPException(400, "Нужен текстовый файл")
+            original = Path((file.filename or "").replace("\\", "/")).name
+            suffix = Path(original).suffix.lower()
+            if suffix not in transcript_import.SUFFIXES:
+                raise HTTPException(400, "Нужен файл .txt, .md, .srt или .vtt в UTF-8")
+            raw = await file.read(transcript_import.MAX_TEXT_BYTES + 1)
+            if len(raw) > transcript_import.MAX_TEXT_BYTES:
+                raise HTTPException(413, "Транскрипт больше 1 МБ")
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(400, "Сохраните файл в кодировке UTF-8") from exc
+        if not isinstance(text, str):
+            raise HTTPException(400, "Нужен текст транскрипта")
+        if len(text.encode("utf-8")) > transcript_import.MAX_TEXT_BYTES:
+            raise HTTPException(413, "Транскрипт больше 1 МБ")
+        try:
+            document = transcript_import.parse_transcript(text, suffix)
+        except transcript_import.TranscriptError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    _disk_or_507(len(text.encode("utf-8")) * 4)
+    meeting = store.create_text_meeting(
+        uuid.uuid4().hex, title.strip() or (Path(original).stem if file else "Текстовая встреча"),
+        original[:255], user["user_id"], document,
+    )
+    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"]))
+    return meeting
+
+
 @app.post("/api/meetings")
 async def create_meeting(
     request: Request,
@@ -857,7 +904,7 @@ async def retry_meeting(
             status_code=400,
             detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
         )
-    keep_transcript = meeting["status"] == "error" and (meeting.get("transcript") or "").strip()
+    keep_transcript = (meeting["status"] == "error" or meeting.get("source_type") == "text") and (meeting.get("transcript") or "").strip()
     fields: dict = {
         "status": "queued",
         "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
@@ -960,6 +1007,7 @@ def _segments_doc(meeting: dict) -> dict:
         "speakers": meeting.get("speakers") or [],
         "segments": meeting.get("segments") or [],
         "note": meeting.get("diarization_note"),
+        "source_type": meeting.get("source_type", "audio"),
     }
 
 
