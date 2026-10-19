@@ -810,10 +810,10 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
             raise HTTPException(400, str(exc)) from exc
     _disk_or_507(len(text.encode("utf-8")) * 4)
     meeting = store.create_text_meeting(
-        uuid.uuid4().hex, title.strip() or (Path(original).stem if file else "Текстовая встреча"),
+        uuid.uuid4().hex, title.strip() or (Path(original).stem[:200] if file else "Текстовая встреча"),
         original[:255], user["user_id"], document,
     )
-    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"]))
+    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"], preserve_id=meeting["id"]))
     return meeting
 
 

@@ -251,7 +251,7 @@ def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dic
 ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
 
 
-def prune_user_meetings(user_id: str) -> list[dict[str, str]]:
+def prune_user_meetings(user_id: str, *, preserve_id: str | None = None) -> list[dict[str, str]]:
     user = get_user(user_id)
     if not user:
         return []
@@ -262,7 +262,7 @@ def prune_user_meetings(user_id: str) -> list[dict[str, str]]:
     for item in reversed(meetings):
         if over <= 0:
             break
-        if item.get("status") in ACTIVE_STATUSES:
+        if item["id"] == preserve_id or item.get("status") in ACTIVE_STATUSES:
             continue
         if delete_meeting(item["id"]):
             removed.append({"id": item["id"], "title": item.get("title") or ""})

@@ -201,7 +201,7 @@ def test_chunked_body_guard_does_not_trust_content_length(monkeypatch):
 def test_archive_limit_only_prunes_owners_completed_items(client):
     old = create(client)
     with store.connect() as conn:
-        conn.execute("UPDATE meetings SET created_at = '2020-01-01' WHERE id = ?", (old["id"],))
+        # Same-second imports must never prune the newly returned meeting.
         conn.execute("UPDATE users SET archive_limit = 1 WHERE email = 'owner@example.com'")
     latest = create(client, "Анна: Новая встреча")
     assert [m["id"] for m in client.get("/api/meetings").json()] == [latest["id"]]
