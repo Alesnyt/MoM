@@ -206,6 +206,7 @@ def _purge_files(meeting_id: str) -> None:
     for leftover in UPLOAD_DIR.glob(f"{meeting_id}.*"):
         leftover.unlink(missing_ok=True)
     (AUDIO_DIR / f"{meeting_id}.mp3").unlink(missing_ok=True)
+    (AUDIO_DIR / f"{meeting_id}.wav").unlink(missing_ok=True)
     chunks = AUDIO_DIR / f"{meeting_id}_chunks"
     if chunks.exists():
         shutil.rmtree(chunks, ignore_errors=True)
