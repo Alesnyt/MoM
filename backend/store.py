@@ -324,6 +324,7 @@ def attach_queue_info(meetings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in meetings:
         if item.get("status") == "queued" and item["id"] in order:
             item["queue_ahead"] = active_n + order[item["id"]]
+            item["status_message"] = queue_wait_message(item["queue_ahead"])
         else:
             item["queue_ahead"] = 0
     return meetings

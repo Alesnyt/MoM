@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { downloadMarkdown, getEmailBody, openMeetingEmail, startProtocol } from "./api";
-import { count, formatClock, formatDate, formatDuration, priorityLabel } from "./format";
+import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
 import { TranscriptView } from "./transcript";
 import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
 
@@ -253,7 +253,7 @@ function ProcessCard({
   const index = meeting.status === "queued" ? -1 : current;
   const queued = meeting.status === "queued";
   const pct = Math.max(0, Math.min(100, meeting.progress ?? fallbackProgress(meeting.status)));
-  const stamp = `${meeting.status}|${pct}|${meeting.status_message}`;
+  const stamp = queued ? `${meeting.id}|queued` : `${meeting.id}|${meeting.status}|${pct}|${meeting.status_message}`;
   const started = useRef({ stamp, at: Date.now() });
   if (started.current.stamp !== stamp) {
     started.current = { stamp, at: Date.now() };
@@ -278,9 +278,9 @@ function ProcessCard({
         : "Обработка идёт.";
   return (
     <div className="process">
-      <div className="progress-head">
-        <strong>{queued ? "очередь" : `${pct}%`}</strong>
-        <span>{meeting.status_message || stepLabel(meeting.status)}</span>
+      <div className="progress-head" role={queued ? "status" : undefined} aria-live={queued ? "polite" : undefined}>
+        <strong>{queued ? "В очереди" : `${pct}%`}</strong>
+        <span>{queued ? queuePositionLabel(meeting.queue_ahead) : meeting.status_message || stepLabel(meeting.status)}</span>
       </div>
       <div
         className={`progress-bar${waiting ? " waiting" : ""}`}
@@ -308,6 +308,7 @@ function ProcessCard({
         ))}
       </ol>
       <p className="progress-hint">{hint}</p>
+      {queued && <p className="progress-hint">Перед вами учитываются записи в обработке и более ранние заявки в очереди. Позиция обновляется автоматически.</p>}
       <div className="composer-row">
         <button className="ghost danger" type="button" onClick={onStop}>
           Остановить

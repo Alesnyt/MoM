@@ -49,6 +49,16 @@ export function recordingSizeError(size: number, limit: number): string | null {
     : null;
 }
 
+export function queuePositionLabel(ahead?: number): string {
+  if (ahead === undefined || !Number.isInteger(ahead) || ahead < 0) return "Уточняем позицию";
+  if (ahead === 0) return "Перед вами нет записей — ожидаем запуска";
+  const lastTwo = ahead % 100;
+  const last = ahead % 10;
+  const word = lastTwo >= 11 && lastTwo <= 14 ? "записей"
+    : last === 1 ? "запись" : last >= 2 && last <= 4 ? "записи" : "записей";
+  return `Перед вами: ${ahead} ${word}`;
+}
+
 export function formatClock(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(total / 3600);

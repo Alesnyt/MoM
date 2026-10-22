@@ -16,7 +16,7 @@ import {
   restartMeeting,
 } from "./api";
 import { Composer, UserLogin } from "./composer";
-import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings } from "./format";
+import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings, queuePositionLabel } from "./format";
 import { MeetingPane, stepLabel } from "./meeting";
 import type { AdminTab, AuthStatus, Health, Meeting, UserSession } from "./types";
 
@@ -330,7 +330,7 @@ export default function App() {
                         ? "Проверьте спикеров"
                         : item.status !== "done" && item.status !== "error"
                         ? item.status === "queued"
-                          ? item.status_message || stepLabel(item.status)
+                          ? `В очереди · ${queuePositionLabel(item.queue_ahead)}`
                           : `${item.status_message || stepLabel(item.status)}${typeof item.progress === "number" ? ` · ${item.progress}%` : ""}`
                         : `${formatDate(item.created_at)}${item.duration_seconds ? ` · ${formatDuration(item.duration_seconds)}` : ""}`}
                     </small>
