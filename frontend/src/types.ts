@@ -136,6 +136,7 @@ export type DiskStatus = {
 
 export type Health = {
   ok: boolean;
+  max_upload_bytes?: number;
   ffmpeg: boolean;
   ui?: boolean;
   theme?: "classic" | "t2";

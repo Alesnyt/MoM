@@ -431,6 +431,7 @@ export default function App() {
               keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
+              maxUploadBytes={health?.max_upload_bytes}
               onOpenSettings={goAdmin}
               onUpload={onUpload}
             />
@@ -454,6 +455,7 @@ export default function App() {
               keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
+              maxUploadBytes={health?.max_upload_bytes}
               onOpenSettings={goAdmin}
               onUpload={onUpload}
             />

@@ -43,6 +43,12 @@ export function formatDuration(seconds: number): string {
   return `${minutes} мин`;
 }
 
+export function recordingSizeError(size: number, limit: number): string | null {
+  return size > limit
+    ? `Файл слишком большой. Максимальный размер — ${formatBytes(limit)}. Выберите файл меньшего размера.`
+    : null;
+}
+
 export function formatClock(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(total / 3600);

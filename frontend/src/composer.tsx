@@ -1,7 +1,7 @@
 
 import { useState } from "react";
 import { loginUser } from "./api";
-import { uploadBlockedReason } from "./format";
+import { formatBytes, recordingSizeError, uploadBlockedReason } from "./format";
 import type { OpenAIStatus, UserSession } from "./types";
 
 export const ACCEPT = ".webm,.mkv,.mp4,.mp3,.wav,.m4a,.ogg,audio/webm,video/webm,video/x-matroska";
@@ -11,6 +11,7 @@ export function Composer({
   keyStatus,
   queue,
   mailReady,
+  maxUploadBytes,
   onOpenSettings,
   onUpload,
 }: {
@@ -18,6 +19,7 @@ export function Composer({
   keyStatus: OpenAIStatus | null;
   queue?: { active: number; waiting: number; limit: number };
   mailReady: boolean;
+  maxUploadBytes?: number;
   onOpenSettings: () => void;
   onUpload: (file: File | null, title: string, text?: string) => Promise<void>;
 }) {
@@ -29,7 +31,7 @@ export function Composer({
   const [over, setOver] = useState(false);
 
   function takeFile(next: File | null) {
-    if (!next) return;
+    if (!next || busy) return;
     setFileError(null);
     if (mode === "text" && (!/\.(txt|md|srt|vtt)$/i.test(next.name) || next.size > 1024 * 1024)) {
       setFileError("Выберите .txt, .md, .srt или .vtt в UTF-8 размером до 1 МБ");
@@ -43,6 +45,12 @@ export function Composer({
   const queued = (queue?.active || 0) + (queue?.waiting || 0);
   const blocked = uploadBlockedReason(keyStatus);
   const keyReady = keyStatus?.connected === true;
+  const limitReady = Number.isFinite(maxUploadBytes) && (maxUploadBytes ?? 0) > 0;
+  const sizeError = mode === "audio" && file && limitReady
+    ? recordingSizeError(file.size, maxUploadBytes!) : null;
+  const cannotUpload = busy || (mode === "audio"
+    ? !file || !keyReady || !limitReady || Boolean(sizeError)
+    : !file && !text.trim());
 
   return (
     <section className="composer">
@@ -81,6 +89,7 @@ export function Composer({
         {file && <button className="ghost" disabled={busy} onClick={() => setFile(null)}>Убрать файл и вставить текст</button>}
       </>}
       {fileError && <div className="banner" role="alert">{fileError}</div>}
+      {sizeError && <div className="banner" role="alert">{sizeError}</div>}
       {blocked && mode === "audio" && (
         <div className="key-box">
           <p>{blocked}</p>
@@ -110,7 +119,8 @@ export function Composer({
           accept={mode === "text" ? ".txt,.md,.srt,.vtt" : ACCEPT}
           onChange={(event) => takeFile(event.target.files?.[0] ?? null)}
         />
-        <span className="drop-kicker">{mode === "text" ? "txt, md, srt, vtt · до 1 МБ" : "webm, mkv, mp4, mp3, wav"}</span>
+        <span className="drop-kicker">{mode === "text" ? "txt, md, srt, vtt · до 1 МБ"
+          : `webm, mkv, mp4, mp3, wav · ${limitReady ? `до ${formatBytes(maxUploadBytes!)}` : "лимит загрузки пока недоступен — обновите страницу"}`}</span>
         <strong>{file ? file.name : mode === "text" ? "Выбрать файл транскрипта" : "Перетащите запись сюда"}</strong>
         <small>
           {file
@@ -130,8 +140,8 @@ export function Composer({
         />
         <button
           className="primary"
-          disabled={busy || (mode === "audio" ? !file || !keyReady : !file && !text.trim())}
-          onClick={() => onUpload(file, title, mode === "text" ? text : undefined)}
+          disabled={cannotUpload}
+          onClick={() => { if (!cannotUpload) void onUpload(file, title, mode === "text" ? text : undefined); }}
         >
           {busy ? "Загружаю…" : mode === "text" ? "Импортировать транскрипт" : "Обработать"}
         </button>

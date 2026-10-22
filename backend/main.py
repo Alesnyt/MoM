@@ -293,6 +293,7 @@ def _health(*, full: bool = False) -> dict:
         "ffmpeg": ffmpeg_available(),
         "ui": (STATIC_DIR / "index.html").exists(),
         "theme": config.get_ui_theme(),
+        "max_upload_bytes": config.MAX_UPLOAD_BYTES,
         "openai": keys.snapshot() if full else keys.public_snapshot(),
         "queue": store.queue_stats(),
         "smtp": smtp_snapshot(full=full),
