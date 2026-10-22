@@ -65,6 +65,8 @@ function SpeakerNameEditor({
   const [people, setPeople] = useState<Person[]>([]);
   const cancelRef = useRef(false);
   const savingRef = useRef(false);
+  const resetRef = useRef<HTMLButtonElement>(null);
+  const defaultName = /^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : null;
 
   useEffect(() => {
     setDraft(speaker.name);
@@ -91,18 +93,19 @@ function SpeakerNameEditor({
     setPeople([]);
   }
 
-  async function save(next = draft, email?: string) {
-    if (savingRef.current) return;
+  async function save(next = draft, email?: string, reset = false) {
+    if (disabled || savingRef.current) return;
     const cleaned = next.trim();
     if (!cleaned || cleaned === speaker.name.trim()) {
       setDraft(speaker.name);
       closeList();
       return;
     }
-    const unique = distinctName(cleaned, email, taken);
+    const unique = reset ? cleaned : distinctName(cleaned, email, taken);
     savingRef.current = true;
     try {
       await onRename(speaker.id, unique);
+      if (reset) setDraft(unique);
       closeList();
     } catch {
       /* Ошибку показывает список реплик. */
@@ -138,7 +141,9 @@ function SpeakerNameEditor({
               event.currentTarget.blur();
             }
           }}
-          onBlur={() => {
+          onBlur={(event) => {
+            // Tabbing to reset must not save the draft before resetting it.
+            if (resetRef.current && event.relatedTarget === resetRef.current) return;
             if (cancelRef.current) {
               cancelRef.current = false;
               return;
@@ -154,6 +159,20 @@ function SpeakerNameEditor({
         >
           Сохранить
         </button>
+        {defaultName && (
+          <button
+            ref={resetRef}
+            className="ghost"
+            type="button"
+            disabled={disabled || (speaker.name === defaultName && draft === defaultName)}
+            title={`Вернуть имя «${defaultName}»`}
+            aria-label={`Сбросить имя ${speaker.name} на ${defaultName}`}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void save(defaultName, undefined, true)}
+          >
+            Сбросить имя
+          </button>
+        )}
       </form>
       {open && people.length > 0 && (
         <ul className="speaker-suggest">
@@ -238,6 +257,7 @@ export function TranscriptView({
     <div className="speaker-markup">
       <p className="progress-hint">
         Имя можно выбрать из каталога или вписать своё. Оно встанет на все реплики этого спикера и появится в списке выбора.
+        {" «Сбросить имя» вернёт обозначение «Спикер 1», «Спикер 2» и т. д."}
         {hasUnclear ? " «Неясно» — это не один человек: такие реплики назначайте по одной в списке справа." : ""}
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
