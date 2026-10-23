@@ -19,10 +19,12 @@ from pydantic import BaseModel, Field
 
 from . import audit, auth, config, disk, keys, ldap_auth, people, store, worker
 from .audio import ffmpeg_available, looks_like_audio
+from . import transcript_import
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
-from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label
+from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label, select_protocol_recipients
 
 log = logging.getLogger("mom.api")
 
@@ -87,6 +89,16 @@ class LdapTestIn(BaseModel):
 
 class SpeakerNameIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    email: str | None = Field(default=None, max_length=254)
+
+
+class ProtocolRecipientIn(BaseModel):
+    speaker_id: str = Field(min_length=1, max_length=40)
+    email: str = Field(min_length=3, max_length=254)
+
+
+class ProtocolIn(BaseModel):
+    recipients: list[ProtocolRecipientIn] = Field(default_factory=list, max_length=200)
 
 
 class SpeakerAssignIn(BaseModel):
@@ -204,6 +216,7 @@ def _purge_files(meeting_id: str) -> None:
     for leftover in UPLOAD_DIR.glob(f"{meeting_id}.*"):
         leftover.unlink(missing_ok=True)
     (AUDIO_DIR / f"{meeting_id}.mp3").unlink(missing_ok=True)
+    (AUDIO_DIR / f"{meeting_id}.wav").unlink(missing_ok=True)
     chunks = AUDIO_DIR / f"{meeting_id}_chunks"
     if chunks.exists():
         shutil.rmtree(chunks, ignore_errors=True)
@@ -291,6 +304,7 @@ def _health(*, full: bool = False) -> dict:
         "ffmpeg": ffmpeg_available(),
         "ui": (STATIC_DIR / "index.html").exists(),
         "theme": config.get_ui_theme(),
+        "max_upload_bytes": config.MAX_UPLOAD_BYTES,
         "openai": keys.snapshot() if full else keys.public_snapshot(),
         "queue": store.queue_stats(),
         "smtp": smtp_snapshot(full=full),
@@ -329,6 +343,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MoM", version="1.0.0", lifespan=lifespan)
+app.add_middleware(transcript_import.TranscriptBodyLimit)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -770,6 +785,50 @@ def _disk_or_507(extra: int = 0) -> None:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
 
 
+@app.post("/api/meetings/transcript")
+async def import_transcript(request: Request, user: dict = Depends(require_user)) -> dict:
+    # Authentication runs before multipart parsing. The ASGI guard bounds the
+    # entire request before Starlette can spool any uploaded file to disk.
+    async with request.form(max_files=1, max_fields=2, max_part_size=transcript_import.MAX_REQUEST_BYTES) as form:
+        if any(key not in {"text", "file", "title"} or len(form.getlist(key)) != 1 for key in form):
+            raise HTTPException(400, "Нужен один текст или один файл и название")
+        text, file, title = form.get("text"), form.get("file"), form.get("title", "")
+        if not isinstance(title, str) or len(title) > 200:
+            raise HTTPException(400, "Название должно быть не длиннее 200 символов")
+        if (text is None) == (file is None):
+            raise HTTPException(400, "Передайте либо текст, либо файл")
+        original, suffix = "transcript.txt", ".txt"
+        if file is not None:
+            if not isinstance(file, StarletteUploadFile):
+                raise HTTPException(400, "Нужен текстовый файл")
+            original = Path((file.filename or "").replace("\\", "/")).name
+            suffix = Path(original).suffix.lower()
+            if suffix not in transcript_import.SUFFIXES:
+                raise HTTPException(400, "Нужен файл .txt, .md, .srt или .vtt в UTF-8")
+            raw = await file.read(transcript_import.MAX_TEXT_BYTES + 1)
+            if len(raw) > transcript_import.MAX_TEXT_BYTES:
+                raise HTTPException(413, "Транскрипт больше 1 МБ")
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(400, "Сохраните файл в кодировке UTF-8") from exc
+        if not isinstance(text, str):
+            raise HTTPException(400, "Нужен текст транскрипта")
+        if len(text.encode("utf-8")) > transcript_import.MAX_TEXT_BYTES:
+            raise HTTPException(413, "Транскрипт больше 1 МБ")
+        try:
+            document = transcript_import.parse_transcript(text, suffix)
+        except transcript_import.TranscriptError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    _disk_or_507(len(text.encode("utf-8")) * 4)
+    meeting = store.create_text_meeting(
+        uuid.uuid4().hex, title.strip() or (Path(original).stem[:200] if file else "Текстовая встреча"),
+        original[:255], user["user_id"], document,
+    )
+    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"], preserve_id=meeting["id"]))
+    return meeting
+
+
 @app.post("/api/meetings")
 async def create_meeting(
     request: Request,
@@ -857,7 +916,7 @@ async def retry_meeting(
             status_code=400,
             detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
         )
-    keep_transcript = meeting["status"] == "error" and (meeting.get("transcript") or "").strip()
+    keep_transcript = (meeting["status"] == "error" or meeting.get("source_type") == "text") and (meeting.get("transcript") or "").strip()
     fields: dict = {
         "status": "queued",
         "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
@@ -880,7 +939,7 @@ async def retry_meeting(
 
 
 @app.post("/api/meetings/{meeting_id}/protocol")
-def start_protocol(meeting_id: str, user: dict = Depends(require_user)) -> dict:
+def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dict = Depends(require_user)) -> dict:
     meeting = _owned(store.get_meeting(meeting_id), user)
     if meeting["status"] != "review":
         raise HTTPException(status_code=409, detail="Протокол собирается после готовой расшифровки")
@@ -892,7 +951,25 @@ def start_protocol(meeting_id: str, user: dict = Depends(require_user)) -> dict:
             status_code=400,
             detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
         )
-    return _queue_protocol(meeting_id, "Собираю протокол")
+    recipients = [item.model_dump() for item in payload.recipients] if payload else []
+    if recipients and not config.smtp_configured():
+        raise HTTPException(status_code=400, detail="Для отправки протокола спикерам настройте SMTP в админке")
+    document = {
+        "speakers": meeting.get("speakers") or [],
+        "segments": meeting.get("segments") or [],
+        "note": meeting.get("diarization_note"),
+        "source_type": meeting.get("source_type", "audio"),
+    }
+    try:
+        document = select_protocol_recipients(document, recipients)
+    except SpeakerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not store.queue_review_protocol(meeting_id, document):
+        raise HTTPException(status_code=409, detail="Протокол уже поставлен в очередь")
+    store.record_audit(_actor_name(user), "protocol.recipients", meeting_id, f"Дополнительных получателей: {len(recipients)}")
+    store.refresh_queue_messages()
+    worker.notify_work()
+    return store.get_meeting(meeting_id)
 
 
 def _halt_processing(meeting_id: str, meeting: dict, *, restart: bool) -> dict:
@@ -960,6 +1037,7 @@ def _segments_doc(meeting: dict) -> dict:
         "speakers": meeting.get("speakers") or [],
         "segments": meeting.get("segments") or [],
         "note": meeting.get("diarization_note"),
+        "source_type": meeting.get("source_type", "audio"),
     }
 
 
@@ -1007,7 +1085,7 @@ def rename_meeting_speaker(
     meeting = _owned(store.get_meeting(meeting_id), user)
     document = _segments_doc(meeting)
     try:
-        updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name)
+        updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name, payload.email)
     except SpeakerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved = _save_segments(

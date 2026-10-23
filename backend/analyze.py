@@ -3,21 +3,29 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
 
 from . import config
+from .performance import stage_timer
 
 log = logging.getLogger("mom.llm")
 
 _local_asr_lock = asyncio.Lock()
 
 
-def local_asr_slot() -> asyncio.Lock:
+@asynccontextmanager
+async def local_asr_slot():
     """Serialize local ASR and diarization, including GigaAM speaker spans."""
-    return _local_asr_lock
+    with stage_timer("local_slot_wait"):
+        await _local_asr_lock.acquire()
+    try:
+        yield
+    finally:
+        _local_asr_lock.release()
 
 SYSTEM_PROMPT = """Ты — ассистент, который готовит протокол встречи (Minutes of Meeting, MoM).
 По транскрипту созвона верни ТОЛЬКО JSON по схеме ниже.
@@ -167,14 +175,15 @@ async def _transcribe_local(
 ) -> dict[str, Any]:
     if _local_asr_lock.locked() and on_progress:
         on_progress(1, "Жду свободный слот распознавания")
-    async with _local_asr_lock:
-        if config.is_gigaam_asr(model):
-            from .gigaam_asr import transcribe_gigaam_sync
+    async with local_asr_slot():
+        with stage_timer("asr"):
+            if config.is_gigaam_asr(model):
+                from .gigaam_asr import transcribe_gigaam_sync
 
-            return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
-        from .local_asr import transcribe_local_sync
+                return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
+            from .local_asr import transcribe_local_sync
 
-        return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
+            return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
 
 
 async def transcribe_file(

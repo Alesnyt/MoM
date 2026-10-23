@@ -1,4 +1,4 @@
-import type { AuditEvent, AuthStatus, Health, Meeting, PlatformUser, UserSession } from "./types";
+import type { AuditEvent, AuthStatus, Health, Meeting, PlatformUser, ProtocolRecipient, UserSession } from "./types";
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -333,13 +333,27 @@ export async function createMeeting(file: File, title: string): Promise<Meeting>
   return created as Meeting;
 }
 
+export async function createTranscript(file: File | null, text: string, title: string): Promise<Meeting> {
+  const body = new FormData();
+  if (file) body.append("file", file);
+  else body.append("text", text);
+  if (title.trim()) body.append("title", title.trim());
+  const response = await fetch("/api/meetings/transcript", { method: "POST", credentials: "include", body });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function deleteMeeting(id: string): Promise<void> {
   const response = await fetch(`/api/meetings/${id}`, { method: "DELETE", credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
 }
 
-export async function startProtocol(id: string): Promise<Meeting> {
-  const response = await fetch(`/api/meetings/${id}/protocol`, { method: "POST", credentials: "include" });
+export async function startProtocol(id: string, recipients: ProtocolRecipient[] = []): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/protocol`, {
+    method: "POST", credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recipients }),
+  });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
@@ -375,12 +389,12 @@ export async function listPeople(query: string): Promise<Person[]> {
   return data.people ?? [];
 }
 
-export async function renameSpeaker(id: string, speakerId: string, name: string): Promise<Meeting> {
+export async function renameSpeaker(id: string, speakerId: string, name: string, email?: string): Promise<Meeting> {
   const response = await fetch(`/api/meetings/${id}/speakers/${encodeURIComponent(speakerId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, email }),
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();

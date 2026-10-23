@@ -79,6 +79,35 @@ def test_claim_prefers_other_users(db: Path) -> None:
     assert store.claim_next_meeting(2) == "bbb"
 
 
+def test_queue_position_counts_other_users_and_updates_without_worker_refresh(db: Path) -> None:
+    first = _user()
+    second = store.create_user("b@example.com", auth.hash_password("secret-pass"), 5)["id"]
+    for index, (meeting_id, owner) in enumerate((("active", first), ("earlier", first), ("mine", second))):
+        store.create_meeting(meeting_id, meeting_id, "recording.webm", owner)
+        store.update_meeting(meeting_id, queued_at=f"2026-10-22T10:00:0{index}+00:00")
+    store.update_meeting("active", status="transcribing")
+
+    rows = store.list_meetings(second)
+    assert [row["id"] for row in rows] == ["mine"]
+    assert rows[0]["queue_ahead"] == 2
+    assert rows[0]["status_message"] == "В очереди, впереди 2 встречи"
+
+    # Responses stay current even before the background worker refreshes stored messages.
+    store.update_meeting("active", status="review")
+    meeting = store.get_meeting("mine")
+    assert meeting["queue_ahead"] == 1
+    assert meeting["status_message"] == "В очереди, впереди 1 встреча"
+    store.update_meeting("earlier", status="error")
+    meeting = store.get_meeting("mine")
+    assert meeting["queue_ahead"] == 0
+    assert meeting["status_message"] == "Следующая в очереди"
+    assert store.claim_next_meeting(1) == "mine"
+    meeting = store.get_meeting("mine")
+    assert meeting["status"] == "extracting"
+    assert meeting["queue_ahead"] == 0
+    assert meeting["status_message"] == "Начинаю обработку"
+
+
 def test_requeue_interrupted(db: Path) -> None:
     user_id = _user()
     store.create_meeting("aaa", "первая", "a.webm", user_id)

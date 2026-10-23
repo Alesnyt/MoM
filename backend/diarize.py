@@ -8,6 +8,7 @@ from typing import Any, Callable
 from . import config
 from .audio import extract_wav
 from .speakers import assign_speakers, expand_coarse_segments, render_transcript
+from .performance import configure_torch_threads, stage_timer
 
 log = logging.getLogger("mom.diarize")
 
@@ -20,6 +21,8 @@ def apply_diarization(
     audio_path: Path,
     payload: dict[str, Any],
     on_progress: Callable[[str], None] | None = None,
+    *,
+    prepared: Path | None = None,
 ) -> dict[str, Any]:
     segments = list(payload.get("segments") or [])
     if not segments and (payload.get("text") or "").strip():
@@ -35,7 +38,7 @@ def apply_diarization(
     else:
         try:
             _unload_asr()
-            turns = diarize_turns(audio_path)
+            turns = diarize_turns(audio_path, prepared=prepared)
         except DiarizeUnavailable as exc:
             note = str(exc)
             log.info("Спикеры не размечены: %s", exc)
@@ -84,6 +87,7 @@ def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dic
     token = config.get_hf_token()
     if not token:
         raise DiarizeUnavailable("Нет HF_TOKEN — все реплики собраны в одного спикера")
+    configure_torch_threads()
     try:
         from pyannote.audio import Pipeline
     except ImportError as exc:
@@ -95,7 +99,8 @@ def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dic
     try:
         if prepared is None:
             extract_wav(audio_path, wav)
-        pipeline = _load_pipeline(Pipeline, token)
+        with stage_timer("diarization_model_load"):
+            pipeline = _load_pipeline(Pipeline, token)
         output = _run_pipeline(pipeline, wav)
         return _read_turns(output)
     finally:

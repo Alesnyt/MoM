@@ -7,7 +7,7 @@ const COLORS = ["#c9843e", "#7f9d6e", "#6e8caf", "#c46b63", "#b089c4", "#d4a017"
 
 type Turn = {
   speaker: string;
-  start: number;
+  start: number | null;
   indexes: number[];
   text: string;
 };
@@ -16,7 +16,7 @@ function turnsOf(segments: TranscriptSegment[]): Turn[] {
   const turns: Turn[] = [];
   segments.forEach((segment, index) => {
     const last = turns[turns.length - 1];
-    if (last && last.speaker === segment.speaker) {
+    if (last && last.speaker === segment.speaker && last.indexes.length < 500) {
       last.indexes.push(index);
       last.text = `${last.text} ${segment.text}`.trim();
       return;
@@ -58,13 +58,15 @@ function SpeakerNameEditor({
   speaker: Speaker;
   taken: string[];
   disabled: boolean;
-  onRename: (speakerId: string, name: string) => Promise<void>;
+  onRename: (speakerId: string, name: string, email?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(speaker.name);
   const [open, setOpen] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
   const cancelRef = useRef(false);
   const savingRef = useRef(false);
+  const resetRef = useRef<HTMLButtonElement>(null);
+  const defaultName = /^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : null;
 
   useEffect(() => {
     setDraft(speaker.name);
@@ -91,18 +93,19 @@ function SpeakerNameEditor({
     setPeople([]);
   }
 
-  async function save(next = draft, email?: string) {
-    if (savingRef.current) return;
+  async function save(next = draft, email?: string, reset = false) {
+    if (disabled || savingRef.current) return;
     const cleaned = next.trim();
-    if (!cleaned || cleaned === speaker.name.trim()) {
+    if (!cleaned || (cleaned === speaker.name.trim() && (email === undefined || email === speaker.email))) {
       setDraft(speaker.name);
       closeList();
       return;
     }
-    const unique = distinctName(cleaned, email, taken);
+    const unique = reset ? cleaned : distinctName(cleaned, email, taken);
     savingRef.current = true;
     try {
-      await onRename(speaker.id, unique);
+      await onRename(speaker.id, unique, reset ? undefined : email);
+      if (reset) setDraft(unique);
       closeList();
     } catch {
       /* Ошибку показывает список реплик. */
@@ -138,7 +141,9 @@ function SpeakerNameEditor({
               event.currentTarget.blur();
             }
           }}
-          onBlur={() => {
+          onBlur={(event) => {
+            // Tabbing to reset must not save the draft before resetting it.
+            if (resetRef.current && event.relatedTarget === resetRef.current) return;
             if (cancelRef.current) {
               cancelRef.current = false;
               return;
@@ -154,6 +159,20 @@ function SpeakerNameEditor({
         >
           Сохранить
         </button>
+        {defaultName && (
+          <button
+            ref={resetRef}
+            className="ghost"
+            type="button"
+            disabled={disabled || (speaker.name === defaultName && draft === defaultName)}
+            title={`Вернуть имя «${defaultName}»`}
+            aria-label={`Сбросить имя ${speaker.name} на ${defaultName}`}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void save(defaultName, undefined, true)}
+          >
+            Сбросить имя
+          </button>
+        )}
       </form>
       {open && people.length > 0 && (
         <ul className="speaker-suggest">
@@ -182,9 +201,13 @@ function SpeakerNameEditor({
 export function TranscriptView({
   meeting,
   onUpdated,
+  disabled = false,
+  onBusyChange,
 }: {
   meeting: Meeting;
   onUpdated: (meeting: Meeting) => void;
+  disabled?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const segments = meeting.segments || [];
   const speakers = meeting.speakers || [];
@@ -209,21 +232,24 @@ export function TranscriptView({
   const hasUnclear = namedSpeakers.length !== speakers.length;
   const turns = turnsOf(segments);
 
-  async function saveName(speakerId: string, name: string) {
+  async function saveName(speakerId: string, name: string, email?: string) {
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
-      onUpdated(await renameSpeaker(meeting.id, speakerId, name));
+      onUpdated(await renameSpeaker(meeting.id, speakerId, name, email));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось переименовать спикера");
       throw err;
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
 
   async function moveTurn(indexes: number[], speakerId: string) {
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
       onUpdated(await assignSpeaker(meeting.id, speakerId, indexes));
@@ -231,6 +257,7 @@ export function TranscriptView({
       setError(err instanceof Error ? err.message : "Не удалось сменить спикера");
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
 
@@ -238,6 +265,7 @@ export function TranscriptView({
     <div className="speaker-markup">
       <p className="progress-hint">
         Имя можно выбрать из каталога или вписать своё. Оно встанет на все реплики этого спикера и появится в списке выбора.
+        {" «Сбросить имя» вернёт обозначение «Спикер 1», «Спикер 2» и т. д."}
         {hasUnclear ? " «Неясно» — это не один человек: такие реплики назначайте по одной в списке справа." : ""}
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
@@ -248,7 +276,7 @@ export function TranscriptView({
             key={speaker.id}
             speaker={speaker}
             taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
-            disabled={busy}
+            disabled={busy || disabled}
             onRename={saveName}
           />
         ))}
@@ -260,12 +288,12 @@ export function TranscriptView({
           <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
             <header className="turn-head">
               <strong className="speaker-name">{name}</strong>
-              <time>{formatClock(turn.start)}</time>
+              {turn.start !== null && <time>{formatClock(turn.start)}</time>}
               <label className="speaker-move">
                 <span className="sr-only">Кто говорит эту реплику</span>
                 <select
                   value={turn.speaker}
-                  disabled={busy}
+                  disabled={busy || disabled}
                   aria-label="Кто говорит эту реплику"
                   onChange={(event) => {
                     const next = event.target.value;

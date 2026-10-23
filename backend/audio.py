@@ -5,8 +5,11 @@ import logging
 import math
 import shutil
 import subprocess
+import tempfile
 import wave
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from . import config
 
@@ -129,6 +132,45 @@ def extract_wav(src: Path, dst: Path) -> float:
     if not dst.exists() or dst.stat().st_size == 0:
         raise AudioError("Не удалось подготовить WAV для распознавания")
     return duration_seconds(dst)
+
+
+@contextmanager
+def open_pcm_audio(src: Path) -> Iterator[wave.Wave_read]:
+    """Open prepared PCM once; convert other formats once for legacy callers.
+
+    Callers read bounded spans into memory, without a temporary file per span
+    or an allocation proportional to the entire recording's duration.
+    """
+    try:
+        reader = wave.open(str(src), "rb")
+    except (wave.Error, EOFError):
+        reader = None
+    if reader is not None:
+        if reader.getnchannels() == 1 and reader.getsampwidth() == 2 and reader.getframerate() == 16000:
+            try:
+                yield reader
+            finally:
+                reader.close()
+            return
+        reader.close()
+    with tempfile.TemporaryDirectory(prefix="mom-pcm-", dir=src.parent) as folder:
+        wav = Path(folder) / "audio.wav"
+        extract_wav(src, wav)
+        with wave.open(str(wav), "rb") as reader:
+            yield reader
+
+
+def read_pcm_span(reader: wave.Wave_read, start: float, end: float) -> bytes:
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        raise AudioError("Некорректные границы реплики")
+    rate = reader.getframerate()
+    first = min(reader.getnframes(), max(0, int(start * rate)))
+    last = min(reader.getnframes(), max(first, int(end * rate)))
+    reader.setpos(first)
+    frames = reader.readframes(last - first)
+    if len(frames) != (last - first) * 2:
+        raise AudioError("WAV обрезан: не удалось прочитать реплику целиком")
+    return frames
 
 
 def cut_pcm(src: Path, dst: Path, start: float, end: float) -> None:

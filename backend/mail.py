@@ -11,6 +11,7 @@ from email.utils import formatdate
 from pathlib import Path
 
 from . import config
+from .speakers import SpeakerError, clean_speaker_email
 
 log = logging.getLogger("mom.mail")
 
@@ -174,8 +175,23 @@ def notify_meeting_done(meeting: dict) -> None:
 
     user_id = meeting.get("user_id")
     user = store.get_user(user_id) if user_id else None
-    to = (user or {}).get("email") or ""
-    if not to:
+    candidates = [(user or {}).get("email") or ""]
+    candidates.extend(
+        speaker.get("email") or "" for speaker in meeting.get("speakers") or []
+        if speaker.get("send_protocol") is True and speaker.get("id") != "unknown"
+    )
+    recipients: list[str] = []
+    for address in candidates:
+        if not address:
+            continue
+        try:
+            normalized = clean_speaker_email(address)
+        except SpeakerError:
+            log.warning("Некорректный адрес получателя по встрече %s", meeting.get("id"))
+            continue
+        if normalized not in recipients:
+            recipients.append(normalized)
+    if not recipients:
         log.warning("Некому отправить письмо по встрече %s", meeting.get("id"))
         return
     extra = ""
@@ -187,15 +203,22 @@ def notify_meeting_done(meeting: dict) -> None:
         + email_body(meeting)
         + extra
     )
-    try:
-        send_mail(to, email_subject(meeting), body)
-    except Exception as exc:  # noqa: BLE001 — don't fail the job if mail is down
-        log.warning("Не отправилось письмо: %s", exc)
-        store.record_audit(to, "email.fail", meeting.get("id") or "", "SMTP не принял письмо")
-        store.update_meeting(
-            meeting["id"],
-            status_message="Готово. Письмо не отправилось — проверьте SMTP в админке",
+    failed = 0
+    for to in recipients:
+        try:
+            # Separate messages keep recipient addresses private from one another.
+            send_mail(to, email_subject(meeting), body)
+        except Exception as exc:  # noqa: BLE001 — mail failure must not fail the protocol
+            failed += 1
+            log.warning("Не отправилось письмо: %s", exc)
+            store.record_audit(to, "email.fail", meeting.get("id") or "", "SMTP не принял письмо")
+        else:
+            store.record_audit(to, "email.send", meeting.get("id") or "", "автоматически")
+    if failed:
+        message = (
+            f"Готово. Отправлено писем: {len(recipients) - failed} из {len(recipients)}. "
+            "Не все письма отправились — проверьте SMTP в админке"
         )
-        return
-    store.record_audit(to, "email.send", meeting.get("id") or "", "автоматически")
-    store.update_meeting(meeting["id"], status_message="Готово, протокол отправлен на почту")
+    else:
+        message = "Готово, протокол отправлен на почту"
+    store.update_meeting(meeting["id"], status_message=message)

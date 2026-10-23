@@ -51,11 +51,15 @@ export type MeetingResult = {
 export type Speaker = {
   id: string;
   name: string;
+  email?: string;
+  send_protocol?: boolean;
 };
 
+export type ProtocolRecipient = { speaker_id: string; email: string };
+
 export type TranscriptSegment = {
-  start: number;
-  end: number;
+  start: number | null;
+  end: number | null;
   speaker: string;
   text: string;
 };
@@ -64,6 +68,7 @@ export type Meeting = {
   id: string;
   title: string;
   filename: string;
+  source_type?: "audio" | "text";
   status: MeetingStatus;
   status_message: string;
   created_at: string;
@@ -135,6 +140,7 @@ export type DiskStatus = {
 
 export type Health = {
   ok: boolean;
+  max_upload_bytes?: number;
   ffmpeg: boolean;
   ui?: boolean;
   theme?: "classic" | "t2";

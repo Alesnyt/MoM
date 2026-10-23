@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import gc
 import logging
-import os
 from pathlib import Path
 from typing import Any, Callable
 
 from . import config
+from .performance import stage_timer, whisper_threads
 
 log = logging.getLogger("mom.asr")
 
@@ -44,15 +44,17 @@ def _load(on_progress: ProgressFn | None = None):
             "source .venv/bin/activate && pip install faster-whisper"
         ) from exc
     config.ensure_dirs()
-    threads = max(1, min(8, os.cpu_count() or 2))
-    _model = WhisperModel(
-        size,
-        device="cpu",
-        compute_type="int8",
-        cpu_threads=threads,
-        num_workers=1,
-        download_root=str(config.WHISPER_DIR),
-    )
+    threads = whisper_threads()
+    log.info("cpu engine=whisper threads=%s", threads)
+    with stage_timer("whisper_model_load"):
+        _model = WhisperModel(
+            size,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=threads,
+            num_workers=1,
+            download_root=str(config.WHISPER_DIR),
+        )
     _model_size = size
     return _model
 

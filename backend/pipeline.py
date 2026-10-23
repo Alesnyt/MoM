@@ -24,6 +24,7 @@ from .diarize import DiarizeUnavailable, apply_diarization, available as diariza
 from . import control
 from .gigaam_asr import transcribe_spans
 from .logctx import meeting_scope
+from .performance import stage_timer
 from .speakers import assign_speakers, render_transcript, speaker_spans
 
 log = logging.getLogger("mom.pipeline")
@@ -112,7 +113,16 @@ def has_saved_transcript(meeting: dict) -> bool:
 
 async def process_meeting(meeting_id: str) -> None:
     with meeting_scope(meeting_id):
-        await _process_meeting(meeting_id)
+        started = time.perf_counter()
+        try:
+            await _process_meeting(meeting_id)
+        finally:
+            current = store.get_meeting(meeting_id) or {}
+            log.info(
+                "timing stage=total seconds=%.3f status=%s audio_seconds=%s",
+                time.perf_counter() - started, current.get("status", "missing"),
+                current.get("duration_seconds"),
+            )
 
 
 async def _process_meeting(meeting_id: str) -> None:
@@ -130,7 +140,9 @@ async def _process_meeting(meeting_id: str) -> None:
         )
         return
 
-    audio_path = AUDIO_DIR / f"{meeting_id}.mp3"
+    asr_model = config.get_asr_model()
+    local_audio = config.is_local_asr(asr_model)
+    audio_path = AUDIO_DIR / f"{meeting_id}{'.wav' if local_audio else '.mp3'}"
     client = make_client(api_key)
     progress = _Progress(meeting_id)
     resume = has_saved_transcript(meeting)
@@ -169,7 +181,11 @@ async def _process_meeting(meeting_id: str) -> None:
                 )
                 return
             progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
-            duration = await extract_audio_async(src, audio_path)
+            with stage_timer("audio_prepare"):
+                if local_audio:
+                    duration = await asyncio.to_thread(extract_wav, src, audio_path)
+                else:
+                    duration = await extract_audio_async(src, audio_path)
             store.update_meeting(meeting_id, duration_seconds=duration)
             progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
 
@@ -177,54 +193,53 @@ async def _process_meeting(meeting_id: str) -> None:
             payload: dict = {"language": meeting.get("language")}
             known_turns: list | None = None
             known_note: str | None = None
-            if config.is_gigaam_asr() and diarization_available():
+            if config.is_gigaam_asr(asr_model) and diarization_available():
                 step = "спикеры"
                 log.info("шаг: спикеры до расшифровки")
                 progress.set(20, "Размечаю спикеров", status="transcribing", force=True)
-                prepared = audio_path.with_name(f"{audio_path.stem}.voices.wav")
                 try:
-                    await asyncio.to_thread(extract_wav, audio_path, prepared)
-                    try:
-                        async with local_asr_slot():
-                            known_turns = await asyncio.to_thread(diarize_turns, audio_path, prepared=prepared)
-                    except DiarizeUnavailable as exc:
-                        known_turns = []
-                        known_note = str(exc)
-                        log.info("Спикеры не размечены: %s", exc)
-                    except Exception:
-                        known_turns = []
-                        known_note = (
-                            "Не удалось разметить спикеров. Реплики собраны в одного, имя можно задать вручную."
-                        )
-                        log.exception("Разметка спикеров не удалась")
-                    spans = speaker_spans(known_turns or [])
-                    if spans:
-                        step = "расшифровка"
-                        log.info("шаг: расшифровка по голосам, реплик %s", len(spans))
-                        progress.set(30, "Расшифровываю реплики по голосам", status="transcribing", force=True)
+                    async with local_asr_slot():
+                        with stage_timer("diarization"):
+                            known_turns = await asyncio.to_thread(diarize_turns, audio_path, prepared=audio_path)
+                except DiarizeUnavailable as exc:
+                    known_turns = []
+                    known_note = str(exc)
+                    log.info("Спикеры не размечены: %s", exc)
+                except Exception:
+                    known_turns = []
+                    known_note = (
+                        "Не удалось разметить спикеров. Реплики собраны в одного, имя можно задать вручную."
+                    )
+                    log.exception("Разметка спикеров не удалась")
+                if control.is_stopped(meeting_id):
+                    raise control.ProcessingStopped()
+                spans = speaker_spans(known_turns or [])
+                if spans:
+                    step = "расшифровка"
+                    log.info("шаг: расшифровка по голосам, реплик %s", len(spans))
+                    progress.set(30, "Расшифровываю реплики по голосам", status="transcribing", force=True)
 
-                        def on_slice(pct: int, message: str) -> None:
-                            progress.set(30 + int(max(0, min(100, pct)) * 0.55), message, status="transcribing")
+                    def on_slice(pct: int, message: str) -> None:
+                        progress.set(30 + int(max(0, min(100, pct)) * 0.55), message, status="transcribing")
 
-                        async with local_asr_slot():
+                    async with local_asr_slot():
+                        with stage_timer("asr"):
                             payload = await asyncio.to_thread(
                                 transcribe_spans,
-                                prepared,
+                                audio_path,
                                 spans,
                                 meeting.get("language"),
                                 on_slice,
                             )
-                        if control.is_stopped(meeting_id):
-                            raise control.ProcessingStopped()
-                        voiced = assign_speakers(payload.get("segments") or [], known_turns or [])
-                        voiced["note"] = known_note
-                        voiced["text"] = render_transcript(voiced)
-                finally:
-                    prepared.unlink(missing_ok=True)
+                    if control.is_stopped(meeting_id):
+                        raise control.ProcessingStopped()
+                    voiced = assign_speakers(payload.get("segments") or [], known_turns or [])
+                    voiced["note"] = known_note
+                    voiced["text"] = render_transcript(voiced)
             if voiced is None:
                 step = "расшифровка"
-                log.info("шаг: расшифровка model=%s", config.get_asr_model())
-                payload = await _transcribe(client, audio_path, meeting_id, duration, progress)
+                log.info("шаг: расшифровка model=%s", asr_model)
+                payload = await _transcribe(client, audio_path, meeting_id, duration, progress, asr_model=asr_model)
                 if known_turns is not None:
                     voiced = assign_speakers(payload.get("segments") or [], known_turns)
                     voiced["note"] = known_note
@@ -234,12 +249,14 @@ async def _process_meeting(meeting_id: str) -> None:
                     log.info("шаг: спикеры")
                     progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
                     async with local_asr_slot():
-                        voiced = await asyncio.to_thread(
-                            apply_diarization,
-                            audio_path,
-                            payload,
-                            lambda message: progress.set(86, message, status="transcribing", force=True),
-                        )
+                        with stage_timer("diarization"):
+                            voiced = await asyncio.to_thread(
+                                apply_diarization,
+                                audio_path,
+                                payload,
+                                lambda message: progress.set(86, message, status="transcribing", force=True),
+                                prepared=audio_path if local_audio else None,
+                            )
             transcript = (voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
@@ -275,7 +292,8 @@ async def _process_meeting(meeting_id: str) -> None:
             prefix = f"{label} пишет протокол ({parts} запросов)"
         progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
         log.info("шаг: протокол model=%s частей %s", config.get_chat_model(), parts)
-        result = await _analyze_with_heartbeat(client, transcript, meeting["title"], progress, prefix)
+        with stage_timer("protocol"):
+            result = await _analyze_with_heartbeat(client, transcript, meeting["title"], progress, prefix)
         # A cloud LLM request cannot always be interrupted immediately. Ignore
         # its late response when the user has requested stop/restart.
         if control.is_stopped(meeting_id):
@@ -306,14 +324,23 @@ async def _process_meeting(meeting_id: str) -> None:
             status_message="Обработка не удалась",
             error=public_error(exc),
         )
+    finally:
+        if local_audio and not resume:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                log.warning("Не удалось удалить временный WAV %s", audio_path.name, exc_info=True)
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting.get("status") == "done":
         log.info("шаг: почта")
         await asyncio.to_thread(notify_meeting_done, meeting)
 
 
-async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float, progress: _Progress) -> dict:
-    asr_model = config.get_asr_model()
+async def _transcribe(
+    client, audio_path: Path, meeting_id: str, duration: float, progress: _Progress,
+    *, asr_model: str | None = None,
+) -> dict:
+    asr_model = asr_model or config.get_asr_model()
 
     def on_asr(pct: int, message: str) -> None:
         overall = 16 + int(max(0, min(100, pct)) * 0.70)
@@ -334,38 +361,39 @@ async def _transcribe(client, audio_path: Path, meeting_id: str, duration: float
             on_progress=on_asr,
         )
 
-    limit = 2 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
-    chunk_seconds = 2 * 60 if config.is_qwen() else CHUNK_SECONDS
-    size = audio_path.stat().st_size
-    if size <= limit:
-        return await transcribe_file(
-            client,
-            audio_path,
-            asr_model,
-            duration=duration,
-            on_progress=on_asr,
-        )
-
-    chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"
-    try:
-        chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
-        merged = []
-        for index, chunk in enumerate(chunks):
-            base = 16 + int(index / max(1, len(chunks)) * 70)
-            progress.set(
-                base,
-                f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
-                status="transcribing",
-                force=True,
+    with stage_timer("asr_cloud"):
+        limit = 2 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
+        chunk_seconds = 2 * 60 if config.is_qwen() else CHUNK_SECONDS
+        size = audio_path.stat().st_size
+        if size <= limit:
+            return await transcribe_file(
+                client,
+                audio_path,
+                asr_model,
+                duration=duration,
+                on_progress=on_asr,
             )
-            offset = index * chunk_seconds
-            if offset > duration:
-                offset = max(0.0, duration - chunk_seconds)
-            payload = await transcribe_file(client, chunk, asr_model)
-            merged.append((float(offset), payload))
-        return merge_transcripts(merged)
-    finally:
-        shutil.rmtree(chunks_dir, ignore_errors=True)
+
+        chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"
+        try:
+            chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
+            merged = []
+            for index, chunk in enumerate(chunks):
+                base = 16 + int(index / max(1, len(chunks)) * 70)
+                progress.set(
+                    base,
+                    f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
+                    status="transcribing",
+                    force=True,
+                )
+                offset = index * chunk_seconds
+                if offset > duration:
+                    offset = max(0.0, duration - chunk_seconds)
+                payload = await transcribe_file(client, chunk, asr_model)
+                merged.append((float(offset), payload))
+            return merge_transcripts(merged)
+        finally:
+            shutil.rmtree(chunks_dir, ignore_errors=True)
 
 
 def public_error(exc: BaseException) -> str:

@@ -5,14 +5,15 @@ import hashlib
 import importlib
 import json
 import logging
-import shutil
+import math
 import sys
 import types
 from pathlib import Path
 from typing import Any, Callable
 
 from . import config
-from .audio import duration_seconds, extract_wav, split_wav
+from .audio import open_pcm_audio, read_pcm_span
+from .performance import configure_torch_threads, stage_timer
 
 log = logging.getLogger("mom.gigaam")
 
@@ -29,23 +30,9 @@ def unload() -> None:
     gc.collect()
 
 
-def _text_of(result: Any) -> str:
-    if result is None:
-        return ""
-    if isinstance(result, str):
-        return result.strip()
-    text = getattr(result, "text", None)
-    if isinstance(text, str):
-        return text.strip()
-    if isinstance(result, dict):
-        value = result.get("text") or result.get("transcription") or ""
-        return str(value).strip()
-    return str(result).strip()
-
-
 def _allow_gigaam_import() -> None:
     # transformers scans the GigaAM modeling file and demands `pyannote`
-    # even though we never call transcribe_longform (we cut audio with ffmpeg).
+    # even though we never call transcribe_longform (we process short PCM spans).
     try:
         importlib.import_module("pyannote")
     except ImportError:
@@ -87,6 +74,7 @@ def gigaam_pin(revision: str | None = None) -> dict[str, Any]:
 
 def _load(on_progress: ProgressFn | None = None):
     global _model, _revision
+    configure_torch_threads()
     revision = config.gigaam_revision()
     if _model is not None and _revision == revision:
         return _model
@@ -101,7 +89,8 @@ def _load(on_progress: ProgressFn | None = None):
         on_progress(0, f"Загружаю {label}")
     config.ensure_dirs()
     try:
-        _model = load_gigaam_model(revision)
+        with stage_timer("gigaam_model_load"):
+            _model = load_gigaam_model(revision)
     except Exception as exc:
         raise RuntimeError(
             "Не удалось загрузить Сбер GigaAM Multilingual. "
@@ -175,68 +164,37 @@ def transcribe_gigaam_sync(
 ) -> dict[str, Any]:
     log.info("gigaam revision=%s file=%s", config.gigaam_revision(), path.name)
     model = _load(on_progress)
-    work = path.parent / f"{path.stem}_gigaam"
-    if work.exists():
-        shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True, exist_ok=True)
-    wav = work / "full.wav"
-    try:
-        if on_progress:
-            on_progress(2, "Готовлю WAV для GigaAM")
-        extract_wav(path, wav)
-        total = float(duration or duration_seconds(wav))
+    texts: list[str] = []
+    timed: list[dict[str, Any]] = []
+    with open_pcm_audio(path) as audio:
+        # Use actual PCM duration so the final partial chunk is never lost.
+        total = audio.getnframes() / audio.getframerate()
         chunk_seconds = config.GIGAAM_CHUNK_SECONDS
-        if total <= chunk_seconds:
+        count = max(1, math.ceil(total / chunk_seconds))
+        for index in range(count):
             if on_progress:
-                on_progress(5, "GigaAM распознаёт запись")
-            text = _text_of(model.transcribe(str(wav)))
-            if on_progress:
-                on_progress(100, "Расшифровка завершена")
-            segments = [{"start": 0.0, "end": total, "text": text}] if text else []
-            log.info("gigaam готово file=%s segments=%s", path.name, len(segments))
-            return {"language": language, "text": text, "segments": segments}
-
-        chunks = split_wav(wav, work / "chunks", chunk_seconds)
-        texts: list[str] = []
-        timed: list[dict[str, Any]] = []
-        count = max(1, len(chunks))
-        for index, chunk in enumerate(chunks):
-            if on_progress:
-                pct = min(99, max(5, int(index / count * 100)))
-                on_progress(pct, f"GigaAM: фрагмент {index + 1} из {count}")
-            try:
-                text = _text_of(model.transcribe(str(chunk)))
-            except Exception as exc:
-                log.exception("gigaam фрагмент %s из %s", index + 1, count)
-                raise RuntimeError(f"GigaAM не смог расшифровать фрагмент {index + 1}: {exc}") from exc
-            if not text:
+                on_progress(min(99, int(index / count * 100)), f"GigaAM: фрагмент {index + 1} из {count}")
+            start = float(index * chunk_seconds)
+            end = min(total, start + chunk_seconds)
+            if end <= start:
                 continue
-            texts.append(text)
-            offset = float(index * chunk_seconds)
-            timed.append(
-                {
-                    "start": offset,
-                    "end": offset + float(duration_seconds(chunk)),
-                    "text": text,
-                }
-            )
-        if on_progress:
-            on_progress(100, "Расшифровка завершена")
-        log.info("gigaam готово file=%s segments=%s", path.name, len(timed))
-        return {
-            "language": language,
-            "text": " ".join(texts).strip(),
-            "segments": timed,
-        }
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+            text = _transcribe_pcm(model, read_pcm_span(audio, start, end))
+            if text:
+                texts.append(text)
+                timed.append({"start": start, "end": end, "text": text})
+    if on_progress:
+        on_progress(100, "Расшифровка завершена")
+    log.info("gigaam готово file=%s segments=%s", path.name, len(timed))
+    return {"language": language, "text": " ".join(texts).strip(), "segments": timed}
 
 
 def transcribe_span(src: Path, start: float, end: float) -> str:
-    """Recognize one voice slice cut out of a longer recording."""
+    """Legacy single-span entry point, without a temporary file per utterance."""
     if end - start < 0.3:
         return ""
-    return _transcribe_loaded(_load(), src, start, end)
+    model = _load()
+    with open_pcm_audio(src) as audio:
+        return _transcribe_pcm(model, read_pcm_span(audio, start, end))
 
 
 def transcribe_spans(
@@ -245,38 +203,53 @@ def transcribe_spans(
     language: str | None = None,
     on_progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
-    """Recognize each voice slice once. Used when diarization already knows the boundaries."""
+    """Read bounded voice spans from one open WAV and infer directly on PCM."""
     model = _load(on_progress)
     texts: list[str] = []
     timed: list[dict[str, Any]] = []
     count = max(1, len(spans))
-    for index, span in enumerate(spans):
-        if on_progress:
-            pct = min(99, int(index / count * 100))
-            on_progress(pct, f"GigaAM: реплика {index + 1} из {count}")
-        start = float(span["start"])
-        end = float(span["end"])
-        try:
-            text = _transcribe_loaded(model, src, start, end)
-        except Exception as exc:
-            log.exception("gigaam реплика %.2f–%.2f", start, end)
-            raise RuntimeError(f"GigaAM не смог расшифровать реплику {index + 1}: {exc}") from exc
-        if not text:
-            continue
-        texts.append(text)
-        timed.append({"start": start, "end": end, "text": text})
+    with open_pcm_audio(src) as audio:
+        total = audio.getnframes() / audio.getframerate()
+        for index, span in enumerate(spans):
+            if on_progress:
+                on_progress(min(99, int(index / count * 100)), f"GigaAM: реплика {index + 1} из {count}")
+            start = float(span["start"])
+            end = float(span["end"])
+            try:
+                frames = read_pcm_span(audio, start, end)
+                text = _transcribe_pcm(model, frames)
+            except Exception as exc:
+                log.exception("gigaam реплика %.2f–%.2f", start, end)
+                raise RuntimeError(f"GigaAM не смог расшифровать реплику {index + 1}: {exc}") from exc
+            if not text:
+                continue
+            texts.append(text)
+            timed.append({"start": max(0.0, start), "end": min(total, end), "text": text})
     if on_progress:
         on_progress(100, "Расшифровка завершена")
     log.info("gigaam готово реплик %s", len(timed))
     return {"language": language, "text": " ".join(texts).strip(), "segments": timed}
 
 
-def _transcribe_loaded(model: Any, src: Path, start: float, end: float) -> str:
-    from .audio import cut_pcm
+def _transcribe_pcm(model: Any, frames: bytes) -> str:
+    """Same inference path as the pinned GigaAMASR.transcribe, minus ffmpeg.
 
-    dst = src.parent / f"{src.stem}_{start:.2f}_{end:.2f}.wav"
-    try:
-        cut_pcm(src, dst, start, end)
-        return _text_of(model.transcribe(str(dst)))
-    finally:
-        dst.unlink(missing_ok=True)
+    The vendor file stays untouched and hash-checked. Inputs match its
+    load_audio: mono PCM16 at 16 kHz, normalized by 32768, shape [1, samples].
+    Only one short span is materialized, even for recordings lasting hours.
+    """
+    if not frames:
+        return ""
+    if len(frames) % 2 or len(frames) // 2 > 25 * 16000:
+        raise ValueError("GigaAM ожидает PCM16-фрагмент не длиннее 25 секунд")
+    import torch
+
+    inner = model.model
+    with torch.inference_mode():
+        # Writable buffer avoids PyTorch's warning about immutable bytes.
+        pcm = torch.frombuffer(bytearray(frames), dtype=torch.int16).float() / 32768.0
+        wav = pcm.to(device=inner._device, dtype=inner._dtype).unsqueeze(0)
+        length = torch.full([1], wav.shape[-1], device=inner._device, dtype=torch.long)
+        encoded, encoded_len = inner.forward(wav, length)
+        text, _ = inner._decode(encoded, encoded_len, length, False)[0]
+        return str(text).strip()

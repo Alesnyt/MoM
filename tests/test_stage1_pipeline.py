@@ -82,6 +82,7 @@ def test_stop_during_llm_cannot_publish_completed_protocol(
     assert stopped["status"] == "error"
     assert stopped["result"] is None
     assert stopped["error"] == "Обработка остановлена"
+    assert not (config.AUDIO_DIR / f"{meeting_id}.wav").exists()
 
 
 def test_stop_during_gigaam_cannot_publish_review(
@@ -248,3 +249,127 @@ def test_parallel_gigaam_uses_a_single_model_slot(
     asyncio.run(scenario())
     assert peak == 1, "Two simultaneous GigaAM calls share the same model"
     assert [store.get_meeting(mid)["status"] for mid in ids] == ["review", "review"]
+
+
+@pytest.mark.parametrize("engine", ["local-whisper", "gigaam-multilingual"])
+def test_local_models_share_one_wav(recording_db, monkeypatch, caplog, engine):
+    import logging
+
+    monkeypatch.setattr(config, "WHISPER_MODEL", engine)
+    monkeypatch.setattr(pipeline, "diarization_available", lambda: True)
+    meeting_id = "shared-audio"
+    source = config.UPLOAD_DIR / f"{meeting_id}.webm"
+    source.write_bytes(b"original")
+    store.create_meeting(meeting_id, "Тест", source.name, recording_db)
+    wav = config.AUDIO_DIR / f"{meeting_id}.wav"
+    calls = []
+    payload = {"language": "ru", "text": "привет", "segments": [{"start": 0, "end": 10, "text": "привет"}]}
+
+    def extract(src, dst):
+        assert src == source and dst == wav
+        dst.write_bytes(b"prepared wav")
+        calls.append("prepare")
+        return 10.0
+
+    def diarize(path, *, prepared=None):
+        assert path == prepared == wav and wav.exists()
+        calls.append("diarize")
+        return [{"start": 0, "end": 10, "speaker": "A"}]
+
+    def spans(path, turns, language, callback):
+        assert path == wav and wav.exists()
+        calls.append("asr")
+        return payload
+
+    async def transcribe(client, path, mid, duration, progress, *, asr_model):
+        assert path == wav and wav.exists()
+        assert asr_model == engine
+        calls.append("asr")
+        return payload
+
+    def apply(path, body, callback, *, prepared=None):
+        turns = diarize(path, prepared=prepared)
+        doc = pipeline.assign_speakers(body["segments"], turns)
+        doc["text"] = pipeline.render_transcript(doc)
+        return doc
+
+    monkeypatch.setattr(pipeline, "extract_wav", extract)
+    monkeypatch.setattr(pipeline, "extract_audio_async", lambda *a: pytest.fail("Local audio must not pass through MP3"))
+    monkeypatch.setattr(pipeline, "diarize_turns", diarize)
+    monkeypatch.setattr(pipeline, "transcribe_spans", spans)
+    monkeypatch.setattr(pipeline, "_transcribe", transcribe)
+    monkeypatch.setattr(pipeline, "apply_diarization", apply)
+    with caplog.at_level(logging.INFO):
+        asyncio.run(pipeline.process_meeting(meeting_id))
+    expected = ["prepare", "diarize", "asr"] if engine.startswith("gigaam") else ["prepare", "asr", "diarize"]
+    assert calls == expected
+    assert store.get_meeting(meeting_id)["status"] == "review"
+    assert not wav.exists()
+    assert source.read_bytes() == b"original"
+    assert "timing stage=audio_prepare" in caplog.text
+    assert "timing stage=diarization" in caplog.text
+    assert "timing stage=total" in caplog.text
+    assert "status=review audio_seconds=10.0" in caplog.text
+
+
+@pytest.mark.parametrize("diarization_fails", [False, True])
+def test_gigaam_without_turns_reuses_wav_and_cleans_up_on_asr_error(recording_db, monkeypatch, diarization_fails):
+    monkeypatch.setattr(config, "WHISPER_MODEL", "gigaam-multilingual")
+    monkeypatch.setattr(pipeline, "diarization_available", lambda: True)
+    meeting_id = "fallback-audio"
+    source = config.UPLOAD_DIR / f"{meeting_id}.webm"
+    source.write_bytes(b"original")
+    store.create_meeting(meeting_id, "Тест", source.name, recording_db)
+    wav = config.AUDIO_DIR / f"{meeting_id}.wav"
+
+    def extract(src, dst):
+        dst.write_bytes(b"prepared wav")
+        return 10.0
+
+    def diarize(path, *, prepared=None):
+        if diarization_fails:
+            raise RuntimeError("No diarization")
+        return []
+
+    async def transcribe(client, path, *args, **kwargs):
+        assert path == wav and path.exists()
+        raise RuntimeError("ASR failed")
+
+    monkeypatch.setattr(pipeline, "extract_wav", extract)
+    monkeypatch.setattr(pipeline, "diarize_turns", diarize)
+    monkeypatch.setattr(pipeline, "_transcribe", transcribe)
+    monkeypatch.setattr(pipeline, "transcribe_spans", lambda *a: pytest.fail("No voice boundaries"))
+    asyncio.run(pipeline.process_meeting(meeting_id))
+    assert store.get_meeting(meeting_id)["status"] == "error"
+    assert not wav.exists()
+    assert source.exists()
+
+
+def test_cloud_asr_keeps_mp3_path(recording_db, monkeypatch):
+    monkeypatch.setattr(config, "WHISPER_MODEL", "whisper-1")
+    meeting_id = "cloud-audio"
+    source = config.UPLOAD_DIR / f"{meeting_id}.webm"
+    source.write_bytes(b"original")
+    store.create_meeting(meeting_id, "Тест", source.name, recording_db)
+    mp3 = config.AUDIO_DIR / f"{meeting_id}.mp3"
+
+    async def extract(src, dst):
+        assert src == source and dst == mp3
+        dst.write_bytes(b"mp3")
+        return 10.0
+
+    async def transcribe(client, path, *args, **kwargs):
+        assert path == mp3
+        return {"text": "привет"}
+
+    def apply(path, body, callback, *, prepared=None):
+        assert path == mp3 and prepared is None
+        return {"text": "Спикер 1: привет"}
+
+    monkeypatch.setattr(pipeline, "extract_audio_async", extract)
+    monkeypatch.setattr(pipeline, "extract_wav", lambda *a: pytest.fail("Cloud upload remains MP3"))
+    monkeypatch.setattr(pipeline, "_transcribe", transcribe)
+    monkeypatch.setattr(pipeline, "apply_diarization", apply)
+    asyncio.run(pipeline.process_meeting(meeting_id))
+    assert store.get_meeting(meeting_id)["status"] == "review"
+    assert mp3.exists()

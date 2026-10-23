@@ -43,7 +43,7 @@ def _bool_env(name: str, default: bool) -> bool:
 
 HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
 PORT = _int_env("PORT", 8000)
-MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 512) * 1024 * 1024)
+MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 2048) * 1024 * 1024)
 MIN_FREE_BYTES = max(0, _int_env("MIN_FREE_MB", 2048)) * 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
 MAX_JOBS_LIMIT = 8
@@ -60,6 +60,8 @@ WHISPER_DIR = DATA_DIR / "whisper"
 LOGIN_WINDOW_SECONDS = max(15, _int_env("LOGIN_WINDOW_SECONDS", 60))
 LOGIN_MAX_ATTEMPTS = max(3, _int_env("LOGIN_MAX_ATTEMPTS", 8))
 ASR_IDLE_UNLOAD_SECONDS = max(60, _int_env("ASR_IDLE_UNLOAD_SECONDS", 300))
+WHISPER_CPU_THREADS = max(0, _int_env("WHISPER_CPU_THREADS", 0))
+TORCH_CPU_THREADS = max(0, _int_env("TORCH_CPU_THREADS", 0))
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or os.getenv("HUGGING_FACE_HUB_TOKEN", "").strip()
 DIARIZE_MODEL = os.getenv("DIARIZE_MODEL", "pyannote/speaker-diarization-3.1").strip() or "pyannote/speaker-diarization-3.1"
 DIARIZE_MAX_SPEAKERS = max(1, min(12, _int_env("DIARIZE_MAX_SPEAKERS", 8)))
