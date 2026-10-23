@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { downloadMarkdown, getEmailBody, openMeetingEmail, startProtocol } from "./api";
 import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
 import { TranscriptView } from "./transcript";
-import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
+import { ProtocolRecipients } from "./recipients";
+import type { Meeting, MeetingResult, MeetingStatus, ProtocolRecipient, Tab } from "./types";
 
 export const STEPS: { id: MeetingStatus; label: string }[] = [
   { id: "extracting", label: "Аудио" },
@@ -36,6 +37,7 @@ export function MeetingPane({
   const [mailNote, setMailNote] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);
   const [protocolBusy, setProtocolBusy] = useState(false);
+  const [speakerBusy, setSpeakerBusy] = useState(false);
   const [protocolError, setProtocolError] = useState<string | null>(null);
 
   async function sendByEmail() {
@@ -68,11 +70,11 @@ export function MeetingPane({
     }
   }
 
-  async function buildProtocol() {
+  async function buildProtocol(recipients: ProtocolRecipient[]) {
     setProtocolError(null);
     setProtocolBusy(true);
     try {
-      onUpdated(await startProtocol(meeting.id));
+      onUpdated(await startProtocol(meeting.id, recipients));
     } catch (err) {
       setProtocolError(err instanceof Error ? err.message : "Не удалось собрать протокол");
     } finally {
@@ -159,16 +161,11 @@ export function MeetingPane({
                 Разметить спикеров
               </button>
             )}
-            <button
-              className={marking ? "primary" : "ghost"}
-              type="button"
-              disabled={protocolBusy}
-              onClick={() => void buildProtocol()}
-            >
-              {protocolBusy ? "Ставлю в очередь…" : "Собрать протокол"}
-            </button>
           </div>
-          {(marking || meeting.source_type === "text") && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
+          {(marking || meeting.source_type === "text") && <TranscriptView meeting={meeting} onUpdated={onUpdated}
+            disabled={protocolBusy} onBusyChange={setSpeakerBusy} />}
+          <ProtocolRecipients key={meeting.id} meeting={meeting} mailEnabled={mailEnabled}
+            disabled={protocolBusy || speakerBusy} busy={protocolBusy} onSubmit={buildProtocol} />
         </div>
       )}
       {meeting.status === "error" && (
@@ -180,6 +177,11 @@ export function MeetingPane({
 
       {result && meeting.status === "done" && (
         <>
+          {(meeting.speakers || []).some((speaker) => speaker.send_protocol) && <p className="progress-hint">
+            {meeting.status_message}. Дополнительные получатели: {(meeting.speakers || [])
+              .filter((speaker) => speaker.send_protocol && speaker.email)
+              .map((speaker) => `${speaker.name} (${speaker.email})`).join(", ")}.
+          </p>}
           <nav className="tabs">
             <TabButton id="overview" tab={tab} onTab={onTab} label="Саммари" />
             <TabButton

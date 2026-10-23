@@ -164,7 +164,35 @@ def render_transcript(document: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def rename_speaker(document: dict[str, Any], speaker_id: str, name: str) -> tuple[dict[str, Any], str, str]:
+def clean_speaker_email(value: str) -> str:
+    email = value.strip().lower()
+    pattern = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}"
+    local = email.split("@", 1)[0]
+    if (len(email) > 254 or len(local) > 64 or local.startswith(".") or local.endswith(".")
+            or ".." in local or not re.fullmatch(pattern, email)):
+        raise SpeakerError("Укажите корректный email получателя")
+    return email
+
+
+def select_protocol_recipients(document: dict[str, Any], recipients: list[dict[str, str]]) -> dict[str, Any]:
+    speakers = [dict(item) for item in document.get("speakers") or []]
+    by_id = {item["id"]: item for item in speakers if item["id"] != UNKNOWN_ID}
+    for item in speakers:
+        item.pop("send_protocol", None)
+    seen: set[str] = set()
+    for recipient in recipients:
+        sid = recipient["speaker_id"]
+        if sid not in by_id:
+            raise SpeakerError("Выберите получателя из размеченных спикеров")
+        if sid in seen:
+            raise SpeakerError("Спикер выбран несколько раз")
+        seen.add(sid)
+        by_id[sid]["email"] = clean_speaker_email(recipient["email"])
+        by_id[sid]["send_protocol"] = True
+    return {**document, "speakers": speakers}
+
+
+def rename_speaker(document: dict[str, Any], speaker_id: str, name: str, email: str | None = None) -> tuple[dict[str, Any], str, str]:
     speakers = [dict(item) for item in document.get("speakers") or []]
     target = next((item for item in speakers if item["id"] == speaker_id), None)
     if not target:
@@ -173,6 +201,18 @@ def rename_speaker(document: dict[str, Any], speaker_id: str, name: str) -> tupl
     if any(item["id"] != speaker_id and item["name"].casefold() == new_name.casefold() for item in speakers):
         raise SpeakerError("Такое имя уже есть у другого спикера")
     old_name = target["name"]
+    if email is not None:
+        address = clean_speaker_email(email) if email.strip() else ""
+        if address != target.get("email") or old_name != new_name:
+            target.pop("send_protocol", None)
+        if address:
+            target["email"] = address
+        else:
+            target.pop("email", None)
+    elif old_name != new_name:
+        # A manually changed/reset name must not inherit another person's address.
+        target.pop("email", None)
+        target.pop("send_protocol", None)
     target["name"] = new_name
     updated = {**document, "speakers": speakers}
     return updated, old_name, new_name

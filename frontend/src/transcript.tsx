@@ -58,7 +58,7 @@ function SpeakerNameEditor({
   speaker: Speaker;
   taken: string[];
   disabled: boolean;
-  onRename: (speakerId: string, name: string) => Promise<void>;
+  onRename: (speakerId: string, name: string, email?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(speaker.name);
   const [open, setOpen] = useState(false);
@@ -96,7 +96,7 @@ function SpeakerNameEditor({
   async function save(next = draft, email?: string, reset = false) {
     if (disabled || savingRef.current) return;
     const cleaned = next.trim();
-    if (!cleaned || cleaned === speaker.name.trim()) {
+    if (!cleaned || (cleaned === speaker.name.trim() && (email === undefined || email === speaker.email))) {
       setDraft(speaker.name);
       closeList();
       return;
@@ -104,7 +104,7 @@ function SpeakerNameEditor({
     const unique = reset ? cleaned : distinctName(cleaned, email, taken);
     savingRef.current = true;
     try {
-      await onRename(speaker.id, unique);
+      await onRename(speaker.id, unique, reset ? undefined : email);
       if (reset) setDraft(unique);
       closeList();
     } catch {
@@ -201,9 +201,13 @@ function SpeakerNameEditor({
 export function TranscriptView({
   meeting,
   onUpdated,
+  disabled = false,
+  onBusyChange,
 }: {
   meeting: Meeting;
   onUpdated: (meeting: Meeting) => void;
+  disabled?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const segments = meeting.segments || [];
   const speakers = meeting.speakers || [];
@@ -228,21 +232,24 @@ export function TranscriptView({
   const hasUnclear = namedSpeakers.length !== speakers.length;
   const turns = turnsOf(segments);
 
-  async function saveName(speakerId: string, name: string) {
+  async function saveName(speakerId: string, name: string, email?: string) {
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
-      onUpdated(await renameSpeaker(meeting.id, speakerId, name));
+      onUpdated(await renameSpeaker(meeting.id, speakerId, name, email));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось переименовать спикера");
       throw err;
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
 
   async function moveTurn(indexes: number[], speakerId: string) {
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
       onUpdated(await assignSpeaker(meeting.id, speakerId, indexes));
@@ -250,6 +257,7 @@ export function TranscriptView({
       setError(err instanceof Error ? err.message : "Не удалось сменить спикера");
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
 
@@ -268,7 +276,7 @@ export function TranscriptView({
             key={speaker.id}
             speaker={speaker}
             taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
-            disabled={busy}
+            disabled={busy || disabled}
             onRename={saveName}
           />
         ))}
@@ -285,7 +293,7 @@ export function TranscriptView({
                 <span className="sr-only">Кто говорит эту реплику</span>
                 <select
                   value={turn.speaker}
-                  disabled={busy}
+                  disabled={busy || disabled}
                   aria-label="Кто говорит эту реплику"
                   onChange={(event) => {
                     const next = event.target.value;

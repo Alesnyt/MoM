@@ -51,7 +51,11 @@ export type MeetingResult = {
 export type Speaker = {
   id: string;
   name: string;
+  email?: string;
+  send_protocol?: boolean;
 };
+
+export type ProtocolRecipient = { speaker_id: string; email: string };
 
 export type TranscriptSegment = {
   start: number | null;

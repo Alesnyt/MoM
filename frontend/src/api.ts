@@ -1,4 +1,4 @@
-import type { AuditEvent, AuthStatus, Health, Meeting, PlatformUser, UserSession } from "./types";
+import type { AuditEvent, AuthStatus, Health, Meeting, PlatformUser, ProtocolRecipient, UserSession } from "./types";
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -348,8 +348,12 @@ export async function deleteMeeting(id: string): Promise<void> {
   if (!response.ok) throw new Error(await parseError(response));
 }
 
-export async function startProtocol(id: string): Promise<Meeting> {
-  const response = await fetch(`/api/meetings/${id}/protocol`, { method: "POST", credentials: "include" });
+export async function startProtocol(id: string, recipients: ProtocolRecipient[] = []): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}/protocol`, {
+    method: "POST", credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recipients }),
+  });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
@@ -385,12 +389,12 @@ export async function listPeople(query: string): Promise<Person[]> {
   return data.people ?? [];
 }
 
-export async function renameSpeaker(id: string, speakerId: string, name: string): Promise<Meeting> {
+export async function renameSpeaker(id: string, speakerId: string, name: string, email?: string): Promise<Meeting> {
   const response = await fetch(`/api/meetings/${id}/speakers/${encodeURIComponent(speakerId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, email }),
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();

@@ -217,6 +217,18 @@ def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     return attach_queue_info([_serialize(row, body=True)])[0]
 
 
+def queue_review_protocol(meeting_id: str, document: dict) -> bool:
+    """Save explicitly selected recipients and claim review in one transaction."""
+    with connect() as conn:
+        cursor = conn.execute(
+            """UPDATE meetings SET status='queued', status_message='Собираю протокол',
+               error=NULL, result_json=NULL, progress=88, queued_at=?, segments_json=?
+               WHERE id=? AND status='review'""",
+            (utc_now(), json.dumps(document, ensure_ascii=False), meeting_id),
+        )
+        return cursor.rowcount == 1
+
+
 _LIST_COLUMNS = """
     id, title, filename, status, status_message, created_at,
     duration_seconds, language, error, progress, queued_at, user_id,
