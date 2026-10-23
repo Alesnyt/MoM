@@ -293,10 +293,7 @@ function ProcessCard({
       >
         <i style={{ width: `${queued ? 6 : pct}%` }} />
       </div>
-      <p className="progress-live">
-        {queued ? `Ожидание ${formatClock(elapsed)}` : `В работе ${formatClock(elapsed)}`}
-        {!queued && waiting ? " · процесс живой, ждём ответ" : ""}
-      </p>
+      {queued && <p className="progress-live">{`Ожидание ${formatClock(elapsed)}`}</p>}
       <ol>
         {steps.map((step, i) => (
           <li
