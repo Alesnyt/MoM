@@ -389,7 +389,11 @@ def _upsert_env(values: dict[str, str]) -> None:
     with _env_lock:
         source = ENV_PATH if ENV_PATH.exists() else ROOT / ".env.example"
         original = source.read_text() if source.exists() else ""
-        fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
+        try:
+            fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
+        except PermissionError:
+            # Docker grants write access to the mounted .env, not /app itself.
+            fd, name = tempfile.mkstemp(prefix="mom-env-")
         temporary = Path(name)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -400,10 +404,10 @@ def _upsert_env(values: dict[str, str]) -> None:
             try:
                 os.replace(temporary, ENV_PATH)
             except OSError as exc:
-                if exc.errno != errno.EBUSY:
+                if exc.errno not in {errno.EBUSY, errno.EXDEV, errno.EACCES, errno.EPERM}:
                     raise
-                # Docker deployments bind-mount .env as a file: its inode cannot
-                # be replaced. Keep quoting and the update lock in this case.
+                # A file mount or non-writable parent prevents replacement.
+                # Write the existing writable file under the same update lock.
                 with ENV_PATH.open("w") as stream:
                     stream.write(temporary.read_text())
                     stream.flush()
