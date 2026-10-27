@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import ssl
 from urllib.parse import urlparse
 
@@ -131,6 +132,26 @@ def _bind_as(server, user_dn: str, password: str) -> bool:
         connection.unbind()
 
 
+# Only accounts that sit inside an OU with this name may log in (e.g. OU=Users,
+# OU=Moscow,...). Empty value disables the check.
+LDAP_ALLOWED_OU = os.getenv("LDAP_ALLOWED_OU", "Users").strip()
+
+
+def _in_allowed_ou(dn: str) -> bool:
+    if not LDAP_ALLOWED_OU:
+        return True
+    from ldap3.utils.dn import parse_dn
+
+    try:
+        parts = parse_dn(dn)
+    except Exception:
+        return False
+    return any(
+        attr.strip().lower() == "ou" and value.strip().lower() == LDAP_ALLOWED_OU.lower()
+        for attr, value, _sep in parts
+    )
+
+
 def _search(connection, username: str) -> list[tuple[str, str]]:
     from ldap3 import SUBTREE
 
@@ -156,7 +177,10 @@ def _search(connection, username: str) -> list[tuple[str, str]]:
             raw = entry[attr].value
             mail = raw if isinstance(raw, str) else (raw[0] if raw else "")
         found.append((entry.entry_dn, str(mail or "")))
-    return found
+    allowed = [item for item in found if _in_allowed_ou(item[0])]
+    if len(allowed) != len(found):
+        log.info("LDAP: пропущены записи вне OU=%s: %s", LDAP_ALLOWED_OU, [dn for dn, _ in found if not _in_allowed_ou(dn)])
+    return allowed
 
 
 def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
@@ -222,7 +246,9 @@ def _server():
 
 
 def _open(connection, *, starttls: bool) -> None:
-    if not connection.open():
+    # ldap3 Connection.open() returns None, check the socket state instead.
+    connection.open()
+    if connection.closed:
         raise LdapError("Каталог недоступен")
     if starttls and not connection.start_tls():
         raise LdapError("Не удалось включить STARTTLS")
