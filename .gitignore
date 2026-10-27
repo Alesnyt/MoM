@@ -11,3 +11,5 @@ data/
 backups/
 frontend/dist/
 *.log
+certs
+wheels

@@ -1,13 +1,14 @@
-# syntax=docker/dockerfile:1
 
-FROM node:20-bookworm-slim AS ui
+ARG DOCKER_PROXY 
+
+FROM ${DOCKER_PROXY}node:20-bookworm-slim AS ui
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.12-slim-bookworm
+FROM ${DOCKER_PROXY}python:3.12-slim-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -22,13 +23,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-gigaam.txt requirements-diarize.txt ./
+COPY requirements.txt requirements-gigaam.txt requirements-diarize.txt constraints.txt ./
 # CPU wheels. The default PyPI torch build pulls CUDA and several extra gigabytes.
-ARG INSTALL_DIARIZE=0
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir -r requirements.txt \
-    && if [ "$INSTALL_DIARIZE" = "1" ]; then pip install --no-cache-dir -r requirements-diarize.txt; fi
+RUN --mount=type=bind,source=wheels,target=/tmp/wheels \
+    pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir /tmp/wheels/*.whl \
+    && pip install --no-cache-dir -c constraints.txt -r requirements.txt \
+    && pip install --no-cache-dir -c constraints.txt -r requirements-diarize.txt
 
 COPY backend ./backend
 COPY .env.example ./
