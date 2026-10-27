@@ -15,6 +15,7 @@ LABELS = {
     "meeting.delete": "Удалена встреча",
     "meeting.stop": "Обработка остановлена",
     "meeting.restart": "Обработка запущена заново",
+    "prompts.save": "Сохранены промпты LLM",
     "speaker.rename": "Переименован спикер",
     "speaker.reassign": "Реплики перенесены",
     "email.send": "Протокол отправлен",

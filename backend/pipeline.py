@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import disk, store
+from .name_review import review_names
 from .analyze import (
     analyze_long_transcript,
     make_client,
@@ -281,6 +282,24 @@ async def _process_meeting(meeting_id: str) -> None:
             )
             log.info("шаг: проверка спикеров")
             return
+        step = "проверка имён"
+        document = {
+            "speakers": meeting.get("speakers") or [],
+            "segments": meeting.get("segments") or [],
+            "note": meeting.get("diarization_note"),
+            "source_type": meeting.get("source_type", "audio"),
+            "name_review": meeting.get("name_review"),
+        }
+        if document["segments"]:
+            with stage_timer("name_review"):
+                document = await review_names(
+                    client, document,
+                    on_progress=lambda message: progress.set(88, message, status="analyzing", force=True),
+                )
+            if control.is_stopped(meeting_id):
+                raise control.ProcessingStopped()
+            transcript = render_transcript(document)
+            store.update_meeting(meeting_id, transcript=transcript, transcript_segments=document)
         step = "протокол"
         parts = max(1, (len(transcript) + 79_999) // 80_000)
         label = config.chat_label()

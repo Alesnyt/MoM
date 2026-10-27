@@ -8,7 +8,7 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
+export type AdminTab = "prompts" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
 
 export type AuditEvent = {
   id: number;
@@ -57,7 +57,15 @@ export type Speaker = {
 
 export type ProtocolRecipient = { speaker_id: string; email: string };
 
+export type NameReview = {
+  status: "done" | "error" | "skipped" | "stale";
+  message: string;
+  mentions: { segment_index: number; original: string; replacement: string | null;
+    decision: "correct" | "confirmed" | "external" | "uncertain"; reason: string }[];
+};
+
 export type TranscriptSegment = {
+  original_text?: string;
   start: number | null;
   end: number | null;
   speaker: string;
@@ -78,6 +86,7 @@ export type Meeting = {
   speakers?: Speaker[] | null;
   segments?: TranscriptSegment[] | null;
   diarization_note?: string | null;
+  name_review?: NameReview | null;
   result: MeetingResult | null;
   error: string | null;
   progress?: number;

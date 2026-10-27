@@ -1430,3 +1430,13 @@ select.title-input {
     padding: 28px;
   }
 }
+
+.prompt-field { display: grid; gap: 10px; margin: 24px 0; }
+.prompt-field label { font-weight: 600; }
+.prompt-field textarea { width: 100%; box-sizing: border-box; padding: 14px; border: 1px solid currentColor;
+  border-radius: 8px; background: transparent; color: inherit; font: inherit; line-height: 1.5; resize: vertical; }
+.prompt-field button { justify-self: start; }
+.prompt-toggle { display: flex; align-items: flex-start; gap: 10px; margin-top: 20px; }
+.name-review { margin: 16px 0; }
+.name-review li { margin: 10px 0; }
+.original-transcript { white-space: pre-wrap; overflow-wrap: anywhere; }

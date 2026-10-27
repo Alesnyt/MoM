@@ -465,3 +465,28 @@ function slug(value: string): string {
       .slice(0, 60) || "mom"
   );
 }
+
+export type PromptSettings = {
+  version: number;
+  protocol_prompt: string;
+  name_review_prompt: string;
+  name_review_enabled: boolean;
+  defaults: { protocol_prompt: string; name_review_prompt: string };
+};
+
+export async function getPrompts(): Promise<PromptSettings> {
+  const response = await fetch("/api/settings/prompts", { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function savePrompts(settings: PromptSettings): Promise<PromptSettings> {
+  const response = await fetch("/api/settings/prompts", {
+    method: "POST", credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ protocol_prompt: settings.protocol_prompt,
+      name_review_prompt: settings.name_review_prompt, name_review_enabled: settings.name_review_enabled }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}

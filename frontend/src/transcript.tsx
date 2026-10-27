@@ -270,6 +270,16 @@ export function TranscriptView({
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
       {error && <div className="banner" role="alert">{error}</div>}
+      {meeting.name_review && <details className="name-review">
+        <summary>{meeting.name_review.message}</summary>
+        <ul>{meeting.name_review.mentions.map((item, index) => <li key={index}>
+          Реплика {item.segment_index + 1}: «{item.original}»
+          {item.decision === "correct" ? ` → «${item.replacement}»` :
+            item.decision === "confirmed" ? " — имя подтверждено" :
+            item.decision === "external" ? " — другой человек, без изменений" : " — неоднозначно, без изменений"}.
+          {" "}{item.reason}
+        </li>)}</ul>
+      </details>}
       <div className="speaker-roster">
         {namedSpeakers.map((speaker) => (
           <SpeakerNameEditor
@@ -310,6 +320,10 @@ export function TranscriptView({
               </label>
             </header>
             <p>{turn.text}</p>
+            {turn.indexes.some((index) => segments[index].original_text && segments[index].original_text !== segments[index].text) &&
+              <details><summary>До проверки имён</summary><p className="original-transcript">
+                {turn.indexes.map((index) => segments[index].original_text ?? segments[index].text).join(" ")}
+              </p></details>}
           </article>
         );
       })}

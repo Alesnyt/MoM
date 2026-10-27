@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audit, auth, config, disk, keys, ldap_auth, people, store, worker
+from . import audit, auth, config, disk, keys, ldap_auth, people, prompts, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from . import transcript_import
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -46,6 +46,12 @@ SECURITY_HEADERS = {
 
 class SettingsIn(BaseModel):
     openai_api_key: str = Field(min_length=8)
+
+
+class PromptsIn(BaseModel):
+    protocol_prompt: str = Field(min_length=1, max_length=30000)
+    name_review_prompt: str = Field(min_length=1, max_length=30000)
+    name_review_enabled: bool = True
 
 
 class ModelsIn(BaseModel):
@@ -630,6 +636,23 @@ def get_settings(_admin: dict = Depends(require_admin)) -> dict:
     return _health(full=True)
 
 
+@app.get("/api/settings/prompts")
+def get_prompts(_admin: dict = Depends(require_admin)) -> dict:
+    return prompts.settings_view()
+
+
+@app.post("/api/settings/prompts")
+def save_prompts(payload: PromptsIn, _admin: dict = Depends(require_admin)) -> dict:
+    values = payload.model_dump()
+    for key in ("protocol_prompt", "name_review_prompt"):
+        values[key] = values[key].strip()
+        if not values[key]:
+            raise HTTPException(status_code=400, detail="Промпт не может быть пустым")
+    version = store.save_llm_settings(values, _actor_name(_admin))
+    store.record_audit(_actor_name(_admin), "prompts.save", "llm", f"версия {version}")
+    return prompts.settings_view()
+
+
 @app.post("/api/settings")
 async def save_settings(payload: SettingsIn, _admin: dict = Depends(require_admin)) -> dict:
     key = payload.openai_api_key.strip()
@@ -958,6 +981,7 @@ def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dic
         "speakers": meeting.get("speakers") or [],
         "segments": meeting.get("segments") or [],
         "note": meeting.get("diarization_note"),
+        "name_review": meeting.get("name_review"),
         "source_type": meeting.get("source_type", "audio"),
     }
     try:
@@ -1037,11 +1061,15 @@ def _segments_doc(meeting: dict) -> dict:
         "speakers": meeting.get("speakers") or [],
         "segments": meeting.get("segments") or [],
         "note": meeting.get("diarization_note"),
+        "name_review": meeting.get("name_review"),
         "source_type": meeting.get("source_type", "audio"),
     }
 
 
 def _save_segments(meeting_id: str, document: dict, result: dict | None, *, replace_from: str | None = None, replace_to: str | None = None) -> dict:
+    if document.get("name_review") and (not replace_from or replace_from != replace_to):
+        document["name_review"] = {**document["name_review"], "status": "stale",
+            "message": "Разметка спикеров изменена. Для новой проверки имён пересоберите протокол."}
     stored_result = result
     if stored_result is not None and replace_from and replace_to:
         stored_result = replace_speaker_label(stored_result, replace_from, replace_to)

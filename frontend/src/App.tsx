@@ -38,6 +38,7 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
         speakers: row.speakers ?? old.speakers,
         segments: row.segments ?? old.segments,
         diarization_note: row.diarization_note ?? old.diarization_note,
+        name_review: row.name_review === undefined ? old.name_review : row.name_review,
       };
     }
     return {
@@ -48,6 +49,7 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
       speakers: row.speakers ?? old.speakers,
       segments: row.segments ?? old.segments,
       diarization_note: row.diarization_note ?? old.diarization_note,
+      name_review: row.name_review === undefined ? old.name_review : row.name_review,
     };
   });
 }

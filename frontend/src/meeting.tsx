@@ -164,6 +164,7 @@ export function MeetingPane({
           </div>
           {(marking || meeting.source_type === "text") && <TranscriptView meeting={meeting} onUpdated={onUpdated}
             disabled={protocolBusy} onBusyChange={setSpeakerBusy} />}
+          <p className="progress-hint">Если проверка имён включена администратором, перед протоколом LLM сопоставит упоминания с именами спикеров. Неоднозначные имена останутся без изменений.</p>
           <ProtocolRecipients key={meeting.id} meeting={meeting} mailEnabled={mailEnabled}
             disabled={protocolBusy || speakerBusy} busy={protocolBusy} onSubmit={buildProtocol} />
         </div>
@@ -182,6 +183,7 @@ export function MeetingPane({
               .filter((speaker) => speaker.send_protocol && speaker.email)
               .map((speaker) => `${speaker.name} (${speaker.email})`).join(", ")}.
           </p>}
+          {meeting.name_review && <p className="progress-hint">{meeting.name_review.message} Подробности — во вкладке «Транскрипт».</p>}
           <nav className="tabs">
             <TabButton id="overview" tab={tab} onTab={onTab} label="Саммари" />
             <TabButton

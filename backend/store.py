@@ -128,7 +128,28 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_id ON audit_events(id)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS llm_settings (
+            version INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload TEXT NOT NULL
+        )""")
 
+
+
+def get_llm_settings() -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT version, payload FROM llm_settings ORDER BY version DESC LIMIT 1").fetchone()
+    return {**json.loads(row["payload"]), "version": row["version"]} if row else None
+
+
+def save_llm_settings(payload: dict, actor: str) -> int:
+    with connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO llm_settings (created_at, actor, payload) VALUES (?, ?, ?)",
+            (utc_now(), actor, json.dumps(payload, ensure_ascii=False)),
+        )
+        return int(cursor.lastrowid)
 
 
 def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> dict[str, Any]:
@@ -499,6 +520,7 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
         data["speakers"] = parsed.get("speakers") or []
         data["segments"] = parsed.get("segments") or []
         data["diarization_note"] = parsed.get("note")
+        data["name_review"] = parsed.get("name_review")
         data["source_type"] = parsed.get("source_type", "audio")
     else:
         data.pop("transcript", None)
