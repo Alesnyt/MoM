@@ -1440,3 +1440,17 @@ select.title-input {
 .name-review { margin: 16px 0; }
 .name-review li { margin: 10px 0; }
 .original-transcript { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.directory-scopes { margin-top: 32px; }
+.scope-options { border: 1px solid var(--line); padding: 16px; margin: 16px 0; border-radius: 8px; min-width: 0; }
+.scope-options > label { display: block; margin: 10px 0; }
+.scope-list { list-style: none; padding: 0; max-height: 360px; overflow: auto; }
+.scope-list li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.scope-list label { display: flex; align-items: flex-start; gap: 8px; min-width: 0; flex: 1 1 240px; }
+.scope-list small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.scope-dn { overflow-wrap: anywhere; }
+.speaker-suggest button[aria-selected="true"] { background: var(--hover); }
+.speaker-search-note { padding: 8px; color: var(--muted); }
+
+.scope-options > .field-label { display: grid; gap: 8px; margin-top: 20px; }
+.scope-options .title-input { width: 100%; box-sizing: border-box; }

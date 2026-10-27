@@ -128,6 +128,7 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_id ON audit_events(id)")
+        conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, payload TEXT NOT NULL)")
         conn.execute("""CREATE TABLE IF NOT EXISTS llm_settings (
             version INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
@@ -135,6 +136,19 @@ def init_db() -> None:
             payload TEXT NOT NULL
         )""")
 
+
+
+def get_app_setting(key: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT payload FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return json.loads(row["payload"]) if row else None
+
+
+def set_app_setting(key: str, payload: dict) -> None:
+    with connect() as conn:
+        conn.execute("INSERT INTO app_settings (key, payload) VALUES (?, ?) "
+                     "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+                     (key, json.dumps(payload, ensure_ascii=False)))
 
 
 def get_llm_settings() -> dict | None:

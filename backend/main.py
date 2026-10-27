@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from typing import Literal
 from pathlib import Path
 
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audit, auth, config, disk, keys, ldap_auth, people, prompts, store, worker
+from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, people, prompts, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from . import transcript_import
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -87,6 +88,11 @@ class LdapIn(BaseModel):
     starttls: bool = False
     tls_verify: bool = True
     email_attr: str = "mail"
+
+
+class DirectoryScopeIn(BaseModel):
+    mode: Literal["all", "selected"]
+    bases: list[str] = Field(default_factory=list, max_length=32)
 
 
 class LdapTestIn(BaseModel):
@@ -739,6 +745,31 @@ def save_ldap(payload: LdapIn, _admin: dict = Depends(require_admin)) -> dict:
         bits.append(f"база {base}")
     store.record_audit(_actor_name(_admin), "ldap.save", "ldap", ", ".join(bit for bit in bits if bit))
     return _health(full=True)
+
+
+@app.get("/api/settings/ldap/scopes")
+def get_directory_scopes(_admin: dict = Depends(require_admin)) -> dict:
+    return directory_scope.snapshot()
+
+
+@app.post("/api/settings/ldap/scopes")
+def save_directory_scopes(payload: DirectoryScopeIn, _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        result = directory_scope.save(payload.mode, payload.bases)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.record_audit(_actor_name(_admin), "ldap.scopes", "ldap", f"Режим {payload.mode}, областей {len(result['bases'])}")
+    return result
+
+
+@app.get("/api/settings/ldap/structure")
+def directory_structure(base_dn: str = Query(default="", max_length=2000),
+                        cursor: str = Query(default="", max_length=8192),
+                        _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return ldap_auth.browse_scopes(base_dn, cursor)
+    except ldap_auth.LdapError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/settings/ldap/test")

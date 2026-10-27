@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
 import type { Meeting, Speaker, TranscriptSegment } from "./types";
@@ -63,9 +63,11 @@ function SpeakerNameEditor({
   const [draft, setDraft] = useState(speaker.name);
   const [open, setOpen] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
-  const cancelRef = useRef(false);
+  const [searchState, setSearchState] = useState<"idle" | "loading" | "empty" | "error">("idle");
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const listId = useId();
+  const activeOption = useRef<HTMLButtonElement>(null);
   const savingRef = useRef(false);
-  const resetRef = useRef<HTMLButtonElement>(null);
   const defaultName = /^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : null;
 
   useEffect(() => {
@@ -76,21 +78,37 @@ function SpeakerNameEditor({
 
   useEffect(() => {
     const query = draft.trim();
-    if (!open || query.length < 2 || query === speaker.name.trim()) {
-      setPeople([]);
+    if (!open || disabled || query.length < 2 || query === speaker.name.trim()) {
+      setPeople([]); setSearchState("idle"); setActiveIndex(-1);
       return;
     }
+    const controller = new AbortController();
+    let active = true;
+    setSearchState("loading");
     const handle = window.setTimeout(() => {
-      listPeople(query)
-        .then(setPeople)
-        .catch(() => setPeople([]));
+      listPeople(query, controller.signal)
+        .then((found) => {
+          if (!active) return;
+          setPeople(found); setActiveIndex(-1); setSearchState(found.length ? "idle" : "empty");
+        })
+        .catch(() => {
+          if (!active) return;
+          setPeople([]); setActiveIndex(-1); setSearchState("error");
+        });
     }, 250);
-    return () => window.clearTimeout(handle);
-  }, [draft, open, speaker.name]);
+    return () => { active = false; controller.abort(); window.clearTimeout(handle); };
+  }, [draft, open, speaker.name, disabled]);
+
+  useEffect(() => { activeOption.current?.scrollIntoView({ block: "nearest" }); }, [activeIndex]);
 
   function closeList() {
-    setOpen(false);
-    setPeople([]);
+    setOpen(false); setPeople([]); setActiveIndex(-1); setSearchState("idle");
+  }
+
+  function choose(person: Person) {
+    setDraft(person.name);
+    closeList();
+    void save(person.name, person.email);
   }
 
   async function save(next = draft, email?: string, reset = false) {
@@ -115,7 +133,12 @@ function SpeakerNameEditor({
   }
 
   return (
-    <div className="speaker-rename">
+    <div className="speaker-rename" onBlur={(event) => {
+      // Moving focus to Save, Reset, or an option is still inside this editor.
+      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+      closeList();
+      void save();
+    }}>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -124,6 +147,12 @@ function SpeakerNameEditor({
       >
         <input
           className="speaker-edit"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={open && (people.length > 0 || searchState !== "idle")}
+          aria-controls={listId}
+          aria-activedescendant={open && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
+          autoComplete="off"
           value={draft}
           disabled={disabled}
           aria-label={`Имя спикера ${speaker.name}`}
@@ -131,24 +160,20 @@ function SpeakerNameEditor({
           onFocus={() => setOpen(true)}
           onChange={(event) => {
             setDraft(event.target.value);
+            setPeople([]); setActiveIndex(-1);
             setOpen(true);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
-              cancelRef.current = true;
-              setDraft(speaker.name);
-              closeList();
-              event.currentTarget.blur();
+              event.preventDefault();
+              setDraft(speaker.name); closeList();
+            } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && people.length) {
+              event.preventDefault(); setOpen(true);
+              setActiveIndex((current) => event.key === "ArrowDown"
+                ? (current + 1) % people.length : (current <= 0 ? people.length - 1 : current - 1));
+            } else if (event.key === "Enter" && open && activeIndex >= 0 && people[activeIndex]) {
+              event.preventDefault(); choose(people[activeIndex]);
             }
-          }}
-          onBlur={(event) => {
-            // Tabbing to reset must not save the draft before resetting it.
-            if (resetRef.current && event.relatedTarget === resetRef.current) return;
-            if (cancelRef.current) {
-              cancelRef.current = false;
-              return;
-            }
-            void save();
           }}
         />
         <button
@@ -161,7 +186,6 @@ function SpeakerNameEditor({
         </button>
         {defaultName && (
           <button
-            ref={resetRef}
             className="ghost"
             type="button"
             disabled={disabled || (speaker.name === defaultName && draft === defaultName)}
@@ -174,25 +198,25 @@ function SpeakerNameEditor({
           </button>
         )}
       </form>
-      {open && people.length > 0 && (
-        <ul className="speaker-suggest">
-          {people.map((person) => (
-            <li key={`${person.source}-${person.email || person.name}`}>
-              <button
-                type="button"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  setDraft(person.name);
-                  closeList();
-                  void save(person.name, person.email);
-                }}
-              >
-                <strong>{person.name}</strong>
-                {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
-              </button>
-            </li>
-          ))}
-        </ul>
+      {open && (people.length > 0 || searchState !== "idle") && (
+        <div className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
+          {searchState === "loading" && <div className="speaker-search-note" role="status">Поиск в каталоге…</div>}
+          {searchState === "empty" && <div className="speaker-search-note" role="status">Совпадений нет. Можно сохранить имя вручную.</div>}
+          {searchState === "error" && <div className="speaker-search-note" role="status">Поиск недоступен. Можно сохранить имя вручную.</div>}
+          <ul id={listId} role="listbox" aria-label="Имена из каталога" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {people.map((person, index) => (
+              <li key={`${person.source}-${person.email || person.name}-${index}`} role="presentation">
+                <button id={`${listId}-${index}`} type="button" role="option" tabIndex={-1}
+                  ref={index === activeIndex ? activeOption : undefined}
+                  aria-selected={index === activeIndex} disabled={disabled}
+                  onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(person)}>
+                  <strong>{person.name}</strong>
+                  {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

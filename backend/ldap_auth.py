@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import logging
+import re
+import time
 import ssl
 from urllib.parse import urlparse
 
-from . import config
+from . import config, directory_scope
 
 log = logging.getLogger("mom.ldap")
 
@@ -33,6 +36,8 @@ def user_filter(username: str) -> str:
 def people_filter(query: str) -> str:
     escaped = escape_filter(query.strip())
     mail = (config.get_ldap_email_attr() or "mail").strip() or "mail"
+    if not re.fullmatch(r"(?:[A-Za-z][A-Za-z0-9-]*|[0-9]+(?:\.[0-9]+)+)", mail):
+        raise LdapError("Некорректное имя атрибута email")
     clauses = [
         f"(cn=*{escaped}*)",
         f"(displayName=*{escaped}*)",
@@ -42,7 +47,7 @@ def people_filter(query: str) -> str:
     ]
     if mail.lower() != "mail":
         clauses.append(f"(mail=*{escaped}*)")
-    return "(|" + "".join(clauses) + ")"
+    return "(&(objectClass=person)(!(objectClass=computer))(|" + "".join(clauses) + "))"
 
 
 def authenticate(username: str, password: str) -> bool:
@@ -163,40 +168,114 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
     text = query.strip()
     if len(text) < 2 or not config.ldap_configured():
         return []
+    bases = directory_scope.search_bases()
+    if not bases:
+        return []
+    connection = None
     try:
         connection, _server = _service_connection()
+        from ldap3 import SUBTREE, DEREF_NEVER
+
+        mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
+        attributes = sorted({mail_attr, "mail", "cn", "displayName"})
+        people: list[dict[str, str]] = []
+        seen: set[str] = set()
+        cap = max(1, min(int(limit), 30))
+        deadline = time.monotonic() + 12
+        for base in bases:
+            if time.monotonic() >= deadline:
+                raise LdapError("Поиск по выбранным областям занял слишком много времени. Сократите список областей")
+            ok = connection.search(
+                search_base=base, search_filter=people_filter(text), search_scope=SUBTREE,
+                dereference_aliases=DEREF_NEVER, attributes=attributes,
+                size_limit=cap, time_limit=5,
+            )
+            description = str((connection.result or {}).get("description") or "")
+            if not ok and description not in {"success", "sizeLimitExceeded"}:
+                raise LdapError("Не удалось выполнить поиск в выбранной области. Проверьте DN и права служебной учётной записи")
+            for entry in connection.entries:
+                mail = _entry_attr(entry, mail_attr) or _entry_attr(entry, "mail")
+                name = _entry_attr(entry, "displayName") or _entry_attr(entry, "cn") or mail
+                key = mail.casefold() if mail else str(entry.entry_dn).casefold()
+                if not name or key in seen:
+                    continue
+                seen.add(key)
+                people.append({"name": name, "email": mail, "source": "ldap"})
+                if len(people) >= cap:
+                    return people
+        return people
     except LdapError:
         raise
     except Exception as exc:
-        log.exception("Нет связи с каталогом")
+        log.exception("Поиск людей в каталоге не удался")
         raise LdapError("Каталог недоступен") from exc
-    try:
-        from ldap3 import SUBTREE
-
-        mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-        attributes = list({mail_attr, "mail", "cn", "displayName"})
-        ok = connection.search(
-            search_base=config.get_ldap_base_dn(),
-            search_filter=people_filter(text),
-            search_scope=SUBTREE,
-            attributes=attributes,
-            size_limit=max(1, min(int(limit), 30)),
-        )
-        if not ok and not connection.entries:
-            description = str((connection.result or {}).get("description") or "")
-            if description not in {"success", "sizeLimitExceeded", "noSuchObject"}:
-                log.warning("Поиск людей в каталоге не удался: %s", connection.result)
-                raise LdapError("Каталог недоступен")
-        people: list[dict[str, str]] = []
-        for entry in connection.entries:
-            mail = _entry_attr(entry, mail_attr) or _entry_attr(entry, "mail")
-            name = _entry_attr(entry, "displayName") or _entry_attr(entry, "cn") or mail
-            if not name:
-                continue
-            people.append({"name": name, "email": mail, "source": "ldap"})
-        return people
     finally:
-        connection.unbind()
+        if connection is not None:
+            connection.unbind()
+
+
+def browse_scopes(base_dn: str = "", cursor: str = "") -> dict:
+    """Read directory structure, never enumerate people or follow referrals."""
+    from ldap3 import BASE, LEVEL, DEREF_NEVER
+
+    if not config.get_ldap_url() or not config.get_ldap_base_dn():
+        raise LdapError("Сначала сохраните подключение к каталогу и базу поиска")
+    connection = None
+    try:
+        if base_dn:
+            directory_scope.dn_key(base_dn)
+        cookie = base64.b64decode(cursor, validate=True) if cursor else None
+        connection, _server = _service_connection()
+        if not base_dn:
+            roots = [{"dn": config.get_ldap_base_dn(), "name": "Настроенная база поиска", "kind": "base"}]
+            ok = connection.search(search_base="", search_filter="(objectClass=*)", search_scope=BASE,
+                attributes=["namingContexts", "defaultNamingContext"], time_limit=5)
+            contexts = []
+            if ok and connection.entries:
+                for attr in ("defaultNamingContext", "namingContexts"):
+                    if attr in connection.entries[0]:
+                        value = connection.entries[0][attr].value
+                        contexts.extend([value] if isinstance(value, str) else value or [])
+            seen = {directory_scope.dn_key(roots[0]["dn"])}
+            # A naming context can also be Schema, Configuration or DNS zones.
+            # Ask for domain objects explicitly before offering it as a domain.
+            deadline = time.monotonic() + 12
+            for dn in list(dict.fromkeys(contexts))[:32]:
+                if time.monotonic() >= deadline:
+                    break
+                key = directory_scope.dn_key(dn)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found = connection.search(search_base=dn, search_filter="(|(objectClass=domainDNS)(objectClass=domain))",
+                    search_scope=BASE, attributes=["name", "dc"], time_limit=3)
+                if found and connection.entries:
+                    roots.append({"dn": dn, "name": _entry_attr(connection.entries[0], "name") or dn, "kind": "domain"})
+            return {"items": roots, "next_cursor": None,
+                    "warning": "Показаны области, доступные через настроенный сервер. Для другого домена может потребоваться отдельное подключение."}
+        ok = connection.search(search_base=base_dn,
+            search_filter="(|(objectClass=organizationalUnit)(objectClass=container)(objectClass=domainDNS))",
+            search_scope=LEVEL, dereference_aliases=DEREF_NEVER, attributes=["name", "ou", "cn"],
+            paged_size=100, paged_cookie=cookie, size_limit=2000, time_limit=5)
+        result = connection.result or {}
+        description = str(result.get("description") or "")
+        if not ok and description not in {"success", "sizeLimitExceeded"}:
+            raise LdapError("Не удалось прочитать область каталога. Проверьте DN и права служебной учётной записи")
+        items = [{"dn": entry.entry_dn, "name": _entry_attr(entry, "name") or _entry_attr(entry, "ou")
+                  or _entry_attr(entry, "cn") or entry.entry_dn, "kind": "container"} for entry in connection.entries]
+        cookie = result.get("controls", {}).get("1.2.840.113556.1.4.319", {}).get("value", {}).get("cookie")
+        return {"items": items, "next_cursor": base64.b64encode(cookie).decode() if cookie else None,
+                "warning": "Каталог ограничил список. Можно указать нужный DN вручную." if description == "sizeLimitExceeded" else None}
+    except LdapError:
+        raise
+    except (ValueError, TypeError) as exc:
+        raise LdapError("Некорректный DN области или указатель страницы") from exc
+    except Exception as exc:
+        log.exception("Не удалось прочитать структуру каталога")
+        raise LdapError("Каталог недоступен") from exc
+    finally:
+        if connection is not None:
+            connection.unbind()
 
 
 def _entry_attr(entry: object, name: str) -> str:

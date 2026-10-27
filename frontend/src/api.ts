@@ -382,8 +382,8 @@ export type Person = {
   source: "mom" | "ldap";
 };
 
-export async function listPeople(query: string): Promise<Person[]> {
-  const response = await fetch(`/api/people?q=${encodeURIComponent(query)}`, { credentials: "include" });
+export async function listPeople(query: string, signal?: AbortSignal): Promise<Person[]> {
+  const response = await fetch(`/api/people?q=${encodeURIComponent(query)}`, { credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   const data = await response.json();
   return data.people ?? [];
@@ -487,6 +487,31 @@ export async function savePrompts(settings: PromptSettings): Promise<PromptSetti
     body: JSON.stringify({ protocol_prompt: settings.protocol_prompt,
       name_review_prompt: settings.name_review_prompt, name_review_enabled: settings.name_review_enabled }),
   });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+
+export type DirectoryScope = { mode: "all" | "selected"; bases: string[]; connection_matches: boolean };
+export type DirectoryArea = { dn: string; name: string; kind: string };
+export type DirectoryStructure = { items: DirectoryArea[]; next_cursor: string | null; warning: string | null };
+
+export async function getDirectoryScope(): Promise<DirectoryScope> {
+  const response = await fetch("/api/settings/ldap/scopes", { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function saveDirectoryScope(value: DirectoryScope): Promise<DirectoryScope> {
+  const response = await fetch("/api/settings/ldap/scopes", { method: "POST", credentials: "include",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: value.mode, bases: value.bases }) });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function browseDirectory(baseDn = "", cursor = ""): Promise<DirectoryStructure> {
+  const query = new URLSearchParams({ base_dn: baseDn, cursor });
+  const response = await fetch(`/api/settings/ldap/structure?${query}`, { credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
