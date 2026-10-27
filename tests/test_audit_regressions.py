@@ -144,3 +144,25 @@ def test_settings_support_docker_file_bind_mount(tmp_path, monkeypatch):
     monkeypatch.setattr(config.os, 'replace', mounted)
     config._upsert_env({'SMTP_PASSWORD': 'alpha #beta'})
     assert dotenv_values(target, interpolate=False) == {'UNCHANGED': 'ok', 'SMTP_PASSWORD': 'alpha #beta'}
+
+
+
+def test_settings_writable_file_in_readonly_parent(tmp_path, monkeypatch):
+    import errno
+    target = tmp_path / '.env'
+    target.write_text('UNCHANGED=ok\n')
+    monkeypatch.setattr(config, 'ENV_PATH', target)
+    real_mkstemp = config.tempfile.mkstemp
+    real_replace = config.os.replace
+    def restricted_temp(*args, **kwargs):
+        if kwargs.get('dir') == target.parent:
+            raise PermissionError(errno.EACCES, 'Read-only parent')
+        return real_mkstemp(*args, **kwargs)
+    def restricted_replace(source, destination):
+        if destination == target:
+            raise PermissionError(errno.EACCES, 'Read-only parent')
+        return real_replace(source, destination)
+    monkeypatch.setattr(config.tempfile, 'mkstemp', restricted_temp)
+    monkeypatch.setattr(config.os, 'replace', restricted_replace)
+    config._upsert_env({'SMTP_PASSWORD': 'alpha #beta'})
+    assert dotenv_values(target, interpolate=False) == {'UNCHANGED': 'ok', 'SMTP_PASSWORD': 'alpha #beta'}

@@ -11,3 +11,10 @@ data/
 backups/
 frontend/dist/
 *.log
+certs
+/wheels/
+.env.corporate
+/deploy/corporate/wheels/*
+!/deploy/corporate/wheels/.gitkeep
+/deploy/corporate/ca/*
+!/deploy/corporate/ca/.gitkeep

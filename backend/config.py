@@ -4,6 +4,7 @@ from dotenv import load_dotenv, set_key
 import os
 import stat
 import errno
+import ipaddress
 import tempfile
 import threading
 
@@ -51,6 +52,11 @@ MIN_FREE_BYTES = max(0, _int_env("MIN_FREE_MB", 2048)) * 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
 MAX_JOBS_LIMIT = 8
 MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, _int_env("MAX_JOBS", 1)))
+# Explicit proxy addresses only; never trust arbitrary forwarded headers.
+TRUSTED_PROXY_IPS = frozenset(
+    str(ipaddress.ip_address(value.strip()))
+    for value in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if value.strip()
+)
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = max(1, min(65535, _int_env("SMTP_PORT", 587)))
@@ -383,7 +389,11 @@ def _upsert_env(values: dict[str, str]) -> None:
     with _env_lock:
         source = ENV_PATH if ENV_PATH.exists() else ROOT / ".env.example"
         original = source.read_text() if source.exists() else ""
-        fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
+        try:
+            fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
+        except PermissionError:
+            # Docker grants write access to the mounted .env, not /app itself.
+            fd, name = tempfile.mkstemp(prefix="mom-env-")
         temporary = Path(name)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -394,10 +404,10 @@ def _upsert_env(values: dict[str, str]) -> None:
             try:
                 os.replace(temporary, ENV_PATH)
             except OSError as exc:
-                if exc.errno != errno.EBUSY:
+                if exc.errno not in {errno.EBUSY, errno.EXDEV, errno.EACCES, errno.EPERM}:
                     raise
-                # Docker deployments bind-mount .env as a file: its inode cannot
-                # be replaced. Keep quoting and the update lock in this case.
+                # A file mount or non-writable parent prevents replacement.
+                # Write the existing writable file under the same update lock.
                 with ENV_PATH.open("w") as stream:
                     stream.write(temporary.read_text())
                     stream.flush()

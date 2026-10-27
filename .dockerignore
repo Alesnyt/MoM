@@ -13,3 +13,6 @@ data
 *.log
 .DS_Store
 agent-transcripts
+certs
+.env.corporate
+backups
