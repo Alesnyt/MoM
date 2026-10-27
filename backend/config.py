@@ -4,6 +4,7 @@ from dotenv import load_dotenv, set_key
 import os
 import stat
 import errno
+import ipaddress
 import tempfile
 import threading
 
@@ -51,6 +52,11 @@ MIN_FREE_BYTES = max(0, _int_env("MIN_FREE_MB", 2048)) * 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
 MAX_JOBS_LIMIT = 8
 MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, _int_env("MAX_JOBS", 1)))
+# Explicit proxy addresses only; never trust arbitrary forwarded headers.
+TRUSTED_PROXY_IPS = frozenset(
+    str(ipaddress.ip_address(value.strip()))
+    for value in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if value.strip()
+)
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = max(1, min(65535, _int_env("SMTP_PORT", 587)))

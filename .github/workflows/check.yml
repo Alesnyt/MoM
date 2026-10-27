@@ -124,3 +124,23 @@ jobs:
         run: npm test
       - name: Typecheck and build
         run: npm run build
+
+  corporate-nginx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate standalone Compose files
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose --env-file deploy/corporate/env.example -f compose.corporate.yml config --quiet
+      - name: Test nginx template, HTTPS and streamed uploads
+        run: |
+          docker pull nginx:stable-alpine
+          python3 tests/smoke_corporate_nginx.py
+
+  corporate-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build corporate image without private wheels or certificates
+        run: docker build -f deploy/corporate/Dockerfile -t mom:corporate-ci .

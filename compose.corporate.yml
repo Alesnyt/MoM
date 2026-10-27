@@ -1,0 +1,53 @@
+# Standalone configuration: do not combine with docker-compose.yml.
+# docker compose --env-file .env.corporate -f compose.corporate.yml up -d --build
+services:
+  mom:
+    build:
+      context: .
+      dockerfile: deploy/corporate/Dockerfile
+      args:
+        DOCKER_PROXY: ${DOCKER_PROXY:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mom,nginx}
+        INSTALL_DIARIZE: ${INSTALL_DIARIZE:-1}
+    environment:
+      TRUSTED_PROXY_IPS: ${MOM_PROXY_IP:-172.30.88.3}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mom,nginx}
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+      - ./.env:/app/.env
+    networks:
+      corporate:
+        ipv4_address: ${MOM_BACKEND_IP:-172.30.88.2}
+    restart: unless-stopped
+
+  nginx:
+    image: ${DOCKER_PROXY:-}nginx:stable-alpine
+    environment:
+      SERVER_NAME: ${SERVER_NAME:?Set SERVER_NAME in .env.corporate}
+      NGINX_ENVSUBST_FILTER: ^SERVER_NAME$
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/corporate/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./certs/cert.cer:/etc/nginx/ssl/nginx.crt:ro
+      - ./certs/cert_no_pass.key:/etc/nginx/ssl/nginx.key:ro
+    networks:
+      corporate:
+        ipv4_address: ${MOM_PROXY_IP:-172.30.88.3}
+    depends_on:
+      mom:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  corporate:
+    ipam:
+      config:
+        - subnet: ${MOM_NETWORK_SUBNET:-172.30.88.0/24}

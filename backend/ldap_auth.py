@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import json
 import os
 import re
 import time
@@ -137,55 +138,66 @@ def _bind_as(server, user_dn: str, password: str) -> bool:
         connection.unbind()
 
 
-# Only accounts that sit inside an OU with this name may log in (e.g. OU=Users,
-# OU=Moscow,...). Empty value disables the check.
-LDAP_ALLOWED_OU = os.getenv("LDAP_ALLOWED_OU", "Users").strip()
-
-
-def _in_allowed_ou(dn: str) -> bool:
-    if not LDAP_ALLOWED_OU:
-        return True
-    from ldap3.utils.dn import parse_dn
-
+def authentication_bases() -> list[str]:
+    """Optional full DN scopes for login, independent from speaker suggestions."""
+    raw = os.getenv("LDAP_AUTH_BASE_DNS", "").strip()
+    if not raw:
+        if os.getenv("LDAP_ALLOWED_OU", "").strip():
+            raise LdapError("Замените LDAP_ALLOWED_OU на LDAP_AUTH_BASE_DNS с полными DN")
+        return [config.get_ldap_base_dn()]
     try:
-        parts = parse_dn(dn)
-    except Exception:
-        return False
-    return any(
-        attr.strip().lower() == "ou" and value.strip().lower() == LDAP_ALLOWED_OU.lower()
-        for attr, value, _sep in parts
-    )
+        values = json.loads(raw)
+        if not isinstance(values, list) or not 1 <= len(values) <= 16 or not all(isinstance(v, str) for v in values):
+            raise ValueError()
+        bases = directory_scope.normalize_bases(values)
+        root = directory_scope.dn_key(config.get_ldap_base_dn())
+        keys = [directory_scope.dn_key(dn) for dn in bases]
+        if any(len(key) < len(root) or key[-len(root):] != root for key in keys):
+            raise ValueError()
+        # Avoid duplicate results from overlapping subtrees.
+        return [dn for i, dn in enumerate(bases)
+                if not any(len(other) < len(keys[i]) and keys[i][-len(other):] == other for other in keys)]
+    except (ValueError, TypeError):
+        raise LdapError("LDAP_AUTH_BASE_DNS: нужен непустой JSON-массив полных DN внутри LDAP_BASE_DN") from None
 
 
 def _search(connection, username: str) -> list[tuple[str, str]]:
-    from ldap3 import SUBTREE
+    from ldap3 import SUBTREE, DEREF_NEVER
 
     attr = config.get_ldap_email_attr()
-    ok = connection.search(
-        search_base=config.get_ldap_base_dn(),
-        search_filter=user_filter(username),
-        search_scope=SUBTREE,
-        attributes=[attr] if attr else None,
-        size_limit=2,
-    )
-    if not ok and connection.result and connection.result.get("description") not in {"success", "sizeLimitExceeded"}:
-        # No such object / empty result is a failed login, not an outage.
-        description = str((connection.result or {}).get("description") or "")
-        if description in {"noSuchObject", "sizeLimitExceeded"} or not connection.entries:
-            return []
-        log.warning("Поиск в каталоге не удался: %s", connection.result)
-        raise LdapError("Каталог не выполнил поиск")
     found: list[tuple[str, str]] = []
-    for entry in connection.entries:
-        mail = ""
-        if attr and attr in entry:
-            raw = entry[attr].value
-            mail = raw if isinstance(raw, str) else (raw[0] if raw else "")
-        found.append((entry.entry_dn, str(mail or "")))
-    allowed = [item for item in found if _in_allowed_ou(item[0])]
-    if len(allowed) != len(found):
-        log.info("LDAP: пропущены записи вне OU=%s: %s", LDAP_ALLOWED_OU, [dn for dn, _ in found if not _in_allowed_ou(dn)])
-    return allowed
+    seen = set()
+    deadline = time.monotonic() + 12
+    for base in authentication_bases():
+        if time.monotonic() >= deadline:
+            raise LdapError("Поиск учётной записи занял слишком много времени")
+        ok = connection.search(
+            search_base=base, search_filter=user_filter(username),
+            search_scope=SUBTREE, dereference_aliases=DEREF_NEVER,
+            attributes=[attr] if attr else None, size_limit=2, time_limit=5,
+        )
+        description = str((connection.result or {}).get("description") or "")
+        # Never authenticate from a truncated or failed directory response.
+        if description == "sizeLimitExceeded":
+            raise LdapError("Фильтр нашёл несколько записей. Сузьте области входа или фильтр")
+        if description not in {"", "success"} or (not ok and connection.entries):
+            raise LdapError("Не удалось выполнить поиск в области входа. Проверьте DN и права")
+        for entry in connection.entries:
+            key = directory_scope.dn_key(str(entry.entry_dn))
+            base_key = directory_scope.dn_key(base)
+            if len(key) < len(base_key) or key[-len(base_key):] != base_key:
+                raise LdapError("Каталог вернул запись вне выбранной области входа")
+            if key in seen:
+                continue
+            seen.add(key)
+            mail = ""
+            if attr and attr in entry:
+                raw = entry[attr].value
+                mail = raw if isinstance(raw, str) else (raw[0] if raw else "")
+            found.append((str(entry.entry_dn), str(mail or "")))
+            if len(found) > 1:
+                return found
+    return found
 
 
 def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:

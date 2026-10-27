@@ -146,7 +146,7 @@ class UserPatchIn(BaseModel):
 
 def _peer_trusted(request: Request) -> bool:
     host = (request.client.host if request.client else "") or ""
-    return host in _LOOPBACK
+    return host in _LOOPBACK or host in config.TRUSTED_PROXY_IPS
 
 
 def _client_ip(request: Request) -> str:

@@ -23,7 +23,7 @@ def main() -> None:
     }
     log_config["loggers"]["mom"] = {"handlers": ["mom"], "level": "INFO", "propagate": False}
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
-    uvicorn.run("backend.main:app", host=HOST, port=PORT, log_config=log_config)
+    uvicorn.run("backend.main:app", host=HOST, port=PORT, log_config=log_config, proxy_headers=False)
 
 
 if __name__ == "__main__":
