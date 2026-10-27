@@ -85,6 +85,25 @@ jobs:
           })
           assert session["authenticated"]
           assert call("GET", "/api/meetings") == []
+          # Text import must work in the production image with no LLM/ASR key.
+          import urllib.parse
+          payload = urllib.parse.urlencode({
+              "title": "Text import smoke",
+              "text": "[00:01] Анна: Подготовлю отчёт.\nИван: Проверю завтра.",
+          }).encode()
+          request = urllib.request.Request(
+              root + "/api/meetings/transcript", data=payload,
+              headers={"Content-Type": "application/x-www-form-urlencoded"},
+          )
+          with opener.open(request, timeout=8) as response:
+              meeting = json.load(response)
+          assert meeting["status"] == "review", meeting
+          assert meeting["source_type"] == "text"
+          assert [s["name"] for s in meeting["speakers"]] == ["Анна", "Иван"]
+          assert meeting["segments"][1]["start"] is None
+          saved = call("GET", "/api/meetings/" + meeting["id"])
+          assert saved["transcript"] == meeting["transcript"]
+          assert call("DELETE", "/api/meetings/" + meeting["id"])["ok"]
           PY
 
   frontend:
@@ -101,5 +120,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
+      - name: Frontend regression tests
+        run: npm test
       - name: Typecheck and build
         run: npm run build

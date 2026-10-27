@@ -3,57 +3,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from openai import APIStatusError, AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import config
+from . import config, prompts
+from .performance import stage_timer
+from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
 
 log = logging.getLogger("mom.llm")
 
 _local_asr_lock = asyncio.Lock()
 
 
-def local_asr_slot() -> asyncio.Lock:
+@asynccontextmanager
+async def local_asr_slot():
     """Serialize local ASR and diarization, including GigaAM speaker spans."""
-    return _local_asr_lock
-
-SYSTEM_PROMPT = """Ты — ассистент, который готовит протокол встречи (Minutes of Meeting, MoM).
-По транскрипту созвона верни ТОЛЬКО JSON по схеме ниже.
-Пиши на языке транскрипта. Не выдумывай факты, имена, сроки и решения, которых нет в тексте.
-Реплики помечены именами спикеров («Спикер 1» и т.п.) — это разные люди. Бери эти имена как участников, если в речи не прозвучало настоящее имя.
-Если поле неизвестно — используй null или пустой массив.
-
-Схема:
-{
-  "title": "краткий деловой заголовок встречи",
-  "language": "ru|en|...",
-  "participants": ["Имя или роль, если названы"],
-  "date_hint": "дата/время из речи или null",
-  "summary": "связное саммари на 2–5 абзацев: цель, ход, итог",
-  "key_points": ["ключевые тезисы"],
-  "decisions": ["принятые решения"],
-  "action_items": [
-    {
-      "task": "конкретное поручение",
-      "assignee": "исполнитель или null",
-      "due": "срок, если назван, иначе null",
-      "priority": "high|medium|low"
-    }
-  ],
-  "mom": {
-    "agenda": [
-      {
-        "topic": "тема блока",
-        "discussion": "что обсудили",
-        "outcome": "итог блока"
-      }
-    ],
-    "next_meeting": "договорённость о следующем созвоне или null"
-  }
-}
-"""
+    with stage_timer("local_slot_wait"):
+        await _local_asr_lock.acquire()
+    try:
+        yield
+    finally:
+        _local_asr_lock.release()
 
 
 def _chat_kwargs() -> dict[str, Any]:
@@ -105,6 +79,40 @@ def _delta_text(delta: Any) -> str:
     return str(content)
 
 
+class ProtocolModel(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+
+class ProtocolAction(ProtocolModel):
+    task: str = Field(min_length=1)
+    assignee: str | None = None
+    due: str | None = None
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class ProtocolTopic(ProtocolModel):
+    topic: str
+    discussion: str = ""
+    outcome: str = ""
+
+
+class ProtocolMinutes(ProtocolModel):
+    agenda: list[ProtocolTopic] = Field(default_factory=list)
+    next_meeting: str | None = None
+
+
+class ProtocolResult(ProtocolModel):
+    title: str = "Встреча"
+    language: str = "ru"
+    participants: list[str] = Field(default_factory=list)
+    date_hint: str | None = None
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    action_items: list[ProtocolAction] = Field(default_factory=list)
+    mom: ProtocolMinutes = Field(default_factory=ProtocolMinutes)
+
+
 def _parse_result(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     if text.startswith("```"):
@@ -122,40 +130,11 @@ def _parse_result(raw: str) -> dict[str, Any]:
         data = json.loads(text[start : end + 1])
     if not isinstance(data, dict):
         raise ValueError("Модель вернула не объект")
-    data.setdefault("title", "Встреча")
-    data.setdefault("language", "ru")
-    data.setdefault("participants", [])
-    data.setdefault("date_hint", None)
-    data.setdefault("summary", "")
-    data.setdefault("key_points", [])
-    data.setdefault("decisions", [])
-    data.setdefault("action_items", [])
-    mom = data.get("mom") or {}
-    if not isinstance(mom, dict):
-        mom = {}
-    mom.setdefault("agenda", [])
-    mom.setdefault("next_meeting", None)
-    data["mom"] = mom
-    cleaned_items = []
-    for item in data["action_items"]:
-        if not isinstance(item, dict):
-            continue
-        task = str(item.get("task") or "").strip()
-        if not task:
-            continue
-        priority = str(item.get("priority") or "medium").lower()
-        if priority not in {"high", "medium", "low"}:
-            priority = "medium"
-        cleaned_items.append(
-            {
-                "task": task,
-                "assignee": item.get("assignee") or None,
-                "due": item.get("due") or None,
-                "priority": priority,
-            }
-        )
-    data["action_items"] = cleaned_items
-    return data
+    try:
+        return ProtocolResult.model_validate(data).model_dump()
+    except ValidationError as exc:
+        fields = ", ".join(".".join(map(str, error["loc"])) for error in exc.errors())
+        raise ValueError(f"Неверная структура протокола от модели: {fields}") from None
 
 
 async def _transcribe_local(
@@ -167,14 +146,15 @@ async def _transcribe_local(
 ) -> dict[str, Any]:
     if _local_asr_lock.locked() and on_progress:
         on_progress(1, "Жду свободный слот распознавания")
-    async with _local_asr_lock:
-        if config.is_gigaam_asr(model):
-            from .gigaam_asr import transcribe_gigaam_sync
+    async with local_asr_slot():
+        with stage_timer("asr"):
+            if config.is_gigaam_asr(model):
+                from .gigaam_asr import transcribe_gigaam_sync
 
-            return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
-        from .local_asr import transcribe_local_sync
+                return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
+            from .local_asr import transcribe_local_sync
 
-        return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
+            return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
 
 
 async def transcribe_file(
@@ -338,7 +318,10 @@ def merge_transcripts(chunks: list[tuple[float, dict[str, Any]]]) -> dict[str, A
     }
 
 
-async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: str | None) -> dict[str, Any]:
+async def analyze_transcript(
+    client: AsyncOpenAI, transcript: str, title_hint: str | None, *, system_prompt: str | None = None,
+) -> dict[str, Any]:
+    system_prompt = system_prompt if system_prompt is not None else prompts.snapshot()["protocol_prompt"]
     model = config.get_chat_model()
     log.info("llm model=%s символов %s", model, len(transcript))
     user = "Транскрипт встречи:\n\n" + transcript
@@ -350,7 +333,7 @@ async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: s
             temperature=0.2,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user},
             ],
             **_chat_kwargs(),
@@ -361,7 +344,7 @@ async def analyze_transcript(client: AsyncOpenAI, transcript: str, title_hint: s
             model=model,
             temperature=0.2,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user + "\n\nВерни только JSON."},
             ],
             **_chat_kwargs(),
@@ -376,11 +359,12 @@ async def analyze_long_transcript(
     title_hint: str | None,
     on_part: Any = None,
 ) -> dict[str, Any]:
+    system_prompt = prompts.snapshot()["protocol_prompt"]
     limit = 90_000
     if len(transcript) <= limit:
         if on_part:
             on_part(1, 1)
-        return await analyze_transcript(client, transcript, title_hint)
+        return await analyze_transcript(client, transcript, title_hint, system_prompt=system_prompt)
 
     parts = []
     step = 80_000
@@ -393,6 +377,7 @@ async def analyze_long_transcript(
             client,
             f"Это часть {index} длинной встречи. Составь промежуточный протокол.\n\n{chunk}",
             title_hint,
+            system_prompt=system_prompt,
         )
         parts.append(summary)
 
@@ -404,4 +389,5 @@ async def analyze_long_transcript(
         "Ниже несколько частичных протоколов одной встречи. Объедини их в один итоговый JSON "
         "без дублей, сохранив все поручения и решения.\n\n" + merged_source,
         title_hint,
+        system_prompt=system_prompt,
     )

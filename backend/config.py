@@ -1,11 +1,14 @@
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 import os
 import stat
+import errno
+import tempfile
+import threading
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env", interpolate=False)
 
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
@@ -43,7 +46,7 @@ def _bool_env(name: str, default: bool) -> bool:
 
 HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
 PORT = _int_env("PORT", 8000)
-MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 512) * 1024 * 1024)
+MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 2048) * 1024 * 1024)
 MIN_FREE_BYTES = max(0, _int_env("MIN_FREE_MB", 2048)) * 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
 MAX_JOBS_LIMIT = 8
@@ -52,7 +55,7 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = max(1, min(65535, _int_env("SMTP_PORT", 587)))
 SMTP_USER = os.getenv("SMTP_USER", "").strip()
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
 SMTP_STARTTLS = _bool_env("SMTP_STARTTLS", True)
 FFMPEG_TIMEOUT_SECONDS = max(60, _int_env("FFMPEG_TIMEOUT_SECONDS", 1800))
@@ -60,13 +63,15 @@ WHISPER_DIR = DATA_DIR / "whisper"
 LOGIN_WINDOW_SECONDS = max(15, _int_env("LOGIN_WINDOW_SECONDS", 60))
 LOGIN_MAX_ATTEMPTS = max(3, _int_env("LOGIN_MAX_ATTEMPTS", 8))
 ASR_IDLE_UNLOAD_SECONDS = max(60, _int_env("ASR_IDLE_UNLOAD_SECONDS", 300))
+WHISPER_CPU_THREADS = max(0, _int_env("WHISPER_CPU_THREADS", 0))
+TORCH_CPU_THREADS = max(0, _int_env("TORCH_CPU_THREADS", 0))
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or os.getenv("HUGGING_FACE_HUB_TOKEN", "").strip()
 DIARIZE_MODEL = os.getenv("DIARIZE_MODEL", "pyannote/speaker-diarization-3.1").strip() or "pyannote/speaker-diarization-3.1"
 DIARIZE_MAX_SPEAKERS = max(1, min(12, _int_env("DIARIZE_MAX_SPEAKERS", 8)))
 LDAP_ENABLED = _bool_env("LDAP_ENABLED", False)
 LDAP_URL = os.getenv("LDAP_URL", "").strip()
 LDAP_BIND_DN = os.getenv("LDAP_BIND_DN", "").strip()
-LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "").strip()
+LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "")
 LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "").strip()
 LDAP_USER_FILTER = os.getenv("LDAP_USER_FILTER", "(mail={username})").strip() or "(mail={username})"
 LDAP_STARTTLS = _bool_env("LDAP_STARTTLS", False)
@@ -370,27 +375,36 @@ def is_qwen() -> bool:
     return detect_provider() == "qwen"
 
 
+_env_lock = threading.Lock()
+
+
 def _upsert_env(values: dict[str, str]) -> None:
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text().splitlines()
-    elif (ROOT / ".env.example").exists():
-        lines = (ROOT / ".env.example").read_text().splitlines()
-    else:
-        lines = []
-    seen: set[str] = set()
-    next_lines: list[str] = []
-    for line in lines:
-        key = line.split("=", 1)[0] if "=" in line and not line.strip().startswith("#") else ""
-        if key in values:
-            next_lines.append(f"{key}={values[key]}")
-            seen.add(key)
-        else:
-            next_lines.append(line)
-    for key, value in values.items():
-        if key not in seen:
-            next_lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(next_lines).rstrip() + "\n")
-    restrict_path(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
+    """Serialize updates and atomically replace a correctly quoted dotenv file."""
+    with _env_lock:
+        source = ENV_PATH if ENV_PATH.exists() else ROOT / ".env.example"
+        original = source.read_text() if source.exists() else ""
+        fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(original)
+            for key, value in values.items():
+                set_key(str(temporary), key, value, quote_mode="always")
+            restrict_path(temporary, stat.S_IRUSR | stat.S_IWUSR)
+            try:
+                os.replace(temporary, ENV_PATH)
+            except OSError as exc:
+                if exc.errno != errno.EBUSY:
+                    raise
+                # Docker deployments bind-mount .env as a file: its inode cannot
+                # be replaced. Keep quoting and the update lock in this case.
+                with ENV_PATH.open("w") as stream:
+                    stream.write(temporary.read_text())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                restrict_path(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def set_runtime(key: str, base_url: str = "", chat_model: str = "", asr_model: str = "") -> None:

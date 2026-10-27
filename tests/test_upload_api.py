@@ -62,10 +62,26 @@ def test_authenticated_upload_and_archive(tmp_path: Path, monkeypatch: pytest.Mo
             email=user["email"], expires=time.time() + 3600,
         )
         client.cookies.set(auth.USER_COOKIE, token)
+        # The UI must receive the effective limit, including deployment overrides.
+        for limit in (800 * 1024 * 1024, 2048 * 1024 * 1024):
+            monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", limit)
+            assert client.get("/api/health").json()["max_upload_bytes"] == limit
+
+        recording = b"test recording content"
+        monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", len(recording))
+        oversized = client.post(
+            "/api/meetings",
+            files={"file": ("too-large.webm", recording + b"x", "video/webm")},
+        )
+        assert oversized.status_code == 413
+        assert list((data / "uploads").iterdir()) == []
+        assert client.get("/api/meetings").json() == []
+
+        # A file exactly at the limit remains valid.
         created = client.post(
             "/api/meetings",
             data={"title": "Регрессия загрузки"},
-            files={"file": ("meeting.webm", b"test recording content", "video/webm")},
+            files={"file": ("meeting.webm", recording, "video/webm")},
         )
         assert created.status_code == 200, created.text
         doc = created.json()

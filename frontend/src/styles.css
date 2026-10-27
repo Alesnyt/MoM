@@ -1223,14 +1223,62 @@ select.title-input {
   gap: 10px;
 }
 
+.protocol-delivery {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.protocol-recipients {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.recipient-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+  margin-top: 12px;
+}
+
+.recipient-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.recipient-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 180px;
+  overflow-wrap: anywhere;
+}
+
+.recipient-row .title-input {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
 .speaker-rename form {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
 
 .speaker-rename .speaker-edit {
-  flex: 1;
+  flex: 1 1 180px;
+  min-width: 0;
 }
 
 .speaker-suggest {
@@ -1382,3 +1430,27 @@ select.title-input {
     padding: 28px;
   }
 }
+
+.prompt-field { display: grid; gap: 10px; margin: 24px 0; }
+.prompt-field label { font-weight: 600; }
+.prompt-field textarea { width: 100%; box-sizing: border-box; padding: 14px; border: 1px solid currentColor;
+  border-radius: 8px; background: transparent; color: inherit; font: inherit; line-height: 1.5; resize: vertical; }
+.prompt-field button { justify-self: start; }
+.prompt-toggle { display: flex; align-items: flex-start; gap: 10px; margin-top: 20px; }
+.name-review { margin: 16px 0; }
+.name-review li { margin: 10px 0; }
+.original-transcript { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.directory-scopes { margin-top: 32px; }
+.scope-options { border: 1px solid var(--line); padding: 16px; margin: 16px 0; border-radius: 8px; min-width: 0; }
+.scope-options > label { display: block; margin: 10px 0; }
+.scope-list { list-style: none; padding: 0; max-height: 360px; overflow: auto; }
+.scope-list li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.scope-list label { display: flex; align-items: flex-start; gap: 8px; min-width: 0; flex: 1 1 240px; }
+.scope-list small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.scope-dn { overflow-wrap: anywhere; }
+.speaker-suggest button[aria-selected="true"] { background: var(--hover); }
+.speaker-search-note { padding: 8px; color: var(--muted); }
+
+.scope-options > .field-label { display: grid; gap: 8px; margin-top: 20px; }
+.scope-options .title-input { width: 100%; box-sizing: border-box; }

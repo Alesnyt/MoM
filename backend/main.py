@@ -7,22 +7,25 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from typing import Literal
 from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audit, auth, config, disk, keys, ldap_auth, people, store, worker
+from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, people, prompts, store, worker
 from .audio import ffmpeg_available, looks_like_audio
+from . import transcript_import, upload
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
-from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label
+from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label, select_protocol_recipients
 
 log = logging.getLogger("mom.api")
 
@@ -44,6 +47,12 @@ SECURITY_HEADERS = {
 
 class SettingsIn(BaseModel):
     openai_api_key: str = Field(min_length=8)
+
+
+class PromptsIn(BaseModel):
+    protocol_prompt: str = Field(min_length=1, max_length=30000)
+    name_review_prompt: str = Field(min_length=1, max_length=30000)
+    name_review_enabled: bool = True
 
 
 class ModelsIn(BaseModel):
@@ -81,12 +90,27 @@ class LdapIn(BaseModel):
     email_attr: str = "mail"
 
 
+class DirectoryScopeIn(BaseModel):
+    mode: Literal["all", "selected"]
+    bases: list[str] = Field(default_factory=list, max_length=32)
+
+
 class LdapTestIn(BaseModel):
     username: str = ""
 
 
 class SpeakerNameIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    email: str | None = Field(default=None, max_length=254)
+
+
+class ProtocolRecipientIn(BaseModel):
+    speaker_id: str = Field(min_length=1, max_length=40)
+    email: str = Field(min_length=3, max_length=254)
+
+
+class ProtocolIn(BaseModel):
+    recipients: list[ProtocolRecipientIn] = Field(default_factory=list, max_length=200)
 
 
 class SpeakerAssignIn(BaseModel):
@@ -204,6 +228,7 @@ def _purge_files(meeting_id: str) -> None:
     for leftover in UPLOAD_DIR.glob(f"{meeting_id}.*"):
         leftover.unlink(missing_ok=True)
     (AUDIO_DIR / f"{meeting_id}.mp3").unlink(missing_ok=True)
+    (AUDIO_DIR / f"{meeting_id}.wav").unlink(missing_ok=True)
     chunks = AUDIO_DIR / f"{meeting_id}_chunks"
     if chunks.exists():
         shutil.rmtree(chunks, ignore_errors=True)
@@ -291,6 +316,7 @@ def _health(*, full: bool = False) -> dict:
         "ffmpeg": ffmpeg_available(),
         "ui": (STATIC_DIR / "index.html").exists(),
         "theme": config.get_ui_theme(),
+        "max_upload_bytes": config.MAX_UPLOAD_BYTES,
         "openai": keys.snapshot() if full else keys.public_snapshot(),
         "queue": store.queue_stats(),
         "smtp": smtp_snapshot(full=full),
@@ -329,6 +355,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MoM", version="1.0.0", lifespan=lifespan)
+app.add_middleware(transcript_import.TranscriptBodyLimit)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -615,6 +642,23 @@ def get_settings(_admin: dict = Depends(require_admin)) -> dict:
     return _health(full=True)
 
 
+@app.get("/api/settings/prompts")
+def get_prompts(_admin: dict = Depends(require_admin)) -> dict:
+    return prompts.settings_view()
+
+
+@app.post("/api/settings/prompts")
+def save_prompts(payload: PromptsIn, _admin: dict = Depends(require_admin)) -> dict:
+    values = payload.model_dump()
+    for key in ("protocol_prompt", "name_review_prompt"):
+        values[key] = values[key].strip()
+        if not values[key]:
+            raise HTTPException(status_code=400, detail="Промпт не может быть пустым")
+    version = store.save_llm_settings(values, _actor_name(_admin))
+    store.record_audit(_actor_name(_admin), "prompts.save", "llm", f"версия {version}")
+    return prompts.settings_view()
+
+
 @app.post("/api/settings")
 async def save_settings(payload: SettingsIn, _admin: dict = Depends(require_admin)) -> dict:
     key = payload.openai_api_key.strip()
@@ -703,6 +747,31 @@ def save_ldap(payload: LdapIn, _admin: dict = Depends(require_admin)) -> dict:
     return _health(full=True)
 
 
+@app.get("/api/settings/ldap/scopes")
+def get_directory_scopes(_admin: dict = Depends(require_admin)) -> dict:
+    return directory_scope.snapshot()
+
+
+@app.post("/api/settings/ldap/scopes")
+def save_directory_scopes(payload: DirectoryScopeIn, _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        result = directory_scope.save(payload.mode, payload.bases)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.record_audit(_actor_name(_admin), "ldap.scopes", "ldap", f"Режим {payload.mode}, областей {len(result['bases'])}")
+    return result
+
+
+@app.get("/api/settings/ldap/structure")
+def directory_structure(base_dn: str = Query(default="", max_length=2000),
+                        cursor: str = Query(default="", max_length=8192),
+                        _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return ldap_auth.browse_scopes(base_dn, cursor)
+    except ldap_auth.LdapError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/settings/ldap/test")
 def test_ldap(payload: LdapTestIn, _admin: dict = Depends(require_admin)) -> dict:
     try:
@@ -770,13 +839,64 @@ def _disk_or_507(extra: int = 0) -> None:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
 
 
+@app.post("/api/meetings/transcript")
+async def import_transcript(request: Request, user: dict = Depends(require_user)) -> dict:
+    # Authentication runs before multipart parsing. The ASGI guard bounds the
+    # entire request before Starlette can spool any uploaded file to disk.
+    async with request.form(max_files=1, max_fields=2, max_part_size=transcript_import.MAX_REQUEST_BYTES) as form:
+        if any(key not in {"text", "file", "title"} or len(form.getlist(key)) != 1 for key in form):
+            raise HTTPException(400, "Нужен один текст или один файл и название")
+        text, file, title = form.get("text"), form.get("file"), form.get("title", "")
+        if not isinstance(title, str) or len(title) > 200:
+            raise HTTPException(400, "Название должно быть не длиннее 200 символов")
+        if (text is None) == (file is None):
+            raise HTTPException(400, "Передайте либо текст, либо файл")
+        original, suffix = "transcript.txt", ".txt"
+        if file is not None:
+            if not isinstance(file, StarletteUploadFile):
+                raise HTTPException(400, "Нужен текстовый файл")
+            original = Path((file.filename or "").replace("\\", "/")).name
+            suffix = Path(original).suffix.lower()
+            if suffix not in transcript_import.SUFFIXES:
+                raise HTTPException(400, "Нужен файл .txt, .md, .srt или .vtt в UTF-8")
+            raw = await file.read(transcript_import.MAX_TEXT_BYTES + 1)
+            if len(raw) > transcript_import.MAX_TEXT_BYTES:
+                raise HTTPException(413, "Транскрипт больше 1 МБ")
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(400, "Сохраните файл в кодировке UTF-8") from exc
+        if not isinstance(text, str):
+            raise HTTPException(400, "Нужен текст транскрипта")
+        if len(text.encode("utf-8")) > transcript_import.MAX_TEXT_BYTES:
+            raise HTTPException(413, "Транскрипт больше 1 МБ")
+        try:
+            document = transcript_import.parse_transcript(text, suffix)
+        except transcript_import.TranscriptError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    _disk_or_507(len(text.encode("utf-8")) * 4)
+    meeting = store.create_text_meeting(
+        uuid.uuid4().hex, title.strip() or (Path(original).stem[:200] if file else "Текстовая встреча"),
+        original[:255], user["user_id"], document,
+    )
+    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"], preserve_id=meeting["id"]))
+    return meeting
+
+
 @app.post("/api/meetings")
 async def create_meeting(
     request: Request,
-    file: UploadFile = File(...),
-    title: str | None = Form(None),
     user: dict = Depends(require_user),
 ) -> dict:
+    # Dependencies run before any multipart parsing or temporary file creation.
+    async with upload.audio_form(request, _disk_or_507) as form:
+        file, title = form.get("file"), form.get("title")
+        if not isinstance(file, StarletteUploadFile) or (title is not None and not isinstance(title, str)):
+            raise HTTPException(status_code=422, detail="Нужен файл записи и текстовое название")
+        return await _create_audio_meeting(request, file, title, user)
+
+
+async def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict) -> dict:
     if not ffmpeg_available():
         raise HTTPException(status_code=500, detail="Установите ffmpeg и ffprobe")
     if not keys.snapshot()["connected"]:
@@ -857,7 +977,7 @@ async def retry_meeting(
             status_code=400,
             detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
         )
-    keep_transcript = meeting["status"] == "error" and (meeting.get("transcript") or "").strip()
+    keep_transcript = (meeting["status"] == "error" or meeting.get("source_type") == "text") and (meeting.get("transcript") or "").strip()
     fields: dict = {
         "status": "queued",
         "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
@@ -880,7 +1000,7 @@ async def retry_meeting(
 
 
 @app.post("/api/meetings/{meeting_id}/protocol")
-def start_protocol(meeting_id: str, user: dict = Depends(require_user)) -> dict:
+def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dict = Depends(require_user)) -> dict:
     meeting = _owned(store.get_meeting(meeting_id), user)
     if meeting["status"] != "review":
         raise HTTPException(status_code=409, detail="Протокол собирается после готовой расшифровки")
@@ -892,7 +1012,26 @@ def start_protocol(meeting_id: str, user: dict = Depends(require_user)) -> dict:
             status_code=400,
             detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
         )
-    return _queue_protocol(meeting_id, "Собираю протокол")
+    recipients = [item.model_dump() for item in payload.recipients] if payload else []
+    if recipients and not config.smtp_configured():
+        raise HTTPException(status_code=400, detail="Для отправки протокола спикерам настройте SMTP в админке")
+    document = {
+        "speakers": meeting.get("speakers") or [],
+        "segments": meeting.get("segments") or [],
+        "note": meeting.get("diarization_note"),
+        "name_review": meeting.get("name_review"),
+        "source_type": meeting.get("source_type", "audio"),
+    }
+    try:
+        document = select_protocol_recipients(document, recipients)
+    except SpeakerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not store.queue_review_protocol(meeting_id, document):
+        raise HTTPException(status_code=409, detail="Протокол уже поставлен в очередь")
+    store.record_audit(_actor_name(user), "protocol.recipients", meeting_id, f"Дополнительных получателей: {len(recipients)}")
+    store.refresh_queue_messages()
+    worker.notify_work()
+    return store.get_meeting(meeting_id)
 
 
 def _halt_processing(meeting_id: str, meeting: dict, *, restart: bool) -> dict:
@@ -960,10 +1099,15 @@ def _segments_doc(meeting: dict) -> dict:
         "speakers": meeting.get("speakers") or [],
         "segments": meeting.get("segments") or [],
         "note": meeting.get("diarization_note"),
+        "name_review": meeting.get("name_review"),
+        "source_type": meeting.get("source_type", "audio"),
     }
 
 
 def _save_segments(meeting_id: str, document: dict, result: dict | None, *, replace_from: str | None = None, replace_to: str | None = None) -> dict:
+    if document.get("name_review") and (not replace_from or replace_from != replace_to):
+        document["name_review"] = {**document["name_review"], "status": "stale",
+            "message": "Разметка спикеров изменена. Для новой проверки имён пересоберите протокол."}
     stored_result = result
     if stored_result is not None and replace_from and replace_to:
         stored_result = replace_speaker_label(stored_result, replace_from, replace_to)
@@ -1007,7 +1151,7 @@ def rename_meeting_speaker(
     meeting = _owned(store.get_meeting(meeting_id), user)
     document = _segments_doc(meeting)
     try:
-        updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name)
+        updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name, payload.email)
     except SpeakerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved = _save_segments(

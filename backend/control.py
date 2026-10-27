@@ -61,16 +61,17 @@ def finish(meeting_id: str) -> str:
     _stop.discard(meeting_id)
     _restart.discard(meeting_id)
     if restart:
+        meeting = store.get_meeting(meeting_id) or {}
+        keep = meeting.get("source_type") == "text"
+        transcript_fields = {} if keep else {"transcript": None, "transcript_segments": None, "language": None}
         store.update_meeting(
             meeting_id,
             status="queued",
             status_message="Повторная обработка в очереди",
             error=None,
             result=None,
-            transcript=None,
-            transcript_segments=None,
-            language=None,
-            progress=0,
+            **transcript_fields,
+            progress=88 if keep else 0,
             queued_at=store.utc_now(),
         )
         store.refresh_queue_messages()

@@ -8,7 +8,7 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
+export type AdminTab = "prompts" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
 
 export type AuditEvent = {
   id: number;
@@ -51,11 +51,23 @@ export type MeetingResult = {
 export type Speaker = {
   id: string;
   name: string;
+  email?: string;
+  send_protocol?: boolean;
+};
+
+export type ProtocolRecipient = { speaker_id: string; email: string };
+
+export type NameReview = {
+  status: "done" | "error" | "skipped" | "stale";
+  message: string;
+  mentions: { segment_index: number; original: string; replacement: string | null;
+    decision: "correct" | "confirmed" | "external" | "uncertain"; reason: string }[];
 };
 
 export type TranscriptSegment = {
-  start: number;
-  end: number;
+  original_text?: string;
+  start: number | null;
+  end: number | null;
   speaker: string;
   text: string;
 };
@@ -64,6 +76,7 @@ export type Meeting = {
   id: string;
   title: string;
   filename: string;
+  source_type?: "audio" | "text";
   status: MeetingStatus;
   status_message: string;
   created_at: string;
@@ -73,6 +86,7 @@ export type Meeting = {
   speakers?: Speaker[] | null;
   segments?: TranscriptSegment[] | null;
   diarization_note?: string | null;
+  name_review?: NameReview | null;
   result: MeetingResult | null;
   error: string | null;
   progress?: number;
@@ -135,6 +149,7 @@ export type DiskStatus = {
 
 export type Health = {
   ok: boolean;
+  max_upload_bytes?: number;
   ffmpeg: boolean;
   ui?: boolean;
   theme?: "classic" | "t2";

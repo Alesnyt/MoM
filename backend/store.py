@@ -128,7 +128,42 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_id ON audit_events(id)")
+        conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS llm_settings (
+            version INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload TEXT NOT NULL
+        )""")
 
+
+
+def get_app_setting(key: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT payload FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return json.loads(row["payload"]) if row else None
+
+
+def set_app_setting(key: str, payload: dict) -> None:
+    with connect() as conn:
+        conn.execute("INSERT INTO app_settings (key, payload) VALUES (?, ?) "
+                     "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+                     (key, json.dumps(payload, ensure_ascii=False)))
+
+
+def get_llm_settings() -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT version, payload FROM llm_settings ORDER BY version DESC LIMIT 1").fetchone()
+    return {**json.loads(row["payload"]), "version": row["version"]} if row else None
+
+
+def save_llm_settings(payload: dict, actor: str) -> int:
+    with connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO llm_settings (created_at, actor, payload) VALUES (?, ?, ?)",
+            (utc_now(), actor, json.dumps(payload, ensure_ascii=False)),
+        )
+        return int(cursor.lastrowid)
 
 
 def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> dict[str, Any]:
@@ -156,6 +191,23 @@ def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> 
     if not meeting:
         raise RuntimeError("Не удалось сохранить встречу")
     return meeting
+
+
+def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str, document: dict) -> dict:
+    """Publish review + transcript atomically; never expose an ASR queue job."""
+    from .speakers import render_transcript
+
+    now = utc_now()
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO meetings
+               (id, title, filename, user_id, status, status_message, created_at,
+                queued_at, progress, transcript, segments_json)
+               VALUES (?, ?, ?, ?, 'review', 'Транскрипт импортирован. Проверьте спикеров', ?, ?, 85, ?, ?)""",
+            (meeting_id, title, filename, user_id, now, now,
+             render_transcript(document), json.dumps(document, ensure_ascii=False)),
+        )
+    return get_meeting(meeting_id)
 
 
 def update_meeting(meeting_id: str, **fields: Any) -> None:
@@ -200,6 +252,18 @@ def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     return attach_queue_info([_serialize(row, body=True)])[0]
 
 
+def queue_review_protocol(meeting_id: str, document: dict) -> bool:
+    """Save explicitly selected recipients and claim review in one transaction."""
+    with connect() as conn:
+        cursor = conn.execute(
+            """UPDATE meetings SET status='queued', status_message='Собираю протокол',
+               error=NULL, result_json=NULL, progress=88, queued_at=?, segments_json=?
+               WHERE id=? AND status='review'""",
+            (utc_now(), json.dumps(document, ensure_ascii=False), meeting_id),
+        )
+        return cursor.rowcount == 1
+
+
 _LIST_COLUMNS = """
     id, title, filename, status, status_message, created_at,
     duration_seconds, language, error, progress, queued_at, user_id,
@@ -234,7 +298,7 @@ def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dic
 ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
 
 
-def prune_user_meetings(user_id: str) -> list[dict[str, str]]:
+def prune_user_meetings(user_id: str, *, preserve_id: str | None = None) -> list[dict[str, str]]:
     user = get_user(user_id)
     if not user:
         return []
@@ -245,7 +309,7 @@ def prune_user_meetings(user_id: str) -> list[dict[str, str]]:
     for item in reversed(meetings):
         if over <= 0:
             break
-        if item.get("status") in ACTIVE_STATUSES:
+        if item["id"] == preserve_id or item.get("status") in ACTIVE_STATUSES:
             continue
         if delete_meeting(item["id"]):
             removed.append({"id": item["id"], "title": item.get("title") or ""})
@@ -307,6 +371,7 @@ def attach_queue_info(meetings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in meetings:
         if item.get("status") == "queued" and item["id"] in order:
             item["queue_ahead"] = active_n + order[item["id"]]
+            item["status_message"] = queue_wait_message(item["queue_ahead"])
         else:
             item["queue_ahead"] = 0
     return meetings
@@ -469,6 +534,8 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
         data["speakers"] = parsed.get("speakers") or []
         data["segments"] = parsed.get("segments") or []
         data["diarization_note"] = parsed.get("note")
+        data["name_review"] = parsed.get("name_review")
+        data["source_type"] = parsed.get("source_type", "audio")
     else:
         data.pop("transcript", None)
         data["transcript"] = None

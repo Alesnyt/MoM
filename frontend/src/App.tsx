@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AdminSection } from "./admin";
 import {
   createMeeting,
+  createTranscript,
   deleteMeeting,
   getAuthStatus,
   getHealth,
@@ -15,7 +16,7 @@ import {
   restartMeeting,
 } from "./api";
 import { Composer, UserLogin } from "./composer";
-import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings } from "./format";
+import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings, queuePositionLabel } from "./format";
 import { MeetingPane, stepLabel } from "./meeting";
 import type { AdminTab, AuthStatus, Health, Meeting, UserSession } from "./types";
 
@@ -31,20 +32,24 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
     if (row.result == null && old.result) {
       return {
         ...row,
+        source_type: row.source_type ?? old.source_type,
         result: old.result,
         transcript: old.transcript,
         speakers: row.speakers ?? old.speakers,
         segments: row.segments ?? old.segments,
         diarization_note: row.diarization_note ?? old.diarization_note,
+        name_review: row.name_review === undefined ? old.name_review : row.name_review,
       };
     }
     return {
       ...row,
+      source_type: row.source_type ?? old.source_type,
       result: row.result ?? old.result,
       transcript: row.transcript ?? old.transcript,
       speakers: row.speakers ?? old.speakers,
       segments: row.segments ?? old.segments,
       diarization_note: row.diarization_note ?? old.diarization_note,
+      name_review: row.name_review === undefined ? old.name_review : row.name_review,
     };
   });
 }
@@ -157,7 +162,7 @@ export default function App() {
     if (!userReady || !selectedId) return;
     const current = meetings.find((item) => item.id === selectedId);
     if (!current) return;
-    if (current.status !== "done" && current.status !== "error" && current.status !== "review") return;
+    if (current.status !== "done" && current.status !== "error" && current.status !== "review" && current.source_type !== undefined) return;
     if (current.status === "review") {
       if (current.transcript) return;
     } else if (current.status === "error") {
@@ -177,11 +182,13 @@ export default function App() {
       .catch(() => setAuth((current) => ({ configured: current?.configured ?? true, authenticated: false })));
   }, [screen, auth?.authenticated]);
 
-  async function onUpload(file: File, title: string) {
+  async function onUpload(file: File | null, title: string, text?: string) {
     setError(null);
     setBusy(true);
     try {
-      const created = await createMeeting(file, title);
+      const created = text !== undefined
+        ? await createTranscript(file, text, title)
+        : await createMeeting(file!, title);
       setMeetings((rows) => [created, ...rows.filter((row) => row.id !== created.id)].slice(0, user?.archive_limit || 5));
       setSelectedId(created.id);
       setTab("overview");
@@ -325,7 +332,7 @@ export default function App() {
                         ? "Проверьте спикеров"
                         : item.status !== "done" && item.status !== "error"
                         ? item.status === "queued"
-                          ? item.status_message || stepLabel(item.status)
+                          ? `В очереди · ${queuePositionLabel(item.queue_ahead)}`
                           : `${item.status_message || stepLabel(item.status)}${typeof item.progress === "number" ? ` · ${item.progress}%` : ""}`
                         : `${formatDate(item.created_at)}${item.duration_seconds ? ` · ${formatDuration(item.duration_seconds)}` : ""}`}
                     </small>
@@ -426,6 +433,7 @@ export default function App() {
               keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
+              maxUploadBytes={health?.max_upload_bytes}
               onOpenSettings={goAdmin}
               onUpload={onUpload}
             />
@@ -449,6 +457,7 @@ export default function App() {
               keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
+              maxUploadBytes={health?.max_upload_bytes}
               onOpenSettings={goAdmin}
               onUpload={onUpload}
             />

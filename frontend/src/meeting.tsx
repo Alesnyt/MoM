@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { downloadMarkdown, getEmailBody, openMeetingEmail, startProtocol } from "./api";
-import { count, formatClock, formatDate, formatDuration, priorityLabel } from "./format";
+import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
+import { isProtocolResult } from "./protocol";
 import { TranscriptView } from "./transcript";
-import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
+import { ProtocolRecipients } from "./recipients";
+import type { Meeting, MeetingResult, MeetingStatus, ProtocolRecipient, Tab } from "./types";
 
 export const STEPS: { id: MeetingStatus; label: string }[] = [
   { id: "extracting", label: "Аудио" },
@@ -32,10 +34,11 @@ export function MeetingPane({
   onUpdated: (meeting: Meeting) => void;
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
-  const result = meeting.result;
+  const result = isProtocolResult(meeting.result) ? meeting.result : null;
   const [mailNote, setMailNote] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);
   const [protocolBusy, setProtocolBusy] = useState(false);
+  const [speakerBusy, setSpeakerBusy] = useState(false);
   const [protocolError, setProtocolError] = useState<string | null>(null);
 
   async function sendByEmail() {
@@ -68,11 +71,11 @@ export function MeetingPane({
     }
   }
 
-  async function buildProtocol() {
+  async function buildProtocol(recipients: ProtocolRecipient[]) {
     setProtocolError(null);
     setProtocolBusy(true);
     try {
-      onUpdated(await startProtocol(meeting.id));
+      onUpdated(await startProtocol(meeting.id, recipients));
     } catch (err) {
       setProtocolError(err instanceof Error ? err.message : "Не удалось собрать протокол");
     } finally {
@@ -99,7 +102,7 @@ export function MeetingPane({
           <h1>{meeting.title}</h1>
         </div>
         <div className="pane-actions">
-          {meeting.status === "done" && meeting.result && (
+          {meeting.status === "done" && result && (
             <>
               <button
                 className="ghost"
@@ -127,7 +130,7 @@ export function MeetingPane({
           )}
           {(meeting.status === "error" || meeting.status === "done") && (
             <button className="ghost" onClick={onRetry}>
-              {meeting.status === "error" && meeting.transcript ? "Собрать протокол" : "Повторить"}
+              {(meeting.status === "error" || meeting.source_type === "text") && meeting.transcript ? "Собрать протокол" : "Повторить"}
             </button>
           )}
           {!processing && (
@@ -154,21 +157,17 @@ export function MeetingPane({
           </p>
           {protocolError && <div className="banner" role="alert">{protocolError}</div>}
           <div className="composer-row">
-            {!marking && (
+            {!marking && meeting.source_type !== "text" && (
               <button className="primary" type="button" disabled={protocolBusy} onClick={() => setMarking(true)}>
                 Разметить спикеров
               </button>
             )}
-            <button
-              className={marking ? "primary" : "ghost"}
-              type="button"
-              disabled={protocolBusy}
-              onClick={() => void buildProtocol()}
-            >
-              {protocolBusy ? "Ставлю в очередь…" : marking ? "Собрать протокол" : "Продолжить без разметки"}
-            </button>
           </div>
-          {marking && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
+          {(marking || meeting.source_type === "text") && <TranscriptView meeting={meeting} onUpdated={onUpdated}
+            disabled={protocolBusy} onBusyChange={setSpeakerBusy} />}
+          <p className="progress-hint">Если проверка имён включена администратором, перед протоколом LLM сопоставит упоминания с именами спикеров. Неоднозначные имена останутся без изменений.</p>
+          <ProtocolRecipients key={meeting.id} meeting={meeting} mailEnabled={mailEnabled}
+            disabled={protocolBusy || speakerBusy} busy={protocolBusy} onSubmit={buildProtocol} />
         </div>
       )}
       {meeting.status === "error" && (
@@ -178,8 +177,22 @@ export function MeetingPane({
         </div>
       )}
 
+      {meeting.status === "done" && !result && (
+        <div className="error-card">
+          <strong>Не удалось прочитать сохранённый протокол</strong>
+          <p>Ответ модели имеет неверный формат. Сформируйте протокол заново.</p>
+          <button onClick={onRetry}>Повторить обработку</button>
+          <TranscriptView meeting={meeting} onUpdated={onUpdated} />
+        </div>
+      )}
       {result && meeting.status === "done" && (
         <>
+          {(meeting.speakers || []).some((speaker) => speaker.send_protocol) && <p className="progress-hint">
+            {meeting.status_message}. Дополнительные получатели: {(meeting.speakers || [])
+              .filter((speaker) => speaker.send_protocol && speaker.email)
+              .map((speaker) => `${speaker.name} (${speaker.email})`).join(", ")}.
+          </p>}
+          {meeting.name_review && <p className="progress-hint">{meeting.name_review.message} Подробности — во вкладке «Транскрипт».</p>}
           <nav className="tabs">
             <TabButton id="overview" tab={tab} onTab={onTab} label="Саммари" />
             <TabButton
@@ -248,11 +261,12 @@ function ProcessCard({
   onStop: () => void;
   onRestart: () => void;
 }) {
-  const current = STEPS.findIndex((step) => step.id === meeting.status);
+  const steps = meeting.source_type === "text" ? STEPS.filter((step) => step.id === "analyzing") : STEPS;
+  const current = steps.findIndex((step) => step.id === meeting.status);
   const index = meeting.status === "queued" ? -1 : current;
   const queued = meeting.status === "queued";
   const pct = Math.max(0, Math.min(100, meeting.progress ?? fallbackProgress(meeting.status)));
-  const stamp = `${meeting.status}|${pct}|${meeting.status_message}`;
+  const stamp = queued ? `${meeting.id}|queued` : `${meeting.id}|${meeting.status}|${pct}|${meeting.status_message}`;
   const started = useRef({ stamp, at: Date.now() });
   if (started.current.stamp !== stamp) {
     started.current = { stamp, at: Date.now() };
@@ -264,7 +278,9 @@ function ProcessCard({
   }, [meeting.id]);
   const elapsed = Math.max(0, Math.floor((now - started.current.at) / 1000));
   const waiting = meeting.status === "analyzing" || elapsed >= 4;
-  const hint = queued
+  const hint = queued && meeting.source_type === "text"
+    ? "Транскрипт сохранён. Когда освободится слот, начнётся сборка протокола."
+    : queued
     ? mailEnabled
       ? "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка, готовый протокол придёт на почту."
       : "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка. Результат появится в MoM."
@@ -275,9 +291,9 @@ function ProcessCard({
         : "Обработка идёт.";
   return (
     <div className="process">
-      <div className="progress-head">
-        <strong>{queued ? "очередь" : `${pct}%`}</strong>
-        <span>{meeting.status_message || stepLabel(meeting.status)}</span>
+      <div className="progress-head" role={queued ? "status" : undefined} aria-live={queued ? "polite" : undefined}>
+        <strong>{queued ? "В очереди" : `${pct}%`}</strong>
+        <span>{queued ? queuePositionLabel(meeting.queue_ahead) : meeting.status_message || stepLabel(meeting.status)}</span>
       </div>
       <div
         className={`progress-bar${waiting ? " waiting" : ""}`}
@@ -288,12 +304,9 @@ function ProcessCard({
       >
         <i style={{ width: `${queued ? 6 : pct}%` }} />
       </div>
-      <p className="progress-live">
-        {queued ? `Ожидание ${formatClock(elapsed)}` : `В работе ${formatClock(elapsed)}`}
-        {!queued && waiting ? " · процесс живой, ждём ответ" : ""}
-      </p>
+      {queued && <p className="progress-live">{`Ожидание ${formatClock(elapsed)}`}</p>}
       <ol>
-        {STEPS.map((step, i) => (
+        {steps.map((step, i) => (
           <li
             key={step.id}
             className={i < index ? "done" : i === index ? "now" : ""}
@@ -305,6 +318,7 @@ function ProcessCard({
         ))}
       </ol>
       <p className="progress-hint">{hint}</p>
+      {queued && <p className="progress-hint">Перед вами учитываются записи в обработке и более ранние заявки в очереди. Позиция обновляется автоматически.</p>}
       <div className="composer-row">
         <button className="ghost danger" type="button" onClick={onStop}>
           Остановить
