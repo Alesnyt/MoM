@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { downloadMarkdown, getEmailBody, openMeetingEmail, startProtocol } from "./api";
 import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
+import { isProtocolResult } from "./protocol";
 import { TranscriptView } from "./transcript";
 import { ProtocolRecipients } from "./recipients";
 import type { Meeting, MeetingResult, MeetingStatus, ProtocolRecipient, Tab } from "./types";
@@ -33,7 +34,7 @@ export function MeetingPane({
   onUpdated: (meeting: Meeting) => void;
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
-  const result = meeting.result;
+  const result = isProtocolResult(meeting.result) ? meeting.result : null;
   const [mailNote, setMailNote] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);
   const [protocolBusy, setProtocolBusy] = useState(false);
@@ -101,7 +102,7 @@ export function MeetingPane({
           <h1>{meeting.title}</h1>
         </div>
         <div className="pane-actions">
-          {meeting.status === "done" && meeting.result && (
+          {meeting.status === "done" && result && (
             <>
               <button
                 className="ghost"
@@ -176,6 +177,14 @@ export function MeetingPane({
         </div>
       )}
 
+      {meeting.status === "done" && !result && (
+        <div className="error-card">
+          <strong>Не удалось прочитать сохранённый протокол</strong>
+          <p>Ответ модели имеет неверный формат. Сформируйте протокол заново.</p>
+          <button onClick={onRetry}>Повторить обработку</button>
+          <TranscriptView meeting={meeting} onUpdated={onUpdated} />
+        </div>
+      )}
       {result && meeting.status === "done" && (
         <>
           {(meeting.speakers || []).some((speaker) => speaker.send_protocol) && <p className="progress-hint">

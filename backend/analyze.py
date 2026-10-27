@@ -5,9 +5,10 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from openai import APIStatusError, AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import config, prompts
 from .performance import stage_timer
@@ -78,6 +79,40 @@ def _delta_text(delta: Any) -> str:
     return str(content)
 
 
+class ProtocolModel(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+
+class ProtocolAction(ProtocolModel):
+    task: str = Field(min_length=1)
+    assignee: str | None = None
+    due: str | None = None
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class ProtocolTopic(ProtocolModel):
+    topic: str
+    discussion: str = ""
+    outcome: str = ""
+
+
+class ProtocolMinutes(ProtocolModel):
+    agenda: list[ProtocolTopic] = Field(default_factory=list)
+    next_meeting: str | None = None
+
+
+class ProtocolResult(ProtocolModel):
+    title: str = "Встреча"
+    language: str = "ru"
+    participants: list[str] = Field(default_factory=list)
+    date_hint: str | None = None
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    action_items: list[ProtocolAction] = Field(default_factory=list)
+    mom: ProtocolMinutes = Field(default_factory=ProtocolMinutes)
+
+
 def _parse_result(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     if text.startswith("```"):
@@ -95,40 +130,11 @@ def _parse_result(raw: str) -> dict[str, Any]:
         data = json.loads(text[start : end + 1])
     if not isinstance(data, dict):
         raise ValueError("Модель вернула не объект")
-    data.setdefault("title", "Встреча")
-    data.setdefault("language", "ru")
-    data.setdefault("participants", [])
-    data.setdefault("date_hint", None)
-    data.setdefault("summary", "")
-    data.setdefault("key_points", [])
-    data.setdefault("decisions", [])
-    data.setdefault("action_items", [])
-    mom = data.get("mom") or {}
-    if not isinstance(mom, dict):
-        mom = {}
-    mom.setdefault("agenda", [])
-    mom.setdefault("next_meeting", None)
-    data["mom"] = mom
-    cleaned_items = []
-    for item in data["action_items"]:
-        if not isinstance(item, dict):
-            continue
-        task = str(item.get("task") or "").strip()
-        if not task:
-            continue
-        priority = str(item.get("priority") or "medium").lower()
-        if priority not in {"high", "medium", "low"}:
-            priority = "medium"
-        cleaned_items.append(
-            {
-                "task": task,
-                "assignee": item.get("assignee") or None,
-                "due": item.get("due") or None,
-                "priority": priority,
-            }
-        )
-    data["action_items"] = cleaned_items
-    return data
+    try:
+        return ProtocolResult.model_validate(data).model_dump()
+    except ValidationError as exc:
+        fields = ", ".join(".".join(map(str, error["loc"])) for error in exc.errors())
+        raise ValueError(f"Неверная структура протокола от модели: {fields}") from None
 
 
 async def _transcribe_local(

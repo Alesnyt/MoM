@@ -105,6 +105,8 @@ async def _request(client, settings: dict, participants: list[dict], segments: l
 def apply_mentions(document: dict, mentions: list, participants: list[dict]) -> list[dict]:
     """Apply only validated, non-overlapping, occurrence-specific name patches."""
     ids = {p["id"] for p in participants}
+    allowed = {p["id"]: {p["name"].casefold(), *(part.casefold() for part in p["name"].split())}
+               for p in participants}
     segments = document["segments"]
     candidates: list[dict] = []
     for item in mentions:
@@ -133,7 +135,9 @@ def apply_mentions(document: dict, mentions: list, participants: list[dict]) -> 
         if decision == "correct":
             if (entry["participant_id"] is not None and item.get("confidence") == "high"
                     and entry["reason"].strip() and isinstance(replacement, str)
-                    and len(replacement) <= 80 and NAME.fullmatch(replacement) and replacement != original):
+                    and len(replacement) <= 80 and NAME.fullmatch(replacement) and replacement != original
+                    and replacement.casefold() in allowed[entry["participant_id"]]
+                    and all(word[0].isupper() for word in original.split())):
                 entry["replacement"] = replacement
             else:
                 entry["decision"] = "uncertain"
@@ -162,7 +166,7 @@ async def review_names(client, document: dict, *, on_progress=None) -> dict:
         if "original_text" in segment:
             segment["text"] = segment["original_text"]
     participants = named_participants(result)
-    source = {"speakers": participants, "segments": [{k: v for k, v in s.items() if k != "original_text"} for s in result.get("segments") or []],
+    source = {"validator_version": 2, "speakers": participants, "segments": [{k: v for k, v in s.items() if k != "original_text"} for s in result.get("segments") or []],
               "prompt": settings["name_review_prompt"], "enabled": settings["name_review_enabled"],
               "model": get_chat_model()}
     fingerprint = hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True).encode()).hexdigest()

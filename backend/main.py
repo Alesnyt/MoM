@@ -12,7 +12,7 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, people, prompts, store, worker
 from .audio import ffmpeg_available, looks_like_audio
-from . import transcript_import
+from . import transcript_import, upload
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -886,10 +886,17 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
 @app.post("/api/meetings")
 async def create_meeting(
     request: Request,
-    file: UploadFile = File(...),
-    title: str | None = Form(None),
     user: dict = Depends(require_user),
 ) -> dict:
+    # Dependencies run before any multipart parsing or temporary file creation.
+    async with upload.audio_form(request, _disk_or_507) as form:
+        file, title = form.get("file"), form.get("title")
+        if not isinstance(file, StarletteUploadFile) or (title is not None and not isinstance(title, str)):
+            raise HTTPException(status_code=422, detail="Нужен файл записи и текстовое название")
+        return await _create_audio_meeting(request, file, title, user)
+
+
+async def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict) -> dict:
     if not ffmpeg_available():
         raise HTTPException(status_code=500, detail="Установите ffmpeg и ffprobe")
     if not keys.snapshot()["connected"]:
