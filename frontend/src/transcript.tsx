@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
 import type { Meeting, Speaker, TranscriptSegment } from "./types";
@@ -244,6 +244,17 @@ export function TranscriptView({
     setError(null);
   }, [meeting.id]);
 
+  const turns = useMemo(() => turnsOf(meeting.segments || []), [meeting.segments]);
+  const examples = useMemo(() => {
+    const grouped = new Map<string, Turn[]>();
+    for (const turn of turns) {
+      const samples = grouped.get(turn.speaker) || [];
+      if (samples.length < 2) samples.push(turn);
+      grouped.set(turn.speaker, samples);
+    }
+    return grouped;
+  }, [turns]);
+
   if (!segments.length) {
     return (
       <>
@@ -255,16 +266,8 @@ export function TranscriptView({
     );
   }
 
-  const names = new Map(speakers.map((item) => [item.id, item.name]));
   const namedSpeakers = speakers.filter((item) => item.id !== "unknown" && item.name !== "Неясно");
   const hasUnclear = namedSpeakers.length !== speakers.length;
-  const turns = turnsOf(segments);
-  const examples = new Map<string, Turn[]>();
-  for (const turn of turns) {
-    const samples = examples.get(turn.speaker) || [];
-    if (samples.length < 2) samples.push(turn);
-    examples.set(turn.speaker, samples);
-  }
 
   async function saveName(speakerId: string, name: string, email?: string) {
     setBusy(true);
@@ -339,45 +342,93 @@ export function TranscriptView({
         </section>
         <section className="speaker-panel" aria-labelledby={transcriptHeadingId}>
           <h2 id={transcriptHeadingId}>Транскрипт по спикерам</h2>
-          <div className="turns" role="region" aria-labelledby={transcriptHeadingId} tabIndex={0}>
-            {turns.map((turn) => {
-              const name = names.get(turn.speaker) || turn.speaker;
-              return (
-                <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
-                  <header className="turn-head">
-                    <strong className="speaker-name">{name}</strong>
-                    {turn.start !== null && <time>{formatClock(turn.start)}</time>}
-                    <label className="speaker-move">
-                      <span className="sr-only">Кто говорит эту реплику</span>
-                      <select
-                        value={turn.speaker}
-                        disabled={busy || disabled}
-                        aria-label="Кто говорит эту реплику"
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          if (next !== turn.speaker) void moveTurn(turn.indexes, next);
-                        }}
-                      >
-                        {speakers.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name}
-                          </option>
-                        ))}
-                        <option value="new">Новый спикер</option>
-                      </select>
-                    </label>
-                  </header>
-                  <p>{turn.text}</p>
-                  {turn.indexes.some((index) => segments[index].original_text && segments[index].original_text !== segments[index].text) &&
-                    <details><summary>До проверки имён</summary><p className="original-transcript">
-                      {turn.indexes.map((index) => segments[index].original_text ?? segments[index].text).join(" ")}
-                    </p></details>}
-                </article>
-              );
-            })}
-          </div>
+          <TranscriptTurns key={meeting.id} turns={turns} segments={segments} speakers={speakers}
+            disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} />
         </section>
       </div>
     </div>
   );
+}
+
+const TURNS_PER_PAGE = 50;
+
+function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingId }: {
+  turns: Turn[];
+  segments: TranscriptSegment[];
+  speakers: Speaker[];
+  disabled: boolean;
+  onMove: (indexes: number[], speakerId: string) => Promise<void>;
+  headingId: string;
+}) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  const names = useMemo(() => new Map(speakers.map((item) => [item.id, item.name])), [speakers]);
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return needle ? turns.filter((turn) =>
+      `${names.get(turn.speaker) || turn.speaker} ${turn.text}`.toLocaleLowerCase().includes(needle)) : turns;
+  }, [turns, names, query]);
+  const lastPage = Math.max(0, Math.ceil(filtered.length / TURNS_PER_PAGE) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const start = currentPage * TURNS_PER_PAGE;
+  const visibleTurns = filtered.slice(start, start + TURNS_PER_PAGE);
+
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0; }, [currentPage, query]);
+
+  return <>
+    <div className="transcript-controls">
+      <label>Поиск по всем репликам
+        <input type="search" className="title-input" value={query}
+          placeholder="Фраза или имя спикера"
+          onChange={(event) => { setQuery(event.target.value); setPage(0); }} />
+      </label>
+      <nav className="transcript-pages" aria-label="Страницы транскрипта">
+        <button type="button" className="ghost" disabled={currentPage === 0}
+          onClick={() => setPage(currentPage - 1)}>Предыдущие реплики</button>
+        <span role="status">{filtered.length
+          ? `Реплики ${start + 1}–${start + visibleTurns.length} из ${filtered.length}`
+          : "Реплик не найдено"}</span>
+        <button type="button" className="ghost" disabled={currentPage === lastPage}
+          onClick={() => setPage(currentPage + 1)}>Следующие реплики</button>
+      </nav>
+    </div>
+    <div ref={listRef} className="turns" role="region" aria-labelledby={headingId} tabIndex={0}>
+      {visibleTurns.map((turn) => {
+        const name = names.get(turn.speaker) || turn.speaker;
+        return (
+          <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
+            <header className="turn-head">
+              <strong className="speaker-name">{name}</strong>
+              {turn.start !== null && <time>{formatClock(turn.start)}</time>}
+              <label className="speaker-move">
+                <span className="sr-only">Кто говорит эту реплику</span>
+                <select
+                  value={turn.speaker}
+                  disabled={disabled}
+                  aria-label="Кто говорит эту реплику"
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    if (next !== turn.speaker) void onMove(turn.indexes, next);
+                  }}
+                >
+                  {speakers.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                  <option value="new">Новый спикер</option>
+                </select>
+              </label>
+            </header>
+            <p>{turn.text}</p>
+            {turn.indexes.some((index) => segments[index].original_text && segments[index].original_text !== segments[index].text) &&
+              <details><summary>До проверки имён</summary><p className="original-transcript">
+                {turn.indexes.map((index) => segments[index].original_text ?? segments[index].text).join(" ")}
+              </p></details>}
+          </article>
+        );
+      })}
+    </div>
+  </>;
 }

@@ -1382,6 +1382,31 @@ select.title-input {
   overflow: auto;
 }
 
+.transcript-controls {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.transcript-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.transcript-controls input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.transcript-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
 .turn {
   border-left: 3px solid var(--accent);
   padding: 0 0 0 12px;

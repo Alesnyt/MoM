@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { AdminSection } from "./admin";
 import {
   createMeeting,
@@ -18,6 +18,7 @@ import {
 import { Composer, UserLogin } from "./composer";
 import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings, queuePositionLabel } from "./format";
 import { MeetingPane, stepLabel } from "./meeting";
+import { startPolling } from "./poll";
 import type { AdminTab, AuthStatus, Health, Meeting, UserSession } from "./types";
 
 function pathIsAdmin(): boolean {
@@ -55,12 +56,20 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
 }
 
 export default function App() {
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [meetings, setMeetingRows] = useState<Meeting[]>([]);
+  const dataVersion = useRef(0);
+  // User edits invalidate reads that started before the edit was saved.
+  const setMeetings = useCallback((update: SetStateAction<Meeting[]>) => {
+    dataVersion.current += 1;
+    setMeetingRows(update);
+  }, []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [tab, setTab] = useState<"overview" | "actions" | "mom" | "transcript">("overview");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detailFailure, setDetailFailure] = useState<{ key: string; message: string } | null>(null);
+  const [detailAttempt, setDetailAttempt] = useState(0);
   const [composing, setComposing] = useState(false);
   const [screen, setScreen] = useState<"app" | "admin">(pathIsAdmin() ? "admin" : "app");
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -75,8 +84,9 @@ export default function App() {
   );
 
   const refresh = useCallback(async () => {
+    const version = dataVersion.current;
     const rows = await listMeetings();
-    setMeetings((prev) => mergeMeetings(prev, rows));
+    if (version === dataVersion.current) setMeetingRows((prev) => mergeMeetings(prev, rows));
     return rows;
   }, []);
 
@@ -147,33 +157,40 @@ export default function App() {
 
   useEffect(() => {
     if (!userReady || !processingKey) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const rows = await listMeetings();
-        setMeetings((prev) => mergeMeetings(prev, rows));
-      } catch {
-        /* keep last known state */
-      }
-    }, 2000);
-    return () => window.clearInterval(timer);
+    return startPolling(async (signal) => {
+      const version = dataVersion.current;
+      return { version, rows: await listMeetings(signal) };
+    }, ({ version, rows }) => {
+      if (version === dataVersion.current) setMeetingRows((prev) => mergeMeetings(prev, rows));
+    });
   }, [processingKey, userReady]);
 
+  const needsDetails = selected && (
+    selected.segments == null || selected.source_type === undefined ||
+    (selected.status === "review" && selected.transcript == null) ||
+    (selected.status === "done" && selected.result == null)
+  );
+  const detailKey = userReady && selected && needsDetails &&
+    ["review", "done", "error"].includes(selected.status) ? `${selected.id}:${selected.status}` : "";
+
   useEffect(() => {
-    if (!userReady || !selectedId) return;
-    const current = meetings.find((item) => item.id === selectedId);
-    if (!current) return;
-    if (current.status !== "done" && current.status !== "error" && current.status !== "review" && current.source_type !== undefined) return;
-    if (current.status === "review") {
-      if (current.transcript) return;
-    } else if (current.status === "error") {
-      if (current.transcript != null || current.segments != null) return;
-    } else if (current.result) return;
-    void getMeeting(selectedId)
+    if (!detailKey || !selectedId) return;
+    const controller = new AbortController();
+    const version = dataVersion.current;
+    setDetailFailure(null);
+    void getMeeting(selectedId, controller.signal)
       .then((full) => {
-        setMeetings((rows) => rows.map((row) => (row.id === full.id ? full : row)));
+        if (controller.signal.aborted || version !== dataVersion.current) return;
+        setMeetingRows((rows) => rows.map((row) => (row.id === full.id ? full : row)));
       })
-      .catch(() => undefined);
-  }, [meetings, selectedId, userReady]);
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted && version === dataVersion.current) {
+          setDetailFailure({ key: detailKey,
+            message: err instanceof Error ? err.message : "Не удалось загрузить транскрипт" });
+        }
+      });
+    return () => controller.abort();
+  }, [detailKey, selectedId, detailAttempt]);
 
   useEffect(() => {
     if (screen !== "admin" || !auth?.authenticated) return;
@@ -373,6 +390,12 @@ export default function App() {
 
         <main className="stage" id="main">
           {error && <div className="banner" role="alert">{error}</div>}
+          {detailFailure?.key === detailKey && <div className="banner" role="alert">
+            {detailFailure.message}{" "}
+            <button type="button" className="ghost" onClick={() => setDetailAttempt((attempt) => attempt + 1)}>
+              Повторить загрузку
+            </button>
+          </div>}
           {screen === "admin" ? (
             <AdminSection
               auth={auth}

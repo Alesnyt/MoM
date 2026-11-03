@@ -114,3 +114,57 @@ def test_rename_and_reassign() -> None:
     moved = reassign_segments(renamed, [1], "new")
     assert moved["segments"][1]["speaker"] == "S2"
     assert moved["speakers"][1]["name"] == "Спикер 2"
+
+
+def test_interval_lookup_matches_brute_force_with_unsorted_overlapping_turns():
+    import random
+    from backend import speakers as module
+
+    rng = random.Random(43)
+    for _ in range(300):
+        segments = [{"start": rng.randint(-5, 100) / 2, "end": rng.randint(-5, 100) / 2,
+                     "text": f"Реплика {i}"} for i in range(rng.randrange(30))]
+        turns = [{"start": rng.randint(-5, 100) / 2, "end": rng.randint(-5, 100) / 2,
+                  "speaker": f"voice{rng.randrange(8)}"} for i in range(rng.randrange(30))]
+        normalized = [module._turn(t) for t in turns]
+        labels = module._stable_labels(normalized)
+        expected = []
+        for segment in map(module._segment, segments):
+            totals = {}
+            for turn in normalized:
+                overlap = max(0, min(segment["end"], turn["end"]) - max(segment["start"], turn["start"]))
+                if overlap > 0:
+                    sid = labels[turn["speaker"]]
+                    totals[sid] = totals.get(sid, 0) + overlap
+            ranked = sorted(totals.items(), key=lambda pair: pair[1], reverse=True)
+            if not turns:
+                sid = "S1"
+            elif not ranked or ranked[0][1] < module.MIN_SLICE_SECONDS:
+                sid = UNKNOWN_ID
+            elif len(ranked) == 1 or ranked[1][1] < module.MIN_SLICE_SECONDS or ranked[0][1] >= ranked[1][1] * 1.8:
+                sid = ranked[0][0]
+            else:
+                sid = UNKNOWN_ID
+            expected.append(sid)
+        assert [s["speaker"] for s in assign_speakers(segments, turns)["segments"]] == expected
+
+
+def test_large_sparse_recording_does_not_compare_every_interval(monkeypatch):
+    from backend import speakers as module
+
+    calls = 0
+    original = module._overlap
+
+    def overlap(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(module, "_overlap", overlap)
+    count = 3000
+    segments = [{"start": i * 2, "end": i * 2 + 1.8, "text": "Фраза"} for i in range(count)]
+    turns = [{"start": i * 2, "end": i * 2 + 1.9, "speaker": str(i % 8)} for i in range(count)]
+    result = assign_speakers(segments, turns)
+    assert len(result["segments"]) == count
+    assert all(item["speaker"] != UNKNOWN_ID for item in result["segments"])
+    assert calls == count

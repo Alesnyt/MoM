@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from bisect import bisect_left, bisect_right
 from typing import Any
 
 log = logging.getLogger("mom.speakers")
@@ -126,9 +127,21 @@ def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]])
         speakers = [{"id": "S1", "name": "Спикер 1"}]
     fallback = speakers[0]["id"]
     assigned: list[dict[str, Any]] = []
+    # Only inspect intervals that can intersect this phrase. Prefix maxima
+    # retain long/overlapping turns, even when input intervals are unsorted.
+    ordered = sorted(enumerate(clean_turns), key=lambda pair: pair[1]["start"])
+    starts = [turn["start"] for _, turn in ordered]
+    prefix_ends: list[float] = []
+    high = float("-inf")
+    for _, turn in ordered:
+        high = max(high, turn["end"])
+        prefix_ends.append(high)
     for segment in clean_segments:
         totals: dict[str, float] = {}
-        for turn in clean_turns:
+        left = bisect_right(prefix_ends, segment["start"])
+        right = bisect_left(starts, segment["end"])
+        # Preserve the original accumulation/tie order exactly.
+        for _, turn in sorted(ordered[left:right], key=lambda pair: pair[0]):
             overlap = _overlap(segment["start"], segment["end"], turn["start"], turn["end"])
             if overlap <= 0:
                 continue

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from openai import APIStatusError, AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import config, prompts
@@ -318,6 +318,17 @@ def merge_transcripts(chunks: list[tuple[float, dict[str, Any]]]) -> dict[str, A
     }
 
 
+def json_format_unsupported(exc: BadRequestError) -> bool:
+    """Only retry without JSON mode when the provider explicitly rejects it."""
+    message = str(exc).lower()
+    format_named = any(term in message for term in ("response_format", "json_object", "json mode"))
+    unsupported = any(term in message for term in (
+        "not supported", "unsupported", "does not support", "not available",
+        "not allowed", "unknown parameter", "unrecognized request argument",
+    ))
+    return format_named and unsupported
+
+
 async def analyze_transcript(
     client: AsyncOpenAI, transcript: str, title_hint: str | None, *, system_prompt: str | None = None,
 ) -> dict[str, Any]:
@@ -338,7 +349,9 @@ async def analyze_transcript(
             ],
             **_chat_kwargs(),
         )
-    except Exception:
+    except BadRequestError as exc:
+        if not json_format_unsupported(exc):
+            raise
         log.warning("llm model=%s без json_object, повтор запроса", model)
         response = await client.chat.completions.create(
             model=model,
