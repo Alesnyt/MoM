@@ -237,6 +237,8 @@ export function TranscriptView({
   const speakers = meeting.speakers || [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const speakersHeadingId = useId();
+  const transcriptHeadingId = useId();
 
   useEffect(() => {
     setError(null);
@@ -246,7 +248,9 @@ export function TranscriptView({
     return (
       <>
         {meeting.diarization_note && <p className="progress-hint">{meeting.diarization_note}</p>}
-        <pre className="transcript">{meeting.transcript || "Транскрипт пуст"}</pre>
+        {meeting.transcript == null
+          ? <p className="progress-hint" role="status">Загружаю транскрипт…</p>
+          : <pre className="transcript">{meeting.transcript || "Транскрипт пуст"}</pre>}
       </>
     );
   }
@@ -255,6 +259,12 @@ export function TranscriptView({
   const namedSpeakers = speakers.filter((item) => item.id !== "unknown" && item.name !== "Неясно");
   const hasUnclear = namedSpeakers.length !== speakers.length;
   const turns = turnsOf(segments);
+  const examples = new Map<string, Turn[]>();
+  for (const turn of turns) {
+    const samples = examples.get(turn.speaker) || [];
+    if (samples.length < 2) samples.push(turn);
+    examples.set(turn.speaker, samples);
+  }
 
   async function saveName(speakerId: string, name: string, email?: string) {
     setBusy(true);
@@ -290,7 +300,7 @@ export function TranscriptView({
       <p className="progress-hint">
         Имя можно выбрать из каталога или вписать своё. Оно встанет на все реплики этого спикера и появится в списке выбора.
         {" «Сбросить имя» вернёт обозначение «Спикер 1», «Спикер 2» и т. д."}
-        {hasUnclear ? " «Неясно» — это не один человек: такие реплики назначайте по одной в списке справа." : ""}
+        {hasUnclear ? " «Неясно» — это не один человек: такие реплики назначайте по одной в транскрипте." : ""}
         {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
       </p>
       {error && <div className="banner" role="alert">{error}</div>}
@@ -304,53 +314,69 @@ export function TranscriptView({
           {" "}{item.reason}
         </li>)}</ul>
       </details>}
-      <div className="speaker-roster">
-        {namedSpeakers.map((speaker) => (
-          <SpeakerNameEditor
-            key={speaker.id}
-            speaker={speaker}
-            taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
-            disabled={busy || disabled}
-            onRename={saveName}
-          />
-        ))}
-      </div>
-      <div className="turns">
-      {turns.map((turn) => {
-        const name = names.get(turn.speaker) || turn.speaker;
-        return (
-          <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
-            <header className="turn-head">
-              <strong className="speaker-name">{name}</strong>
-              {turn.start !== null && <time>{formatClock(turn.start)}</time>}
-              <label className="speaker-move">
-                <span className="sr-only">Кто говорит эту реплику</span>
-                <select
-                  value={turn.speaker}
+      <div className="speaker-review-grid">
+        <section className="speaker-panel" aria-labelledby={speakersHeadingId}>
+          <h2 id={speakersHeadingId}>Спикеры и примеры фраз</h2>
+          <div className="speaker-roster">
+            {namedSpeakers.map((speaker) => (
+              <div className="speaker-card" key={speaker.id} style={{ borderLeftColor: speakerColor(speaker.id) }}>
+                <strong>{/^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : speaker.name}</strong>
+                <SpeakerNameEditor
+                  speaker={speaker}
+                  taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
                   disabled={busy || disabled}
-                  aria-label="Кто говорит эту реплику"
-                  onChange={(event) => {
-                    const next = event.target.value;
-                    if (next !== turn.speaker) void moveTurn(turn.indexes, next);
-                  }}
-                >
-                  {speakers.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                  <option value="new">Новый спикер</option>
-                </select>
-              </label>
-            </header>
-            <p>{turn.text}</p>
-            {turn.indexes.some((index) => segments[index].original_text && segments[index].original_text !== segments[index].text) &&
-              <details><summary>До проверки имён</summary><p className="original-transcript">
-                {turn.indexes.map((index) => segments[index].original_text ?? segments[index].text).join(" ")}
-              </p></details>}
-          </article>
-        );
-      })}
+                  onRename={saveName}
+                />
+                {(examples.get(speaker.id) || []).map((turn) => (
+                  <blockquote className="speaker-example" key={turn.indexes[0]}>
+                    {turn.start !== null && <time>{formatClock(turn.start)}</time>}
+                    <p>{turn.text.length > 200 ? `${turn.text.slice(0, 200)}…` : turn.text}</p>
+                  </blockquote>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="speaker-panel" aria-labelledby={transcriptHeadingId}>
+          <h2 id={transcriptHeadingId}>Транскрипт по спикерам</h2>
+          <div className="turns" role="region" aria-labelledby={transcriptHeadingId} tabIndex={0}>
+            {turns.map((turn) => {
+              const name = names.get(turn.speaker) || turn.speaker;
+              return (
+                <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
+                  <header className="turn-head">
+                    <strong className="speaker-name">{name}</strong>
+                    {turn.start !== null && <time>{formatClock(turn.start)}</time>}
+                    <label className="speaker-move">
+                      <span className="sr-only">Кто говорит эту реплику</span>
+                      <select
+                        value={turn.speaker}
+                        disabled={busy || disabled}
+                        aria-label="Кто говорит эту реплику"
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          if (next !== turn.speaker) void moveTurn(turn.indexes, next);
+                        }}
+                      >
+                        {speakers.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                        <option value="new">Новый спикер</option>
+                      </select>
+                    </label>
+                  </header>
+                  <p>{turn.text}</p>
+                  {turn.indexes.some((index) => segments[index].original_text && segments[index].original_text !== segments[index].text) &&
+                    <details><summary>До проверки имён</summary><p className="original-transcript">
+                      {turn.indexes.map((index) => segments[index].original_text ?? segments[index].text).join(" ")}
+                    </p></details>}
+                </article>
+              );
+            })}
+          </div>
+        </section>
       </div>
     </div>
   );

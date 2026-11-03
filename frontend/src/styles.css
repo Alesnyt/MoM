@@ -815,10 +815,6 @@ select.title-input {
   line-height: 1.45;
 }
 
-.review-choice .turns {
-  margin-top: 18px;
-}
-
 .process ol {
   display: flex;
   gap: 24px;
@@ -1223,6 +1219,71 @@ select.title-input {
   gap: 10px;
 }
 
+.speaker-review-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  gap: 24px;
+}
+
+.speaker-panel {
+  min-width: 0;
+}
+
+.speaker-panel h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+}
+
+.speaker-panel .speaker-roster {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.speaker-card {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.speaker-card > strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.speaker-card .speaker-edit {
+  width: 100%;
+  min-width: 0;
+}
+
+.speaker-example {
+  margin: 12px 0 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.speaker-example time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.speaker-example p,
+.review-choice .speaker-example p {
+  margin: 4px 0 0;
+}
+
+@media (max-width: 1100px) {
+  .speaker-review-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .speaker-panel .speaker-roster {
+    max-height: 40vh;
+  }
+}
+
 .protocol-delivery {
   display: flex;
   flex-direction: column;
@@ -1324,11 +1385,20 @@ select.title-input {
 .turn {
   border-left: 3px solid var(--accent);
   padding: 0 0 0 12px;
+  overflow-wrap: anywhere;
+}
+
+.turn > p,
+.review-choice .turn > p {
+  color: var(--text);
+  white-space: pre-wrap;
+  line-height: 1.55;
 }
 
 .turn-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 4px;
 }
@@ -1337,6 +1407,12 @@ select.title-input {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
+}
+
+.speaker-move,
+.speaker-move select {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .speaker-name {
