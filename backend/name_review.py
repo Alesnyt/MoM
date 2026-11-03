@@ -10,7 +10,7 @@ from typing import Any
 from openai import BadRequestError
 
 from . import control, prompts, store
-from .analyze import _chat_kwargs
+from .analyze import _chat_kwargs, json_format_unsupported
 from .config import get_chat_model
 
 log = logging.getLogger("mom.names")
@@ -90,7 +90,7 @@ async def _request(client, settings: dict, participants: list[dict], segments: l
     try:
         response = await client.chat.completions.create(**kwargs, response_format={"type": "json_object"})
     except BadRequestError as exc:
-        if "response_format" not in str(exc).lower() and "json" not in str(exc).lower():
+        if not json_format_unsupported(exc):
             raise
         response = await client.chat.completions.create(**kwargs)
     raw = (response.choices[0].message.content or "").strip()

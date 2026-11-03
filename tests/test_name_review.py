@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from openai import BadRequestError
 
 from backend import analyze, config, control, name_review, pipeline, prompts, store
 
@@ -176,7 +177,8 @@ def test_saved_prompt_used_for_every_summary_part_and_fallback(db):
         # A concurrent admin edit must not alter the prompt halfway through a meeting.
         store.save_llm_settings({**prompts.snapshot(), "protocol_prompt": "new"}, "admin")
         if "response_format" in kwargs:
-            raise RuntimeError("JSON mode not supported")
+            raise BadRequestError("response_format json_object not supported",
+                response=SimpleNamespace(request=SimpleNamespace(), status_code=400, headers={}), body=None)
         return response({"summary": "Test"})
 
     asyncio.run(analyze.analyze_long_transcript(client_for(create), "x" * 100_000, None))

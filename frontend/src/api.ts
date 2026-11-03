@@ -308,14 +308,14 @@ export async function deleteApiKey(): Promise<Health> {
   return response.json();
 }
 
-export async function listMeetings(): Promise<Meeting[]> {
-  const response = await fetch("/api/meetings", { credentials: "include" });
+export async function listMeetings(signal?: AbortSignal): Promise<Meeting[]> {
+  const response = await fetch("/api/meetings", { credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
 
-export async function getMeeting(id: string): Promise<Meeting> {
-  const response = await fetch(`/api/meetings/${id}`, { credentials: "include" });
+export async function getMeeting(id: string, signal?: AbortSignal): Promise<Meeting> {
+  const response = await fetch(`/api/meetings/${id}`, { credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
