@@ -859,6 +859,49 @@ function AuditPanel() {
 }
 
 
+function ChatModelPicker({ models, value, onChange }: {
+  models: string[];
+  value: string;
+  onChange: (model: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const matches = needle ? models.filter((name) => name.toLowerCase().includes(needle)) : models;
+
+  return (
+    <div className="field-stack">
+      <label className="field-label">
+        Поиск модели
+        <input
+          className="title-input"
+          type="search"
+          placeholder="Например flash или mini"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault();
+          }}
+        />
+      </label>
+      <label className="field-label">
+        Модель чата
+        <select
+          className="title-input"
+          value={value}
+          disabled={matches.length === 0}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          {!matches.includes(value) && <option value={value} disabled>{value || "Выберите модель"}</option>}
+          {matches.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </label>
+      <p className="progress-hint" role="status">
+        {matches.length ? `Моделей в списке: ${matches.length}` : "Модели не найдены. Попробуйте другую часть названия."}
+      </p>
+    </div>
+  );
+}
+
 function SettingsPanel({
   topic,
   health,
@@ -1005,32 +1048,27 @@ function SettingsPanel({
             }}
           >
             <p>Модель, которая собирает протокол.</p>
-            <label className="field-label">
-              Чат
-              {health?.openai.configured && chatCatalog === null ? (
+            {health?.openai.configured && chatCatalog === null ? (
+              <label className="field-label">
+                Модель чата
                 <input className="title-input" value="Загружаю модели этого ключа…" disabled />
-              ) : chatCatalog && chatCatalog.length > 0 ? (
-                <select className="title-input" value={chatModel} onChange={(event) => setChatModel(event.target.value)}>
-                  {chatCatalog.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  className="title-input"
-                  placeholder="Например gemini-3.8-flash или qwen3.7-plus"
-                  value={chatModel}
-                  onChange={(event) => setChatModel(event.target.value)}
-                />
-              )}
-            </label>
-            <p className="progress-hint">
-              {chatCatalog && chatCatalog.length > 0
-                ? "Список моделей, которые открывает этот ключ."
-                : "Каталог моделей недоступен — впишите имя вручную."}
-            </p>
+              </label>
+            ) : chatCatalog?.length ? (
+              <ChatModelPicker models={chatCatalog} value={chatModel} onChange={setChatModel} />
+            ) : (
+              <>
+                <label className="field-label">
+                  Модель чата
+                  <input
+                    className="title-input"
+                    placeholder="Например gemini-3.8-flash или qwen3.7-plus"
+                    value={chatModel}
+                    onChange={(event) => setChatModel(event.target.value)}
+                  />
+                </label>
+                <p className="progress-hint">Каталог моделей недоступен — впишите имя вручную.</p>
+              </>
+            )}
             <div className="composer-row">
               <button className="primary" type="submit" disabled={busy !== null || !chatModel.trim()}>
                 {busy === "models" ? "Сохраняю…" : "Сохранить модель"}
