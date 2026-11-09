@@ -51,17 +51,32 @@
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
-  margin: 0;
-  min-height: 100%;
-}
-
 body {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+  min-height: 100vh;
+  min-height: 100dvh;
   font-family: Figtree, ui-sans-serif, system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
+}
+
+#root {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.build-version {
+  padding: 6px 16px;
+  padding-right: max(16px, env(safe-area-inset-right));
+  padding-bottom: max(6px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--rail);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
 }
 
 ::selection {
@@ -117,7 +132,6 @@ button {
 .shell {
   display: grid;
   grid-template-rows: auto 1fr;
-  min-height: 100vh;
 }
 
 .topbar {

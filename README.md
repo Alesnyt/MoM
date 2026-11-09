@@ -90,9 +90,11 @@ chmod +x install.sh start.sh update.sh
 
 На хосте нужны Docker и Docker Compose. В рабочем образе уже есть Python, ffmpeg, PyTorch и зависимости ASR; frontend предварительно собирается в отдельном Node.js-слое. Веса моделей скачиваются отдельно. Модели и записи лежат в `./data`, настройки — в `./.env`.
 
+Версия запущенного интерфейса указана внизу справа на страницах встреч и администрирования, например `v1.1.0 · 44c0fef`. Номер берётся из `frontend/package.json`, а семь символов после точки — из коммита, из которого собран интерфейс. При обычной установке из Git и в GitHub Actions коммит определяется автоматически. Для сборки Docker из локального клона передайте `MOM_REVISION`, как в примерах ниже. Если коммит недоступен, отображается только номер версии.
+
 ```bash
 cp .env.example .env
-docker compose up -d --build
+MOM_REVISION=$(git rev-parse HEAD) docker compose up -d --build
 ```
 
 Первый запуск долгий: образ тянет CPU-сборку PyTorch. В логе будет `SETUP_TOKEN`, если в `.env` он пустой. Контейнер считается живым, когда `/api/health` отвечает.
@@ -100,14 +102,14 @@ docker compose up -d --build
 Разметка спикеров в образ по умолчанию не входит. Чтобы поставить pyannote сразу:
 
 ```bash
-docker compose build --build-arg INSTALL_DIARIZE=1
+MOM_REVISION=$(git rev-parse HEAD) docker compose build --build-arg INSTALL_DIARIZE=1
 docker compose up -d
 docker compose logs mom
 ```
 
 Откройте `http://<IP>:8000`. Каталог `data/` и файл `.env` переживают пересборку контейнера. Сервер внутри контейнера работает от пользователя `mom`, не от root. Whisper `small` скачается в `data/whisper/` при первой расшифровке, не при сборке образа.
 
-Образ публикуется в GHCR по тегам `v*` (или вручную через workflow): `ghcr.io/alesnyt/mom:latest`. **Слияние изменений в `main` само по себе не обновляет образ `:latest` в GHCR.** Для сборки проверенного кода на месте используйте `git pull --ff-only && docker compose up -d --build`; для установки опубликованного образа — `docker compose pull && docker compose up -d` (после проверки версии тега).
+Образ публикуется в GHCR по тегам `v*` (или вручную через workflow): `ghcr.io/alesnyt/mom:latest`. Перед созданием тега обновите номер в `frontend/package.json` и `frontend/package-lock.json` командой `npm --prefix frontend version <номер> --no-git-tag-version`. **Слияние изменений в `main` само по себе не обновляет образ `:latest` в GHCR.** Для сборки проверенного кода на месте используйте `git pull --ff-only && MOM_REVISION=$(git rev-parse HEAD) docker compose up -d --build`; для установки опубликованного образа — `docker compose pull && docker compose up -d` (после проверки версии тега).
 
 ### Контур, где наружу ходит только GitHub
 
@@ -116,7 +118,7 @@ docker compose logs mom
 На машине с доступом к этим адресам:
 
 ```bash
-docker compose build
+MOM_REVISION=$(git rev-parse HEAD) docker compose build
 docker compose up -d
 docker compose exec mom python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8', download_root='/app/data/whisper')"
 docker compose down
