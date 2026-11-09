@@ -1,7 +1,10 @@
 services:
   mom:
     image: ghcr.io/alesnyt/mom:latest
-    build: .
+    build:
+      context: .
+      args:
+        MOM_REVISION: ${MOM_REVISION:-}
     ports:
       - "${PORT:-8000}:8000"
     # .env монтируется файлом, не через env_file: в ADMIN_PASSWORD_HASH есть символ $,

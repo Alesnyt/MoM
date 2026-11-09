@@ -21,8 +21,11 @@
 
    ```sh
    docker compose --env-file .env.corporate -f compose.corporate.yml config --quiet
-   docker compose --env-file .env.corporate -f compose.corporate.yml up -d --build
+   MOM_REVISION=$(git rev-parse HEAD) docker compose --env-file .env.corporate -f compose.corporate.yml up -d --build
    ```
+
+Версия появится внизу справа. `MOM_REVISION` добавляет к ней короткий идентификатор коммита.
+При сборке из архива без Git укажите исходный коммит вручную, если он известен.
 
 Не объединяйте этот файл с `docker-compose.yml`: корпоративная конфигурация уже
 содержит сервис приложения без опубликованного порта. Наружу доступны только

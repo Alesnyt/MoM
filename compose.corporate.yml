@@ -1,11 +1,12 @@
 # Standalone configuration: do not combine with docker-compose.yml.
-# docker compose --env-file .env.corporate -f compose.corporate.yml up -d --build
+# MOM_REVISION=$(git rev-parse HEAD) docker compose --env-file .env.corporate -f compose.corporate.yml up -d --build
 services:
   mom:
     build:
       context: .
       dockerfile: deploy/corporate/Dockerfile
       args:
+        MOM_REVISION: ${MOM_REVISION:-}
         DOCKER_PROXY: ${DOCKER_PROXY:-}
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}

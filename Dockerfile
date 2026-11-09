@@ -5,6 +5,7 @@ WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
+ARG MOM_REVISION
 RUN npm run build
 
 FROM python:3.12-slim-bookworm

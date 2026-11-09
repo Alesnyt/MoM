@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: docker build -t mom:ci .
+        run: docker build --build-arg MOM_REVISION="$GITHUB_SHA" -t mom:ci .
       - name: Smoke-test running Docker service
         run: |
           set -euo pipefail
@@ -45,6 +45,8 @@ jobs:
           python3 - <<'PY'
           import http.cookiejar
           import json
+          import os
+          import re
           import urllib.request
 
           root = "http://127.0.0.1:18080"
@@ -66,6 +68,13 @@ jobs:
 
           health = call("GET", "/api/health")
           assert health["ok"] and health["ffmpeg"] and health["ui"], health
+          with open("frontend/package.json", encoding="utf-8") as manifest:
+              version = json.load(manifest)["version"]
+          expected = f"Версия v{version} · {os.environ['GITHUB_SHA'][:7]}"
+          for path in ("/", "/admin"):
+              with opener.open(root + path, timeout=8) as response:
+                  html = response.read().decode()
+              assert re.search(r'<footer class="build-version">\s*' + re.escape(expected) + r'\s*</footer>', html), path
           assert not call("GET", "/api/auth/status")["configured"]
           setup = call("POST", "/api/auth/setup", {
               "username": "testadmin",
@@ -143,4 +152,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build corporate image without private wheels or certificates
-        run: docker build -f deploy/corporate/Dockerfile -t mom:corporate-ci .
+        run: docker build --build-arg MOM_REVISION="$GITHUB_SHA" -f deploy/corporate/Dockerfile -t mom:corporate-ci .
+      - name: Verify corporate image version
+        run: docker run --rm --entrypoint grep mom:corporate-ci -F "· ${GITHUB_SHA:0:7}</footer>" /app/backend/static/index.html
