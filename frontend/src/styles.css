@@ -1016,6 +1016,91 @@ select.title-input {
   border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
 }
 
+.monitor {
+  display: grid;
+  gap: 22px;
+}
+
+.monitor h2 {
+  margin: 0 0 10px;
+  font-size: 17px;
+}
+
+.monitor-update {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.monitor-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.monitor-metric,
+.monitor-empty {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.monitor-metric dt,
+.monitor-metric small,
+.monitor-empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.monitor-metric dd {
+  display: grid;
+  gap: 2px;
+  margin: 6px 0 0;
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-metric small {
+  font-weight: 400;
+}
+
+.monitor-jobs {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.monitor-jobs th,
+.monitor-jobs td {
+  border-bottom: 1px solid var(--line);
+  padding: 9px 6px;
+  font-size: 13px;
+}
+
+.monitor-jobs thead {
+  color: var(--muted);
+}
+
+.monitor-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-progress progress {
+  width: 100%;
+  min-width: 0;
+  max-width: 110px;
+  accent-color: var(--accent);
+}
+
 .choice-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

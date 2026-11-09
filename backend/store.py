@@ -349,6 +349,26 @@ def queue_stats() -> dict[str, int]:
     return {"active": int(active), "waiting": int(waiting), "limit": get_max_jobs()}
 
 
+def queue_monitoring() -> dict[str, Any]:
+    with connect() as conn:
+        conn.execute("BEGIN")
+        counts = dict(conn.execute(
+            "SELECT status, COUNT(*) FROM meetings WHERE status IN ('queued', 'review') GROUP BY status"
+        ).fetchall())
+        jobs = conn.execute(
+            """SELECT id, status, progress FROM meetings
+               WHERE status IN ('extracting', 'transcribing', 'analyzing')
+               ORDER BY queued_at, id"""
+        ).fetchall()
+    return {
+        "active": len(jobs),
+        "waiting": counts.get("queued", 0),
+        "review": counts.get("review", 0),
+        "limit": get_max_jobs(),
+        "jobs": [dict(job) for job in jobs],
+    }
+
+
 def attach_queue_info(meetings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not meetings:
         return meetings

@@ -18,7 +18,7 @@ jobs:
         run: |
           python -m pip install pytest \
             "fastapi==0.141.1" "python-multipart==0.0.32" \
-            "python-dotenv==1.2.3" "openai==3.2.0" "ldap3==2.9.1"
+            "python-dotenv==1.2.3" "openai==3.2.0" "ldap3==2.9.1" "psutil==7.2.2"
       - name: Pytest
         run: python -m pytest -q
 
@@ -82,6 +82,9 @@ jobs:
               "setup_token": "ci-stage1-setup-token",
           })
           assert setup["authenticated"]
+          monitor = call("GET", "/api/admin/monitoring")
+          assert monitor["queue"]["active"] == 0 and monitor["queue"]["jobs"] == [], monitor
+          assert monitor["resources"]["rss_bytes"] > 0 and monitor["disk"]["total_bytes"] > 0, monitor
           user = call("POST", "/api/admin/users", {
               "email": "smoke@example.com",
               "archive_limit": 5,

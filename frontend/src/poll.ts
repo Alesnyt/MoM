@@ -3,6 +3,7 @@ export function startPolling<T>(
   request: (signal: AbortSignal) => Promise<T>,
   onValue: (value: T) => void,
   intervalMs = 2000,
+  { immediate = false }: { immediate?: boolean } = {},
 ): () => void {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
@@ -16,6 +17,6 @@ export function startPolling<T>(
       if (!controller.signal.aborted) timer = setTimeout(run, intervalMs);
     }
   }
-  timer = setTimeout(run, intervalMs);
+  timer = setTimeout(run, immediate ? 0 : intervalMs);
   return () => { controller.abort(); clearTimeout(timer); };
 }
