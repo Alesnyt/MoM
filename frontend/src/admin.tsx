@@ -924,10 +924,14 @@ function SettingsPanel({
   const [maxJobs, setMaxJobs] = useState(String(health?.queue?.limit || 1));
   const [publicUrl, setPublicUrl] = useState(health?.smtp?.public_url || "");
   const [smtpNote, setSmtpNote] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"save" | "verify" | "delete" | "models" | "theme" | "smtp" | "smtp-test" | "queue" | null>(null);
+  const [busy, setBusy] = useState<"save" | "verify" | "verify-key" | "delete" | "models" | "theme" | "smtp" | "smtp-test" | "queue" | null>(null);
+  const verification = useRef<AbortController | null>(null);
+  const [verificationNote, setVerificationNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const openai = health?.openai;
   const asr = parseAsrModel(asrModel);
+
+  useEffect(() => () => verification.current?.abort(), []);
 
   useEffect(() => {
     if (health?.openai.chat_model) setChatModel(health.openai.chat_model);
@@ -959,7 +963,7 @@ function SettingsPanel({
     return () => {
       cancelled = true;
     };
-  }, [topic, health?.openai.configured, health?.openai.checked_at]);
+  }, [topic, openai?.configured, openai?.hint, openai?.checked_at]);
 
   useEffect(() => {
     if (chatCatalog && chatCatalog.length > 0 && !chatCatalog.includes(chatModel)) {
@@ -968,21 +972,60 @@ function SettingsPanel({
   }, [chatCatalog, chatModel]);
 
   async function run(
-    kind: "save" | "verify" | "delete" | "models" | "theme" | "smtp" | "queue",
+    kind: "delete" | "models" | "theme" | "smtp" | "queue",
     action: () => Promise<Health>,
   ) {
+    if (busy !== null) return;
     setError(null);
+    setVerificationNote("");
     setBusy(kind);
     try {
       const next = await action();
       onChange(next);
-      if (kind === "save") setApiKey("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось выполнить действие");
     } finally {
       setBusy(null);
     }
   }
+
+  async function checkConnection(key?: string) {
+    if (busy !== null || verification.current) return;
+    const controller = new AbortController();
+    verification.current = controller;
+    setError(null);
+    setVerificationNote("");
+    try {
+      if (key !== undefined) {
+        setBusy("save");
+        const saved = await saveApiKey(key);
+        if (controller.signal.aborted) return;
+        onChange(saved);
+        setApiKey("");
+      }
+      setBusy(key === undefined ? "verify" : "verify-key");
+      const next = await verifyApiKey(controller.signal);
+      if (!controller.signal.aborted) onChange(next);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : "Не удалось проверить подключение");
+      }
+    } finally {
+      if (verification.current === controller && !controller.signal.aborted) {
+        verification.current = null;
+        setBusy(null);
+      }
+    }
+  }
+
+  function cancelVerification() {
+    verification.current?.abort();
+    verification.current = null;
+    setBusy(null);
+    setVerificationNote(busy === "verify-key" ? "Проверка отменена. Ключ сохранён." : "Проверка отменена.");
+  }
+
+  const cancelButton = <button className="ghost" type="button" onClick={cancelVerification}>Отменить проверку</button>;
 
   function setEngine(engine: AsrEngine) {
     setAsrModel(
@@ -1021,7 +1064,7 @@ function SettingsPanel({
             className="key-box"
             onSubmit={(event) => {
               event.preventDefault();
-              void run("save", () => saveApiKey(apiKey.trim()));
+              if (apiKey.trim().length >= 20) void checkConnection(apiKey.trim());
             }}
           >
             <p>{openai?.configured ? "Заменить ключ" : "Добавить ключ Qwen, OpenAI, Gemini или OpenRouter"}</p>
@@ -1035,8 +1078,9 @@ function SettingsPanel({
                 onChange={(event) => setApiKey(event.target.value)}
               />
               <button className="primary" type="submit" disabled={busy !== null || apiKey.trim().length < 20}>
-                {busy === "save" ? "Проверяю…" : "Сохранить и проверить"}
+                {busy === "save" ? "Сохраняю…" : busy === "verify-key" ? "Проверяю…" : "Сохранить и проверить"}
               </button>
+              {busy === "verify-key" && cancelButton}
             </div>
           </form>
 
@@ -1081,10 +1125,11 @@ function SettingsPanel({
               className="ghost"
               type="button"
               disabled={busy !== null || !openai?.configured}
-              onClick={() => void run("verify", verifyApiKey)}
+              onClick={() => void checkConnection()}
             >
               {busy === "verify" ? "Проверяю…" : "Проверить подключение"}
             </button>
+            {busy === "verify" && cancelButton}
             <button
               className="ghost danger"
               type="button"
@@ -1407,6 +1452,13 @@ function SettingsPanel({
         </div>
       )}
 
+      {topic !== "llm" && (busy === "verify" || busy === "verify-key") && (
+        <div className="pane-actions settings-actions">
+          <span role="status">Проверяю подключение…</span>
+          {cancelButton}
+        </div>
+      )}
+      {verificationNote && <p className="progress-hint" role="status">{verificationNote}</p>}
       {error && <div className="banner" role="alert">{error}</div>}
     </>
   );

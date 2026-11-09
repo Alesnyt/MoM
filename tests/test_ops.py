@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,7 +36,8 @@ def test_disk_refuses_when_reserve_is_gone(db: Path, monkeypatch: pytest.MonkeyP
         free = 800 * 1024 * 1024
 
     monkeypatch.setattr(disk, "_usage", lambda path: _Usage())
-    disk._recordings_cache["at"] = 0
+    monkeypatch.setattr(disk, "_recordings_cache", {"at": 0.0, "bytes": 0})
+    monkeypatch.setattr(disk, "time", SimpleNamespace(monotonic=lambda: 5.0))
     (config.UPLOAD_DIR / "a.webm").write_bytes(b"12345")
     current = disk.snapshot()
     assert current["ok"] is False

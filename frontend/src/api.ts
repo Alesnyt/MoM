@@ -184,7 +184,7 @@ export async function getSettings(): Promise<Health> {
 }
 
 export async function saveApiKey(key: string): Promise<Health> {
-  const response = await fetch("/api/settings", {
+  const response = await fetch("/api/settings?verify=false", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
@@ -296,8 +296,8 @@ export async function saveModels(chatModel: string, asrModel: string): Promise<H
   return response.json();
 }
 
-export async function verifyApiKey(): Promise<Health> {
-  const response = await fetch("/api/settings/verify", { method: "POST", credentials: "include" });
+export async function verifyApiKey(signal: AbortSignal): Promise<Health> {
+  const response = await fetch("/api/settings/verify", { method: "POST", credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

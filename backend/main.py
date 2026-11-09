@@ -12,6 +12,7 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
@@ -659,14 +660,39 @@ def save_prompts(payload: PromptsIn, _admin: dict = Depends(require_admin)) -> d
     return prompts.settings_view()
 
 
+async def _verify_until_disconnect(request: Request, key: str | None = None) -> None:
+    disconnected = False
+    async with anyio.create_task_group() as tasks:
+        async def watch_disconnect() -> None:
+            nonlocal disconnected
+            while (await request.receive())["type"] != "http.disconnect":
+                continue
+            disconnected = True
+            tasks.cancel_scope.cancel()
+
+        tasks.start_soon(watch_disconnect)
+        await keys.verify_key(key)
+        tasks.cancel_scope.cancel()
+
+    if disconnected:
+        raise HTTPException(status_code=499, detail="Проверка отменена")
+
+
 @app.post("/api/settings")
-async def save_settings(payload: SettingsIn, _admin: dict = Depends(require_admin)) -> dict:
+async def save_settings(
+    payload: SettingsIn,
+    request: Request,
+    verify: bool = True,
+    _admin: dict = Depends(require_admin),
+) -> dict:
     key = payload.openai_api_key.strip()
     if " " in key or len(key) < 20:
         raise HTTPException(status_code=400, detail="Похоже, это не API-ключ")
     config.set_openai_api_key(key)
+    keys.reset_status("Ключ сохранён. Проверьте подключение.")
     store.record_audit(_actor_name(_admin), "key.save", "llm", "ключ сохранён")
-    await keys.verify_key(key)
+    if verify:
+        await _verify_until_disconnect(request, key)
     return _health(full=True)
 
 
@@ -802,10 +828,10 @@ def test_smtp(payload: SmtpTestIn, _admin: dict = Depends(require_admin)) -> dic
 
 
 @app.post("/api/settings/verify")
-async def verify_settings(_admin: dict = Depends(require_admin)) -> dict:
+async def verify_settings(request: Request, _admin: dict = Depends(require_admin)) -> dict:
     if not config.get_api_key():
         raise HTTPException(status_code=400, detail="Сначала сохраните ключ")
-    await keys.verify_key()
+    await _verify_until_disconnect(request)
     return _health(full=True)
 
 
