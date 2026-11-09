@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { downloadMarkdown, getEmailBody, openMeetingEmail, startProtocol } from "./api";
+import { downloadProtocol, getEmailBody, openMeetingEmail, startProtocol } from "./api";
+import { copyForWord } from "./copy";
 import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
 import { isProtocolResult } from "./protocol";
 import { TranscriptView } from "./transcript";
@@ -40,6 +41,30 @@ export function MeetingPane({
   const [protocolBusy, setProtocolBusy] = useState(false);
   const [speakerBusy, setSpeakerBusy] = useState(false);
   const [protocolError, setProtocolError] = useState<string | null>(null);
+  const wordContent = useRef<HTMLElement>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  async function download(format: "docx" | "md") {
+    setMailNote(null);
+    setDownloading(true);
+    try {
+      await downloadProtocol(meeting.id, meeting.title, format);
+    } catch (err) {
+      setMailNote(err instanceof Error ? err.message : "Не удалось скачать протокол.");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function copyWord() {
+    if (!wordContent.current) return;
+    try {
+      await copyForWord(wordContent.current);
+      setMailNote("Протокол скопирован. В Word выберите «Сохранить исходное форматирование».");
+    } catch {
+      setMailNote("Не удалось скопировать с форматированием. Скачайте протокол в Word (.docx).");
+    }
+  }
 
   async function sendByEmail() {
     setMailNote(null);
@@ -104,6 +129,9 @@ export function MeetingPane({
         <div className="pane-actions">
           {meeting.status === "done" && result && (
             <>
+              <button className="primary" type="button" disabled={downloading} onClick={() => void download("docx")}>
+                Скачать протокол в Word (.docx)
+              </button>
               <button
                 className="ghost"
                 type="button"
@@ -122,7 +150,9 @@ export function MeetingPane({
               </button>
               <button
                 className="ghost"
-                onClick={() => downloadMarkdown(meeting.id, meeting.title)}
+                type="button"
+                disabled={downloading}
+                onClick={() => void download("md")}
               >
                 Скачать .md
               </button>
@@ -206,7 +236,10 @@ export function MeetingPane({
           </nav>
           {tab === "overview" && <Overview result={result} />}
           {tab === "actions" && <Actions result={result} />}
-          {tab === "mom" && <Minutes meeting={meeting} result={result} />}
+          {tab === "mom" && <>
+            <button className="ghost word-copy" type="button" onClick={() => void copyWord()}>Копировать для Word</button>
+            <Minutes meeting={meeting} result={result} contentRef={wordContent} />
+          </>}
           {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
         </>
       )}
@@ -353,35 +386,28 @@ function Overview({ result }: { result: MeetingResult }) {
       {result.participants.length > 0 && (
         <p className="people">Участники: {result.participants.join(", ")}</p>
       )}
-      <article className="summary">
-        {result.summary.split("\n").filter(Boolean).map((para, index) => (
-          <p key={index}>{para}</p>
-        ))}
-      </article>
-      <div className="split">
-        {result.key_points.length > 0 && (
-          <section>
-            <h2>Тезисы</h2>
-            <ul>
-              {result.key_points.map((item, index) => (
-                <li key={index}>{item}</li>
-              ))}
-            </ul>
-          </section>
-        )}
-        {result.decisions.length > 0 && (
-          <section>
-            <h2>Решения</h2>
-            <ul className="decisions">
-              {result.decisions.map((item, index) => (
-                <li key={index}>{item}</li>
-              ))}
-            </ul>
-          </section>
-        )}
-      </div>
+      <SummarySections result={result} heading="h2" />
     </div>
   );
+}
+
+function SummarySections({ result, heading: Heading }: { result: MeetingResult; heading: "h2" | "h3" }) {
+  const paragraphs = result.summary.split(/\r?\n/).map((para) => para.trim()).filter(Boolean);
+  return <>
+    <section className="summary">
+      <Heading>Саммари</Heading>
+      {paragraphs.length ? paragraphs.map((para, index) => <p key={index}>{para}</p>) : <p>Саммари отсутствует.</p>}
+    </section>
+    {([
+      ["Принятые решения", result.decisions],
+      ["Контекст и открытые вопросы", result.key_points],
+    ] as const).map(([label, entries]) => entries.length > 0 && (
+      <section className="summary-points" key={label}>
+        <Heading>{label}</Heading>
+        <ul>{entries.map((item, index) => <li key={index}>{item}</li>)}</ul>
+      </section>
+    ))}
+  </>;
 }
 
 function Actions({ result }: { result: MeetingResult }) {
@@ -389,21 +415,39 @@ function Actions({ result }: { result: MeetingResult }) {
     return <p className="empty-note">В записи не нашлось явных поручений.</p>;
   }
   return (
-    <table className="actions">
+    <ol className="action-list">
+      {result.action_items.map((item, index) => (
+        <li key={index}>
+          <strong>{item.task}</strong>
+          <dl>
+            <div><dt>Исполнитель</dt><dd>{item.assignee || "Не назначен"}</dd></div>
+            <div><dt>Срок</dt><dd>{item.due || "Не указан"}</dd></div>
+            <div><dt>Приоритет</dt><dd className={`prio ${item.priority}`}>{priorityLabel(item.priority)}</dd></div>
+          </dl>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function ProtocolActions({ result }: { result: MeetingResult }) {
+  if (!result.action_items.length) return <p>Поручений не зафиксировано.</p>;
+  return (
+    <table className="protocol-actions">
       <thead>
         <tr>
-          <th>Поручение</th>
-          <th>Исполнитель</th>
-          <th>Срок</th>
-          <th>Приоритет</th>
+          <th scope="col">Поручение</th>
+          <th scope="col">Исполнитель</th>
+          <th scope="col">Срок</th>
+          <th scope="col">Приоритет</th>
         </tr>
       </thead>
       <tbody>
         {result.action_items.map((item, index) => (
           <tr key={`${item.task}-${index}`}>
             <td>{item.task}</td>
-            <td>{item.assignee || "—"}</td>
-            <td>{item.due || "—"}</td>
+            <td>{item.assignee || "Не назначен"}</td>
+            <td>{item.due || "Не указан"}</td>
             <td>
               <span className={`prio ${item.priority}`}>{priorityLabel(item.priority)}</span>
             </td>
@@ -414,15 +458,13 @@ function Actions({ result }: { result: MeetingResult }) {
   );
 }
 
-function Minutes({ meeting, result }: { meeting: Meeting; result: MeetingResult }) {
+function Minutes({ meeting, result, contentRef }: { meeting: Meeting; result: MeetingResult; contentRef: React.Ref<HTMLElement> }) {
   return (
-    <article className="paper">
+    <article className="paper" ref={contentRef}>
       <header>
-        <p>Minutes of Meeting</p>
         <h2>{result.title || meeting.title}</h2>
         <ul>
-          <li>Обработано: {formatDate(meeting.created_at)}</li>
-          {result.date_hint && <li>По обсуждению: {result.date_hint}</li>}
+          {result.date_hint && <li>Дата встречи: {result.date_hint}</li>}
           {meeting.duration_seconds && (
             <li>Длительность: {formatDuration(meeting.duration_seconds)}</li>
           )}
@@ -431,9 +473,15 @@ function Minutes({ meeting, result }: { meeting: Meeting; result: MeetingResult 
           )}
         </ul>
       </header>
+      <SummarySections result={result} heading="h3" />
+      <section>
+        <h3>Поручения</h3>
+        <ProtocolActions result={result} />
+      </section>
+      {result.mom.agenda.length > 0 && <h3>Ход обсуждения</h3>}
       {(result.mom.agenda || []).map((block, index) => (
         <section key={index}>
-          <h3>{block.topic}</h3>
+          <h4>{block.topic}</h4>
           {block.discussion && <p>{block.discussion}</p>}
           {block.outcome && (
             <p className="outcome">
@@ -443,7 +491,7 @@ function Minutes({ meeting, result }: { meeting: Meeting; result: MeetingResult 
         </section>
       ))}
       {result.mom.next_meeting && (
-        <p className="next">Следующая встреча: {result.mom.next_meeting}</p>
+        <section className="next"><h3>Следующая встреча</h3><p>{result.mom.next_meeting}</p></section>
       )}
     </article>
   );

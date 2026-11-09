@@ -1,8 +1,11 @@
 """Text import uses real HTTP/SQLite; models and corporate services stay offline."""
 import asyncio
 import time
+from io import BytesIO
+from urllib.parse import unquote
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
 
 from backend import auth, config, control, keys, pipeline, store, worker
@@ -127,7 +130,7 @@ def test_auth_and_owner_isolation(client):
     login(client, "other@example.com")
     assert client.get("/api/meetings").json() == []
     for method, suffix, kwargs in [
-        ("get", "", {}), ("delete", "", {}), ("get", "/export.md", {}),
+        ("get", "", {}), ("delete", "", {}), ("get", "/export.md", {}), ("get", "/export.docx", {}),
         ("post", "/protocol", {}), ("post", "/retry", {}), ("post", "/restart", {}),
         ("patch", "/speakers/S1", {"json": {"name": "Changed"}}),
         ("patch", "/segments", {"json": {"speaker_id": "S1", "segment_indexes": [0]}}),
@@ -135,6 +138,47 @@ def test_auth_and_owner_isolation(client):
         assert getattr(client, method)(path + suffix, **kwargs).status_code == 404
     client.cookies.clear()
     assert client.post("/api/meetings/transcript", data={"text": "А: Б"}).status_code == 401
+    assert client.get(path + "/export.docx").status_code == 401
+
+
+def test_word_export_contains_the_protocol_and_preserves_russian_text(client):
+    meeting = create(client, text="Анна: Закрытый транскрипт")
+    meeting_id = meeting["id"]
+    path = f"/api/meetings/{meeting_id}/export.docx"
+    assert client.get(path).status_code == 409
+    result = {
+        "title": "Запуск «Пилота» / ноябрь", "summary": "Уточнили план.\n\nСверили ограничения.",
+        "participants": ["Алёна Ёлкина"], "date_hint": "9 ноября",
+        "key_points": ["• ПИЛОТ УТВЕРЖДЁН", "Бюджет согласуют отдельно.", "Согласовать смету"],
+        "decisions": ["Пилот утверждён.", "Пилот утверждён"],
+        "action_items": [
+            {"task": "Согласовать смету", "assignee": "Алёна Ёлкина", "due": "к пятнице", "priority": "high"},
+            {"task": "Согласовать смету", "assignee": "Алёна Ёлкина", "due": "к пятнице", "priority": "high"},
+            {"task": "Согласовать смету", "assignee": "Анна", "due": "в понедельник", "priority": "medium"},
+            {"task": "Проверить подпись \x0c и формулу A < B"},
+        ],
+        "mom": {"agenda": [{"topic": "Бюджет", "discussion": "Обсудили два сценария.", "outcome": "Оценки передадут на проверку."}],
+                "next_meeting": "На следующей неделе"},
+    }
+    store.update_meeting(meeting_id, status="done", result=result)
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.headers["content-type"].endswith("wordprocessingml.document")
+    assert "Запуск Пилота ноябрь.docx" in unquote(response.headers["content-disposition"])
+    assert response.headers["cache-control"] == "no-store"
+    document = Document(BytesIO(response.content))
+    assert document.paragraphs[0].style.name == "Title"
+    paragraphs = [p.text for p in document.paragraphs]
+    assert paragraphs.count("Пилот утверждён.") == 1
+    assert "Бюджет согласуют отдельно." in paragraphs and "Сверили ограничения." in paragraphs
+    assert "На следующей неделе" in paragraphs and "Закрытый транскрипт" not in "\n".join(paragraphs)
+    table = [[cell.text for cell in row.cells] for row in document.tables[0].rows]
+    assert table == [
+        ["Поручение", "Исполнитель", "Срок", "Приоритет"],
+        ["Согласовать смету", "Алёна Ёлкина", "к пятнице", "Высокий"],
+        ["Согласовать смету", "Анна", "в понедельник", "Средний"],
+        ["Проверить подпись  и формулу A < B", "Не назначен", "Не указан", "Средний"],
+    ]
 
 
 @pytest.mark.parametrize("kwargs,status", [

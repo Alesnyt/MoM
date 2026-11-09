@@ -29,3 +29,15 @@ export function plainCopy(event: ClipboardEvent): void {
 export function installPlainCopy(): void {
   document.addEventListener("copy", plainCopy);
 }
+
+export async function copyForWord(protocol: HTMLElement): Promise<void> {
+  const copy = protocol.cloneNode(true) as HTMLElement;
+  for (const cell of copy.querySelectorAll<HTMLElement>("th, td")) {
+    cell.style.cssText = "border:1px solid #aaa;padding:5pt;vertical-align:top;text-align:left";
+  }
+  const html = `<meta charset="utf-8"><div style="font-family:Arial,sans-serif;color:#000">${copy.innerHTML}</div>`;
+  await navigator.clipboard.write([new ClipboardItem({
+    "text/html": new Blob([html], { type: "text/html" }),
+    "text/plain": new Blob([protocol.innerText], { type: "text/plain" }),
+  })]);
+}

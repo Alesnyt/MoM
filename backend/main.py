@@ -9,6 +9,7 @@ import threading
 import uuid
 from typing import Literal
 from pathlib import Path
+from urllib.parse import quote
 
 from contextlib import asynccontextmanager
 
@@ -17,11 +18,13 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, prompts, store, worker
 from .audio import ffmpeg_available, looks_like_audio
+from .analyze import ProtocolResult
 from . import transcript_import, upload
+from . import word_protocol
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -1245,6 +1248,24 @@ def export_markdown(meeting_id: str, user: dict = Depends(require_user)) -> str:
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
     return to_markdown(meeting)
+
+
+@app.get("/api/meetings/{meeting_id}/export.docx", response_class=Response)
+def export_word(meeting_id: str, user: dict = Depends(require_user)) -> Response:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    if meeting["status"] != "done" or not meeting.get("result"):
+        raise HTTPException(status_code=409, detail="Протокол ещё не готов")
+    try:
+        result = ProtocolResult.model_validate(meeting["result"]).model_dump()
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
+    title = result["title"] or meeting["title"]
+    name = " ".join("".join(char if char.isalnum() or char in " -_" else " " for char in title).split())[:80]
+    filename = quote(f"{name or 'Протокол'}.docx", safe="")
+    return Response(word_protocol.to_docx(meeting, result), media_type=word_protocol.MEDIA_TYPE, headers={
+        "Content-Disposition": f"attachment; filename=protocol.docx; filename*=UTF-8''{filename}",
+        "Cache-Control": "no-store",
+    })
 
 
 @app.get("/api/meetings/{meeting_id}/email.txt", response_class=PlainTextResponse)
