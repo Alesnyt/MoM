@@ -82,6 +82,7 @@ export function connectionLabel(status: OpenAIStatus | undefined): string {
   if (status.model_unavailable || (status.message || "").toLowerCase().includes("модел")) {
     return `${name}: модель недоступна`;
   }
+  if (!status.checked_at) return `${name}: ключ не проверен`;
   return `${name}: нет связи`;
 }
 
@@ -92,6 +93,7 @@ export function uploadBlockedReason(status: OpenAIStatus | null): string | null 
     return "Выбранная модель недоступна этому ключу. Запись обработать нельзя, пока в админке не выберут другую.";
   }
   if (status.auth_rejected) return "Ключ не принят. Запись обработать нельзя, пока в админке не сохранят другой.";
+  if (!status.checked_at) return "Ключ сохранён. Проверьте подключение в админке.";
   return "Нет связи с провайдером. Запись обработать нельзя, пока проверка ключа не пройдёт.";
 }
 

@@ -55,7 +55,7 @@ def public_snapshot() -> dict[str, Any]:
         data["message"] = "Выбранная модель недоступна этому ключу"
     elif data.get("auth_rejected"):
         data["message"] = "Ключ не принят"
-    elif data.get("configured") and not data.get("connected"):
+    elif data.get("configured") and not data.get("connected") and data.get("checked_at"):
         data["message"] = "Нет связи с провайдером"
     return data
 

@@ -9,7 +9,7 @@ Object.assign(globalThis, {
   HTMLElement: dom.window.HTMLElement, Node: dom.window.Node,
 });
 const React = await import('react');
-const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const { AdminSection } = loadSource('admin.tsx');
 const originalFetch = globalThis.fetch;
 const health = { ffmpeg: true, openai: { configured: true, connected: true, chat_model: 'openai/gpt-5', asr_model: 'local-whisper' } };
@@ -19,10 +19,10 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-function renderSettings() {
+function renderSettings(onHealth = () => {}) {
   return render(React.createElement(AdminSection, {
     auth: { configured: true, authenticated: true },
-    health, tab: 'llm', onTab() {}, onAuth() {}, onHealth() {},
+    health, tab: 'llm', onTab() {}, onAuth() {}, onHealth,
   }));
 }
 
@@ -72,4 +72,60 @@ test('keeps manual entry when the provider has no catalog', async () => {
   fireEvent.change(field, { target: { value: 'provider/custom-model' } });
   assert.equal(field.value, 'provider/custom-model');
   assert.equal(view.queryByRole('searchbox'), null);
+});
+
+test('cancel unlocks verification immediately and ignores an old result during a retry', async () => {
+  const checks = [];
+  const applied = [];
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/settings/chat-models') return Response.json({ models: ['openai/gpt-5'] });
+    assert.equal(url, '/api/settings/verify');
+    return new Promise((finish) => checks.push({ signal: options.signal, finish }));
+  };
+  const view = renderSettings((next) => applied.push(next));
+  await view.findByRole('searchbox');
+  const verify = () => view.getByRole('button', { name: 'Проверить подключение' });
+  fireEvent.click(verify());
+  fireEvent.click(view.getByRole('button', { name: 'Отменить проверку' }));
+  assert.equal(checks[0].signal.aborted, true);
+  assert.equal(verify().disabled, false);
+  assert.ok(view.getByText('Проверка отменена.'));
+  fireEvent.click(verify());
+
+  await act(async () => checks[0].finish(Response.json({ ...health, stale: true })));
+  assert.deepEqual(applied, []);
+  assert.ok(view.getByRole('button', { name: 'Отменить проверку' }));
+  assert.equal(checks[1].signal.aborted, false);
+  await act(async () => checks[1].finish(Response.json(health)));
+  assert.deepEqual(applied, [health]);
+  assert.equal(verify().disabled, false);
+  assert.equal(view.queryByRole('alert'), null);
+});
+
+test('cancelling a new key check leaves the already saved key in place', async () => {
+  const applied = [];
+  const saved = { ...health, openai: { ...health.openai, connected: false, hint: 'sk-demo…1234' } };
+  let signal;
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/settings/chat-models') return Response.json({ models: ['openai/gpt-5'] });
+    if (url === '/api/settings?verify=false') {
+      assert.deepEqual(JSON.parse(options.body), { openai_api_key: 'sk-demo-test-key-00001234' });
+      return Response.json(saved);
+    }
+    assert.equal(url, '/api/settings/verify');
+    signal = options.signal;
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  };
+  const view = renderSettings((next) => applied.push(next));
+  await view.findByRole('searchbox');
+  const field = view.getByPlaceholderText(/^sk-ws/);
+  fireEvent.change(field, { target: { value: 'sk-demo-test-key-00001234' } });
+  fireEvent.click(view.getByRole('button', { name: 'Сохранить и проверить' }));
+  const cancel = await view.findByRole('button', { name: 'Отменить проверку' });
+  assert.deepEqual(applied, [saved]);
+  assert.equal(field.value, '');
+  await act(async () => fireEvent.click(cancel));
+  assert.equal(signal.aborted, true);
+  assert.ok(view.getByText('Проверка отменена. Ключ сохранён.'));
+  assert.equal(view.queryByRole('alert'), null);
 });
