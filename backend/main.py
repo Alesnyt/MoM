@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, people, prompts, store, worker
+from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, prompts, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from . import transcript_import, upload
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -641,6 +641,17 @@ def admin_delete_user(user_id: str, _admin: dict = Depends(require_admin)) -> di
 @app.get("/api/settings")
 def get_settings(_admin: dict = Depends(require_admin)) -> dict:
     return _health(full=True)
+
+
+@app.get("/api/admin/monitoring")
+def admin_monitoring(response: Response, _admin: dict = Depends(require_admin)) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "queue": store.queue_monitoring(),
+        "resources": monitoring.resources.snapshot(),
+        "disk": disk.snapshot(),
+        "sampled_at": store.utc_now(),
+    }
 
 
 @app.get("/api/settings/prompts")

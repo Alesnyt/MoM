@@ -8,7 +8,7 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "prompts" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
+export type AdminTab = "monitoring" | "prompts" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
 
 export type AuditEvent = {
   id: number;
@@ -113,6 +113,16 @@ export type QueueStatus = {
   active: number;
   waiting: number;
   limit: number;
+};
+
+export type MonitoringSnapshot = {
+  sampled_at: string;
+  queue: QueueStatus & {
+    review: number;
+    jobs: { id: string; status: "extracting" | "transcribing" | "analyzing"; progress: number }[];
+  };
+  resources: { cpu_percent: number | null; rss_bytes: number | null; process_count: number | null };
+  disk: Required<DiskStatus>;
 };
 
 export type SmtpStatus = {

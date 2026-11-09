@@ -1,4 +1,4 @@
-import type { AuditEvent, AuthStatus, Health, Meeting, PlatformUser, ProtocolRecipient, UserSession } from "./types";
+import type { AuditEvent, AuthStatus, Health, Meeting, MonitoringSnapshot, PlatformUser, ProtocolRecipient, UserSession } from "./types";
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -179,6 +179,12 @@ export async function resetUserPassword(id: string): Promise<{ password: string 
 
 export async function getSettings(): Promise<Health> {
   const response = await fetch("/api/settings", { credentials: "include" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function getMonitoring(signal: AbortSignal): Promise<MonitoringSnapshot> {
+  const response = await fetch("/api/admin/monitoring", { credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

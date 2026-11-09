@@ -33,9 +33,11 @@ import {
 } from "./api";
 import { encodeAsrModel, formatAsrLabel, parseAsrModel, WHISPER_SIZES, type AsrEngine } from "./asr";
 import { connectionClass, connectionLabel, formatBytes, formatDate } from "./format";
+import { MonitoringPanel } from "./monitoring";
 import type { AdminTab, AuditEvent, AuthStatus, Health, PlatformUser } from "./types";
 
 export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
+  { id: "monitoring", label: "Мониторинг" },
   { id: "llm", label: "LLM" },
   { id: "prompts", label: "Промпты" },
   { id: "asr", label: "Расшифровка" },
@@ -194,7 +196,7 @@ export function AdminSection({
           </button>
         ))}
       </nav>
-      <div className="status-pills" aria-label="Сводка">
+      {tab !== "monitoring" && <div className="status-pills" aria-label="Сводка">
         <span className={`status-pill ${connectionClass(health?.openai)}`}>{connectionLabel(health?.openai)}</span>
         <span className={`status-pill ${health?.ffmpeg ? "ok" : "bad"}`}>
           ffmpeg {health?.ffmpeg ? "найден" : "нет"}
@@ -221,8 +223,10 @@ export function AdminSection({
               : ""}
           </span>
         )}
-      </div>
-      {tab === "users" ? (
+      </div>}
+      {tab === "monitoring" ? (
+        <MonitoringPanel />
+      ) : tab === "users" ? (
         <UsersPanel ldapConfigured={Boolean(health?.ldap?.configured)} />
       ) : tab === "ldap" ? (
         <LdapPanel health={health} onChange={onHealth} />
@@ -693,6 +697,7 @@ function LdapPanel({ health, onChange }: { health: Health | null; onChange: (hea
 }
 
 function adminHeading(tab: AdminTab): { title: string; lead: string } {
+  if (tab === "monitoring") return { title: "Мониторинг", lead: "Текущая обработка встреч и нагрузка на MoM." };
   if (tab === "prompts") return { title: "Промпты и проверка имён", lead: "Инструкции, которые получает LLM при обработке встреч." };
   if (tab === "llm") {
     return {
@@ -907,7 +912,7 @@ function SettingsPanel({
   health,
   onChange,
 }: {
-  topic: Exclude<AdminTab, "users" | "ldap" | "audit" | "prompts">;
+  topic: Exclude<AdminTab, "monitoring" | "users" | "ldap" | "audit" | "prompts">;
   health: Health | null;
   onChange: (health: Health) => void;
 }) {

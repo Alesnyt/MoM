@@ -75,7 +75,7 @@ export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [user, setUser] = useState<UserSession | null>(null);
   const [adminHealth, setAdminHealth] = useState<Health | null>(null);
-  const [adminTab, setAdminTab] = useState<AdminTab>("llm");
+  const [adminTab, setAdminTab] = useState<AdminTab>("monitoring");
   const [railOpen, setRailOpen] = useState(false);
 
   const selected = useMemo(
