@@ -34,7 +34,7 @@ def _dir_size(path: Path) -> int:
 def _recordings_bytes() -> int:
     now = time.monotonic()
     cached_at = float(_recordings_cache["at"])
-    if now - cached_at < 30:
+    if cached_at > 0 and now - cached_at < 30:
         return int(_recordings_cache["bytes"])
     total = _dir_size(config.UPLOAD_DIR) + _dir_size(config.AUDIO_DIR)
     _recordings_cache["at"] = now
