@@ -447,19 +447,18 @@ export async function openMeetingEmail(meeting: Meeting): Promise<string> {
   return payload.mode || "saved";
 }
 
-export async function downloadMarkdown(id: string, title: string): Promise<void> {
-  const response = await fetch(`/api/meetings/${id}/export.md`, { credentials: "include" });
+export async function downloadProtocol(id: string, title: string, format: "docx" | "md"): Promise<void> {
+  const response = await fetch(`/api/meetings/${id}/export.${format}`, { credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
-  const text = await response.text();
-  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${slug(title)}.md`;
+  link.download = `${slug(title)}.${format}`;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function slug(value: string): string {

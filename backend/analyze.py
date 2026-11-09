@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from . import config, prompts
 from .performance import stage_timer
 from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
+from .protocol_text import deduplicate
 
 log = logging.getLogger("mom.llm")
 
@@ -131,7 +132,7 @@ def _parse_result(raw: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Модель вернула не объект")
     try:
-        return ProtocolResult.model_validate(data).model_dump()
+        return deduplicate(ProtocolResult.model_validate(data).model_dump())
     except ValidationError as exc:
         fields = ", ".join(".".join(map(str, error["loc"])) for error in exc.errors())
         raise ValueError(f"Неверная структура протокола от модели: {fields}") from None
@@ -400,7 +401,7 @@ async def analyze_long_transcript(
     return await analyze_transcript(
         client,
         "Ниже несколько частичных протоколов одной встречи. Объедини их в один итоговый JSON "
-        "без дублей, сохранив все поручения и решения.\n\n" + merged_source,
+        "без дублей внутри и между разделами, сохранив отдельные решения и поручения.\n\n" + merged_source,
         title_hint,
         system_prompt=system_prompt,
     )

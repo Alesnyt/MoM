@@ -12,6 +12,7 @@ import stat
 import time
 
 from .config import DB_PATH, ensure_dirs, get_max_jobs, restrict_path
+from .protocol_text import deduplicate
 
 STATUSES = (
     "queued",
@@ -549,7 +550,8 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
     data["progress"] = int(data.get("progress") or 0)
     data["user_id"] = data.get("user_id")
     if body:
-        data["result"] = json.loads(raw) if raw else None
+        result = json.loads(raw) if raw else None
+        data["result"] = deduplicate(result) if isinstance(result, dict) else result
         parsed = json.loads(raw_segments) if raw_segments else {}
         data["speakers"] = parsed.get("speakers") or []
         data["segments"] = parsed.get("segments") or []
