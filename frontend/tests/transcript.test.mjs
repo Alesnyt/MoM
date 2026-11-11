@@ -112,7 +112,7 @@ test('speaker selection filters all pages and composes with search and reassignm
   fireEvent.click(view.getByRole('button', {name:'Следующие реплики'}));
   assert.match(view.getByRole('status').textContent, /51–100 из 5000/);
   assert.match(view.container.querySelector('.turn > p').textContent, /#0050/);
-  const firstSpeaker = view.getByRole('button', {name:'Спикер 1'});
+  const firstSpeaker = view.getByRole('button', {name:'Показать реплики: Спикер 1'});
   fireEvent.click(firstSpeaker);
   assert.equal(firstSpeaker.getAttribute('aria-pressed'), 'true');
   assert.match(view.getByRole('status').textContent, /1–50 из 2500/);
@@ -134,4 +134,57 @@ test('speaker selection filters all pages and composes with search and reassignm
   assert.equal(view.getByRole('status').textContent, 'Реплик не найдено');
   fireEvent.change(view.getByRole('searchbox'), {target:{value:''}});
   assert.equal(view.container.querySelectorAll('.turn').length, 50);
+});
+
+test('AD search is explained before typing, stays visible while waiting, and labels directory results', async () => {
+  const value = meeting();
+  let finish;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /^\/api\/people\?q=/);
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const view = render(React.createElement(TranscriptView, {meeting:value, onUpdated() {}, directoryEnabled:true}));
+  assert.equal(view.getAllByText('Найти сотрудника в AD').length, 2);
+  assert.match(view.getByRole('region', {name:'Назначение спикеров'}).textContent, /Показать реплики.*транскрипт отфильтруется/);
+  const input = view.getByRole('combobox', {name:'Найти сотрудника в AD для Спикер 1'});
+  fireEvent.focus(input);
+  fireEvent.change(input, {target:{value:'Иван'}});
+  assert.ok(view.getByText('Ищем сотрудника в AD…'));
+  assert.equal(input.getAttribute('aria-busy'), 'true');
+  await waitFor(() => assert.ok(finish));
+  await act(async () => finish(response({people:[{name:'Иван Петров',email:'ivan@example.com',source:'ldap',job_title:'Архитектор'}],ldap:true})));
+  assert.equal(view.queryByText('Ищем сотрудника в AD…'), null);
+  assert.equal(input.getAttribute('aria-busy'), 'false');
+  const option = view.getByRole('option', {name:/Иван Петров/});
+  assert.match(option.textContent, /Иван ПетровADАрхитектор/);
+  fireEvent.click(view.getByRole('button', {name:'Показать реплики: Спикер 2'}));
+  assert.ok(view.getByText('✓ Реплики показаны · Сбросить'));
+  assert.match(view.container.querySelector('.transcript-filter').textContent, /Показаны только реплики: Спикер 2/);
+});
+
+test('a failed AD lookup is distinct from no matches and retains saved people', async () => {
+  globalThis.fetch = async () => response({ldap:true,error:'Поиск в AD временно недоступен.',
+    people:[{name:'saved@example.com',email:'saved@example.com',source:'mom'}]});
+  const view = render(React.createElement(TranscriptView, {meeting:meeting(),onUpdated() {},directoryEnabled:true}));
+  fireEvent.change(view.getByRole('combobox', {name:'Найти сотрудника в AD для Спикер 1'}), {target:{value:'saved'}});
+  assert.ok(await view.findByText('Поиск в AD временно недоступен.'));
+  assert.ok(view.getByRole('option', {name:/saved@example.com/}));
+  assert.equal(view.queryByText(/В AD совпадений не найдено/), null);
+});
+
+test('a superseded AD request cannot erase newer matches or leave the spinner running', async () => {
+  const requests = [];
+  globalThis.fetch = (url, options) => new Promise((resolve, reject) => {requests.push({url,options,resolve,reject});});
+  const view = render(React.createElement(TranscriptView, {meeting:meeting(),onUpdated() {},directoryEnabled:true}));
+  const input = view.getByRole('combobox', {name:'Найти сотрудника в AD для Спикер 1'});
+  fireEvent.change(input, {target:{value:'Ан'}});
+  await waitFor(() => assert.equal(requests.length, 1));
+  fireEvent.change(input, {target:{value:'Иван'}});
+  await waitFor(() => assert.equal(requests.length, 2));
+  assert.equal(requests[0].options.signal.aborted, true);
+  await act(async () => requests[1].resolve(response({ldap:true,people:[{name:'Иван Петров',email:'ivan@example.com',source:'ldap'}]})));
+  await act(async () => requests[0].reject(new Error('Old failure')));
+  assert.ok(view.getByRole('option', {name:/Иван Петров/}));
+  assert.equal(view.queryByText('Ищем сотрудника в AD…'), null);
+  assert.equal(view.queryByText(/Поиск недоступен/), null);
 });

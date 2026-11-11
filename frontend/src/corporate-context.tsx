@@ -11,6 +11,8 @@ export function CorporateContextPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [message, setMessage] = useState("");
+  const [syncTime, setSyncTime] = useState("03:00");
+  useEffect(() => { if (data?.sync_time) setSyncTime(data.sync_time); }, [data?.sync_time]);
 
   useEffect(() => {
     if (busy) return;
@@ -21,6 +23,7 @@ export function CorporateContextPanel() {
         if (!controller.signal.aborted) {
           setData(next); setLoadError(null);
           if (next.syncing) timer = window.setTimeout(refresh, 2000);
+          else if (next.sync_ad) timer = window.setTimeout(refresh, 30000);
         }
       }).catch(err => {
         if (!controller.signal.aborted) { setLoadError(err.message); timer = window.setTimeout(refresh, 5000); }
@@ -66,6 +69,19 @@ export function CorporateContextPanel() {
         <label className="context-toggle"><input type="checkbox" checked={data.sync_ad} disabled={busy}
           onChange={event => void update(() => saveCorporateContext(data.enabled, event.target.checked), "Настройки сохранены")} />
           Обновлять AD автоматически раз в сутки</label>
+        <form className="context-schedule" onSubmit={event => {
+          event.preventDefault();
+          void update(() => saveCorporateContext(data.enabled, data.sync_ad, syncTime), "Время синхронизации сохранено");
+        }}>
+          <label>Время запуска <input type="time" required value={syncTime} disabled={busy}
+            onChange={event => setSyncTime(event.target.value)} aria-describedby="ad-sync-clock" /></label>
+          <button type="submit" className="ghost" disabled={busy || !syncTime || syncTime === data.sync_time}>Сохранить время</button>
+        </form>
+        <p id="ad-sync-clock">Ежедневно по московскому времени (UTC+3), независимо от времени на сервере.</p>
+        {data.sync_ad && data.next_sync_at && !data.syncing && <p>Ближайший запуск: {new Intl.DateTimeFormat("ru-RU", {
+          timeZone: "Europe/Moscow", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit",
+        }).format(new Date(data.next_sync_at))} (МСК).{data.sync_error && " Повтор после ошибки."}</p>}
+        {!data.sync_ad && <p>Автоматическая синхронизация выключена. Время сохранится для следующего включения.</p>}
         <div className="composer-row">
           <button type="button" className="ghost" disabled={busy || data.syncing || !data.ldap_configured}
             onClick={() => void update(syncCorporateDirectory, "Сотрудники AD обновлены")}>

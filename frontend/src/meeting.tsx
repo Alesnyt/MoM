@@ -17,6 +17,7 @@ export function MeetingPane({
   meeting,
   tab,
   mailEnabled,
+  directoryEnabled = false,
   onTab,
   onRetry,
   onStop,
@@ -27,6 +28,7 @@ export function MeetingPane({
   meeting: Meeting;
   tab: Tab;
   mailEnabled: boolean;
+  directoryEnabled?: boolean;
   onTab: (tab: Tab) => void;
   onRetry: () => void;
   onStop: () => void;
@@ -168,7 +170,7 @@ export function MeetingPane({
         <ProcessCard meeting={meeting} mailEnabled={mailEnabled} onStop={onStop} onRestart={onRestart} />
       )}
       {meeting.status === "review" && (
-        <SpeakerReview key={meeting.id} meeting={meeting} mailEnabled={mailEnabled} onUpdated={onUpdated} />
+        <SpeakerReview key={meeting.id} meeting={meeting} mailEnabled={mailEnabled} directoryEnabled={directoryEnabled} onUpdated={onUpdated} />
       )}
       {meeting.status === "error" && (
         <div className="error-card">
@@ -182,7 +184,7 @@ export function MeetingPane({
           <strong>Не удалось прочитать сохранённый протокол</strong>
           <p>Ответ модели имеет неверный формат. Сформируйте протокол заново.</p>
           <button onClick={onRetry}>Повторить обработку</button>
-          <TranscriptView meeting={meeting} onUpdated={onUpdated} />
+          <TranscriptView meeting={meeting} onUpdated={onUpdated} directoryEnabled={directoryEnabled} />
         </div>
       )}
       {result && meeting.status === "done" && (
@@ -212,16 +214,17 @@ export function MeetingPane({
             <button className="ghost word-copy" type="button" onClick={() => void copyWord()}>Копировать для Word</button>
             <Minutes meeting={meeting} result={result} contentRef={wordContent} />
           </>}
-          {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} focusSegment={focusSegment} />}
+          {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} directoryEnabled={directoryEnabled} focusSegment={focusSegment} />}
         </>
       )}
     </section>
   );
 }
 
-function SpeakerReview({ meeting, mailEnabled, onUpdated }: {
+function SpeakerReview({ meeting, mailEnabled, directoryEnabled, onUpdated }: {
   meeting: Meeting;
   mailEnabled: boolean;
+  directoryEnabled: boolean;
   onUpdated: (meeting: Meeting) => void;
 }) {
   const [edited, setEdited] = useState(false);
@@ -251,7 +254,7 @@ function SpeakerReview({ meeting, mailEnabled, onUpdated }: {
           submitLabel={edited ? "Собрать протокол" : "Пропустить и собрать протокол"} onSubmit={buildProtocol} />
         {error && <div className="banner" role="alert">{error}</div>}
       </div>
-      <TranscriptView meeting={meeting} disabled={protocolBusy} onBusyChange={setSpeakerBusy}
+      <TranscriptView meeting={meeting} disabled={protocolBusy} onBusyChange={setSpeakerBusy} directoryEnabled={directoryEnabled}
         onUpdated={(next) => {
           setEdited(true);
           onUpdated(next);

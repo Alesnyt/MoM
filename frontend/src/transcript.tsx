@@ -53,11 +53,13 @@ function SpeakerNameEditor({
   speaker,
   taken,
   disabled,
+  directoryEnabled,
   onRename,
 }: {
   speaker: Speaker;
   taken: string[];
   disabled: boolean;
+  directoryEnabled: boolean;
   onRename: (speakerId: string, name: string, email?: string, jobTitle?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(speaker.name);
@@ -65,7 +67,9 @@ function SpeakerNameEditor({
   const [people, setPeople] = useState<Person[]>([]);
   const [searchState, setSearchState] = useState<"idle" | "loading" | "empty" | "error">("idle");
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const listId = useId();
+  const inputId = useId();
   const activeOption = useRef<HTMLButtonElement>(null);
   const savingRef = useRef(false);
   const defaultName = /^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : null;
@@ -79,17 +83,19 @@ function SpeakerNameEditor({
   useEffect(() => {
     const query = draft.trim();
     if (!open || disabled || query.length < 2 || query === speaker.name.trim()) {
-      setPeople([]); setSearchState("idle"); setActiveIndex(-1);
+      setPeople([]); setSearchState("idle"); setActiveIndex(-1); setDirectoryError(null);
       return;
     }
     const controller = new AbortController();
     let active = true;
     setSearchState("loading");
+    setDirectoryError(null);
     const handle = window.setTimeout(() => {
       listPeople(query, controller.signal)
-        .then((found) => {
+        .then((result) => {
           if (!active) return;
-          setPeople(found); setActiveIndex(-1); setSearchState(found.length ? "idle" : "empty");
+          setPeople(result.people); setActiveIndex(-1); setDirectoryError(result.error || null);
+          setSearchState(result.error ? "error" : result.people.length ? "idle" : "empty");
         })
         .catch(() => {
           if (!active) return;
@@ -102,7 +108,7 @@ function SpeakerNameEditor({
   useEffect(() => { activeOption.current?.scrollIntoView({ block: "nearest" }); }, [activeIndex]);
 
   function closeList() {
-    setOpen(false); setPeople([]); setActiveIndex(-1); setSearchState("idle");
+    setOpen(false); setPeople([]); setActiveIndex(-1); setSearchState("idle"); setDirectoryError(null);
   }
 
   function choose(person: Person) {
@@ -146,37 +152,77 @@ function SpeakerNameEditor({
           void save();
         }}
       >
-        <input
-          className="speaker-edit"
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={open && (people.length > 0 || searchState !== "idle")}
-          aria-controls={listId}
-          aria-activedescendant={open && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
-          autoComplete="off"
-          value={draft}
-          disabled={disabled}
-          aria-label={`Имя спикера ${speaker.name}`}
-          placeholder="Имя из каталога или своё"
-          onFocus={() => setOpen(true)}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setPeople([]); setActiveIndex(-1);
-            setOpen(true);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.preventDefault();
-              setDraft(speaker.name); closeList();
-            } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && people.length) {
-              event.preventDefault(); setOpen(true);
-              setActiveIndex((current) => event.key === "ArrowDown"
-                ? (current + 1) % people.length : (current <= 0 ? people.length - 1 : current - 1));
-            } else if (event.key === "Enter" && open && activeIndex >= 0 && people[activeIndex]) {
-              event.preventDefault(); choose(people[activeIndex]);
-            }
-          }}
-        />
+        <div className="speaker-name-field">
+          <label htmlFor={inputId}>{directoryEnabled ? "Найти сотрудника в AD" : "Имя спикера"}</label>
+          <div className="speaker-input-wrap">
+            <input
+              id={inputId}
+              className="speaker-edit"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={open && people.length > 0}
+              aria-controls={open && people.length > 0 ? listId : undefined}
+              aria-describedby={`${inputId}-hint`}
+              aria-busy={open && searchState === "loading"}
+              aria-activedescendant={open && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
+              autoComplete="off"
+              value={draft}
+              disabled={disabled}
+              aria-label={directoryEnabled ? `Найти сотрудника в AD для ${speaker.name}` : `Имя спикера ${speaker.name}`}
+              placeholder={directoryEnabled ? "Начните вводить ФИО" : "Введите имя или email"}
+              onFocus={(event) => {
+                setOpen(true);
+                if (draft === defaultName) event.currentTarget.select();
+              }}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setPeople([]); setActiveIndex(-1);
+                setOpen(true);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setDraft(speaker.name); closeList();
+                } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && people.length) {
+                  event.preventDefault(); setOpen(true);
+                  setActiveIndex((current) => event.key === "ArrowDown"
+                    ? (current + 1) % people.length : (current <= 0 ? people.length - 1 : current - 1));
+                } else if (event.key === "Enter" && open && activeIndex >= 0 && people[activeIndex]) {
+                  event.preventDefault(); choose(people[activeIndex]);
+                }
+              }}
+            />
+            {open && searchState === "loading" && <span className="speaker-input-spinner speaker-search-spinner" aria-hidden="true" />}
+          </div>
+          <p className="speaker-input-hint" id={`${inputId}-hint`}>
+            {directoryEnabled ? "Введите от 2 букв ФИО и выберите сотрудника из списка." : "Выберите сохранённого пользователя или введите имя вручную."}
+          </p>
+          {open && searchState === "loading" && <div className="speaker-search-status" role="status">
+            <span className="speaker-search-spinner" aria-hidden="true" />
+            {directoryEnabled ? "Ищем сотрудника в AD…" : "Ищем сохранённого пользователя…"}
+          </div>}
+          {open && (people.length > 0 || searchState === "empty" || searchState === "error") && (
+            <div className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
+              {searchState === "empty" && <div className="speaker-search-note" role="status">{directoryEnabled ? "В AD совпадений не найдено." : "Совпадений нет."} Уточните ФИО или сохраните имя вручную.</div>}
+              {searchState === "error" && <div className="speaker-search-note" role="status">{directoryError || "Поиск недоступен. Можно сохранить имя вручную."}</div>}
+              <ul id={listId} role="listbox" aria-label="Имена из каталога" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {people.map((person, index) => (
+                  <li key={`${person.source}-${person.email || person.name}-${index}`} role="presentation">
+                    <button id={`${listId}-${index}`} type="button" role="option" tabIndex={-1}
+                      ref={index === activeIndex ? activeOption : undefined}
+                      aria-selected={index === activeIndex} disabled={disabled}
+                      onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(person)}>
+                      <span className="speaker-suggest-name"><strong>{person.name}</strong>
+                        <span className="speaker-source">{person.source === "ldap" ? "AD" : "MoM"}</span></span>
+                      {person.job_title && <small>{person.job_title}</small>}
+                      {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
         <button
           className="ghost"
           type="submit"
@@ -199,27 +245,6 @@ function SpeakerNameEditor({
           </button>
         )}
       </form>
-      {open && (people.length > 0 || searchState !== "idle") && (
-        <div className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
-          {searchState === "loading" && <div className="speaker-search-note" role="status">Поиск в каталоге…</div>}
-          {searchState === "empty" && <div className="speaker-search-note" role="status">Совпадений нет. Можно сохранить имя вручную.</div>}
-          {searchState === "error" && <div className="speaker-search-note" role="status">Поиск недоступен. Можно сохранить имя вручную.</div>}
-          <ul id={listId} role="listbox" aria-label="Имена из каталога" style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {people.map((person, index) => (
-              <li key={`${person.source}-${person.email || person.name}-${index}`} role="presentation">
-                <button id={`${listId}-${index}`} type="button" role="option" tabIndex={-1}
-                  ref={index === activeIndex ? activeOption : undefined}
-                  aria-selected={index === activeIndex} disabled={disabled}
-                  onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(person)}>
-                  <strong>{person.name}</strong>
-                  {person.job_title && <small>{person.job_title}</small>}
-                  {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }
@@ -230,12 +255,14 @@ export function TranscriptView({
   disabled = false,
   onBusyChange,
   focusSegment,
+  directoryEnabled = false,
 }: {
   meeting: Meeting;
   onUpdated: (meeting: Meeting) => void;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
   focusSegment?: number;
+  directoryEnabled?: boolean;
 }) {
   const segments = meeting.segments || [];
   const speakers = meeting.speakers || [];
@@ -324,20 +351,26 @@ export function TranscriptView({
         <section className="speaker-panel" aria-labelledby={speakersHeadingId}>
           <h2 id={speakersHeadingId}>Назначение спикеров</h2>
           {namedSpeakers.length > 0
-            ? <p className="speaker-hint">Нажмите на спикера, чтобы увидеть его реплики.</p>
+            ? <div className="speaker-instructions">
+                <p><strong>1. Назначьте имя.</strong> {directoryEnabled ? "Найдите коллегу по ФИО в корпоративном каталоге AD." : "Выберите пользователя или введите имя."}</p>
+                <p><strong>2. Проверьте фразы.</strong> Нажмите «Показать реплики» у спикера — транскрипт отфильтруется.</p>
+              </div>
             : <p className="speaker-hint">Назначьте спикеров в транскрипте.</p>}
           <div className="speaker-roster">
             {namedSpeakers.map((speaker) => (
               <div className={`speaker-card${speakerFilter === speaker.id ? " speaker-card--selected" : ""}`}
                 key={speaker.id} style={{ borderLeftColor: speakerColor(speaker.id) }}>
                 <button className="speaker-filter-button" type="button" aria-pressed={speakerFilter === speaker.id}
+                  aria-label={`${speakerFilter === speaker.id ? "Сбросить фильтр" : "Показать реплики"}: ${speaker.name}`}
                   aria-controls={turnsId} onClick={() => filterBySpeaker(speaker.id)}>
-                  {/^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : speaker.name}
+                  <strong>{/^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : speaker.name}</strong>
+                  <span className="speaker-filter-action">{speakerFilter === speaker.id ? "✓ Реплики показаны · Сбросить" : "Показать реплики →"}</span>
                 </button>
                 <SpeakerNameEditor
                   speaker={speaker}
                   taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
                   disabled={busy || disabled}
+                  directoryEnabled={directoryEnabled}
                   onRename={saveName}
                 />
                 {speaker.job_title && <p className="speaker-hint">{speaker.job_title}</p>}
@@ -403,7 +436,7 @@ function TranscriptTurns({
   return <>
     <div className="transcript-controls">
       {speakerFilter !== null && <div className="transcript-filter">
-        <strong>{names.get(speakerFilter) || speakerFilter}</strong>
+        <span>Показаны только реплики: <strong>{names.get(speakerFilter) || speakerFilter}</strong></span>
         <button type="button" className="ghost" onClick={() => {
           listRef.current?.focus({ preventScroll: true });
           onClearFilter();

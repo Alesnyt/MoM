@@ -1,5 +1,6 @@
 import io
 import time
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -149,9 +150,14 @@ def test_admin_routes_require_admin_and_failed_import_keeps_dictionary(db):
     assert response.status_code == 400
     assert client.get("/api/admin/context?q=true").json()["matched_terms"] == 1
     assert client.post("/api/admin/context/settings", json={"enabled": False, "sync_ad": False}).status_code == 200
+    for invalid in ["25:00", "09:30\n", "0١:30"]:
+        assert client.post("/api/admin/context/settings", json={"enabled": True, "sync_ad": True, "sync_time": invalid}).status_code == 422
+    assert client.post("/api/admin/context/settings", json={"enabled": True, "sync_ad": True, "sync_time": "23:45"}).json()["sync_time"] == "23:45"
+    assert client.post("/api/admin/context/settings", json={"enabled": False, "sync_ad": True}).json()["sync_time"] == "23:45"
 
 
 def test_directory_lease_coordinates_workers_and_discards_expired_owner(db, monkeypatch):
+    monkeypatch.setattr(cc.time, "time", lambda: datetime.fromisoformat("2026-11-11T12:00:00+03:00").timestamp())
     first, signature = cc._claim_sync(False)
     assert cc.snapshot()["syncing"]
     with pytest.raises(ValueError, match="уже выполняется"):
@@ -168,6 +174,67 @@ def test_directory_lease_coordinates_workers_and_discards_expired_owner(db, monk
     assert cc._claim_sync(True) is None
     directory_scope.save("selected", [])
     assert cc._claim_sync(True) is not None
+
+
+def test_sync_calendar_time_manual_run_and_restart(db, monkeypatch):
+    clock = [datetime.fromisoformat("2026-11-11T06:00:00+03:00").timestamp()]
+    monkeypatch.setattr(cc.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [])
+    cc.save_settings(True, True, "admin", sync_time="09:30")
+    assert cc.snapshot()["next_sync_at"] == "2026-11-11T06:30:00+00:00"
+    cc.sync_directory()  # Manual run does not move the configured daily time.
+    assert cc.snapshot()["next_sync_at"] == "2026-11-11T06:30:00+00:00"
+    clock[0] = datetime.fromisoformat("2026-11-11T09:29:59+03:00").timestamp()
+    assert cc.sync_directory(scheduled=True) == {}
+    clock[0] += 1
+    assert cc.sync_directory(scheduled=True)["sync_time"] == "09:30"
+    assert cc.sync_directory(scheduled=True) == {}
+    store.init_db()  # No scheduling state relies on the current worker process.
+    assert cc.snapshot()["next_sync_at"] == "2026-11-12T06:30:00+00:00"
+    clock[0] = datetime.fromisoformat("2026-11-12T10:00:00+03:00").timestamp()
+    assert cc.sync_directory(scheduled=True)["sync_time"] == "09:30"  # Catch up once after downtime.
+    assert cc.snapshot()["next_sync_at"] == "2026-11-13T06:30:00+00:00"
+
+
+def test_schedule_change_midnight_disabled_mode_and_retry(db, monkeypatch):
+    clock = [datetime.fromisoformat("2026-11-11T18:00:00+03:00").timestamp()]
+    monkeypatch.setattr(cc.time, "time", lambda: clock[0])
+    cc.save_settings(True, True, "admin", sync_time="00:15")
+    assert cc.snapshot()["next_sync_at"] == "2026-11-11T21:15:00+00:00"
+    assert cc.sync_directory(scheduled=True) == {}
+    def unavailable():
+        raise ldap_auth.LdapError("Каталог недоступен")
+    monkeypatch.setattr(ldap_auth, "sync_people", unavailable)
+    clock[0] = datetime.fromisoformat("2026-11-12T00:15:00+03:00").timestamp()
+    with pytest.raises(ldap_auth.LdapError):
+        cc.sync_directory(scheduled=True)
+    assert cc.snapshot()["next_sync_at"] == "2026-11-11T21:30:00+00:00"
+    assert cc.sync_directory(scheduled=True) == {}
+    clock[0] += 900
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [])
+    assert cc.sync_directory(scheduled=True)["sync_error"] is None
+    cc.save_settings(True, False, "admin")
+    assert cc.snapshot()["sync_time"] == "00:15"
+    assert cc.snapshot()["next_sync_at"] is None
+    assert cc.sync_directory(scheduled=True) == {}
+    cc.save_settings(True, True, "admin")
+    assert cc.snapshot()["next_sync_at"] == "2026-11-12T21:15:00+00:00"
+    for invalid in ["24:00", "1:30", "12:60", "09:30\n", ""]:
+        with pytest.raises(ValueError):
+            cc.save_settings(True, True, "admin", sync_time=invalid)
+
+
+def test_people_lookup_reports_ad_failure_without_hiding_saved_users(db, monkeypatch):
+    from backend import people
+    monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
+    def unavailable(_query):
+        raise ldap_auth.LdapError("Private server diagnostics")
+    monkeypatch.setattr(ldap_auth, "search_people", unavailable)
+    result = people.suggest("anna")
+    assert result["ldap"] is True
+    assert result["people"][0]["email"] == "anna@example.com"
+    assert "AD временно недоступен" in result["error"]
+    assert "Private" not in result["error"]
 
 
 def test_large_department_does_not_displace_dictionary_and_surnames_need_unique_matches():

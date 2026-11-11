@@ -12,6 +12,7 @@ const {CorporateContextPanel} = loadSource('corporate-context.tsx');
 const originalFetch = globalThis.fetch;
 afterEach(() => {cleanup(); globalThis.fetch = originalFetch;});
 const initial = {enabled:true,sync_ad:true,revision:1,term_count:1,people_count:20,directory_current:true,
+  sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
   ldap_configured:true,synced_at:null,imported_at:null,sync_error:null,syncing:false,matched_terms:1,
   terms:[{term:'TrueConf',aliases:['труконф'],description:'Видеоконференции',department:''}]};
 
@@ -32,6 +33,31 @@ test('dictionary import errors remain visible and leave the previous dictionary 
   await waitFor(() => assert.ok(reads > 1));
   assert.equal(view.getByRole('alert').textContent, 'Нужен столбец «Термин»');
   assert.ok(view.getByText('TrueConf'));
+});
+
+test('admin can persist a daily sync time without changing it during other settings updates', async () => {
+  let current = {...initial}, writes = [];
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/admin/context/settings') {
+      const body = JSON.parse(options.body); writes.push(body); current = {...current,...body};
+    }
+    return Response.json(current);
+  };
+  const view = render(React.createElement(CorporateContextPanel));
+  const input = await view.findByLabelText('Время запуска');
+  assert.equal(input.value, '03:00');
+  assert.ok(view.getByText(/московскому времени \(UTC\+3\)/));
+  assert.match(view.getByText(/Ближайший запуск/).textContent, /03:00/);
+  fireEvent.change(input, {target:{value:'23:15'}});
+  fireEvent.submit(view.getByRole('button', {name:'Сохранить время'}).closest('form'));
+  await waitFor(() => assert.equal(current.sync_time, '23:15'));
+  const toggle = view.getByRole('checkbox', {name:/Обновлять AD автоматически/});
+  await waitFor(() => assert.equal(toggle.disabled, false));
+  fireEvent.click(toggle);
+  await waitFor(() => assert.equal(current.sync_ad, false));
+  assert.equal(current.sync_time, '23:15');
+  assert.equal(writes[1].sync_time, undefined);
+  assert.ok(await view.findByText(/Автоматическая синхронизация выключена/));
 });
 
 test('admin can disable context and trigger directory synchronization', async () => {

@@ -55,6 +55,7 @@ class SettingsIn(BaseModel):
 class ContextSettingsIn(BaseModel):
     enabled: bool
     sync_ad: bool
+    sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
 class PromptsIn(BaseModel):
@@ -377,7 +378,7 @@ def get_context(q: str = Query(default="", max_length=200), _admin: dict = Depen
 
 @app.post("/api/admin/context/settings")
 def save_context(payload: ContextSettingsIn, admin: dict = Depends(require_admin)) -> dict:
-    return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"])
+    return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"], sync_time=payload.sync_time)
 
 
 @app.post("/api/admin/context/sync")
