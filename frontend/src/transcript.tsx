@@ -58,7 +58,7 @@ function SpeakerNameEditor({
   speaker: Speaker;
   taken: string[];
   disabled: boolean;
-  onRename: (speakerId: string, name: string, email?: string) => Promise<void>;
+  onRename: (speakerId: string, name: string, email?: string, jobTitle?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(speaker.name);
   const [open, setOpen] = useState(false);
@@ -108,13 +108,14 @@ function SpeakerNameEditor({
   function choose(person: Person) {
     setDraft(person.name);
     closeList();
-    void save(person.name, person.email);
+    void save(person.name, person.email, false, person.job_title || "");
   }
 
-  async function save(next = draft, email?: string, reset = false) {
+  async function save(next = draft, email?: string, reset = false, jobTitle?: string) {
     if (disabled || savingRef.current) return;
     const cleaned = next.trim();
-    if (!cleaned || (cleaned === speaker.name.trim() && (email === undefined || email === speaker.email))) {
+    if (!cleaned || (cleaned === speaker.name.trim() && (email === undefined || email === speaker.email)
+        && (jobTitle === undefined || jobTitle === (speaker.job_title || "")))) {
       setDraft(speaker.name);
       closeList();
       return;
@@ -122,7 +123,7 @@ function SpeakerNameEditor({
     const unique = reset ? cleaned : distinctName(cleaned, email, taken);
     savingRef.current = true;
     try {
-      await onRename(speaker.id, unique, reset ? undefined : email);
+      await onRename(speaker.id, unique, reset ? undefined : email, jobTitle);
       if (reset) setDraft(unique);
       closeList();
     } catch {
@@ -211,6 +212,7 @@ function SpeakerNameEditor({
                   aria-selected={index === activeIndex} disabled={disabled}
                   onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(person)}>
                   <strong>{person.name}</strong>
+                  {person.job_title && <small>{person.job_title}</small>}
                   {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
                 </button>
               </li>
@@ -274,12 +276,12 @@ export function TranscriptView({
   const namedSpeakers = speakers.filter((item) => item.id !== "unknown" && item.name !== "Неясно");
   const hasUnclear = namedSpeakers.length !== speakers.length;
 
-  async function saveName(speakerId: string, name: string, email?: string) {
+  async function saveName(speakerId: string, name: string, email?: string, jobTitle?: string) {
     setBusy(true);
     onBusyChange?.(true);
     setError(null);
     try {
-      onUpdated(await renameSpeaker(meeting.id, speakerId, name, email));
+      onUpdated(await renameSpeaker(meeting.id, speakerId, name, email, jobTitle));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось переименовать спикера");
       throw err;
@@ -333,6 +335,7 @@ export function TranscriptView({
                   disabled={busy || disabled}
                   onRename={saveName}
                 />
+                {speaker.job_title && <p className="speaker-hint">{speaker.job_title}</p>}
                 {(examples.get(speaker.id) || []).map((turn) => (
                   <blockquote className="speaker-example" key={turn.indexes[0]}>
                     {turn.start !== null && <time>{formatClock(turn.start)}</time>}

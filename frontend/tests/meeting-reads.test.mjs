@@ -9,6 +9,7 @@ Object.assign(globalThis, { window:dom.window, document:dom.window.document,
 const React = await import('react');
 const {render,fireEvent,waitFor,cleanup,act} = await import('@testing-library/react');
 const {default: App} = loadSource('App.tsx');
+const {resolveAppearance} = loadSource('appearance.ts');
 const originalFetch = globalThis.fetch;
 afterEach(() => { cleanup(); globalThis.fetch=originalFetch; });
 const response = value => new Response(JSON.stringify(value), {headers:{'Content-Type':'application/json'}});
@@ -24,6 +25,29 @@ function mockApi(handler) {
     return handler(url,options);
   };
 }
+
+test('appearance switches at local time boundaries and manual selection survives a reload', async () => {
+  const at = (hour, minute = 0) => new Date(2026, 10, 11, hour, minute);
+  assert.equal(resolveAppearance('auto', at(6, 59)), 'dark');
+  assert.equal(resolveAppearance('auto', at(7)), 'light');
+  assert.equal(resolveAppearance('auto', at(18, 59)), 'light');
+  assert.equal(resolveAppearance('auto', at(19)), 'dark');
+  assert.equal(resolveAppearance('light', at(23)), 'light');
+  mockApi(() => response([]));
+  const view = render(React.createElement(App));
+  try {
+    fireEvent.change(view.getByRole('combobox', {name: 'Тема'}), {target: {value: 'dark'}});
+    assert.equal(document.documentElement.dataset.appearance, 'dark');
+    view.unmount();
+    const reloaded = render(React.createElement(App));
+    assert.equal(reloaded.getByRole('combobox', {name: 'Тема'}).value, 'dark');
+    fireEvent.change(reloaded.getByRole('combobox', {name: 'Тема'}), {target: {value: 'light'}});
+    assert.equal(document.documentElement.dataset.appearance, 'light');
+    await act(async () => {});
+  } finally {
+    window.localStorage.clear();
+  }
+});
 
 test('review details load once while another job continues polling', async () => {
   let detailCalls=0,finishDetail,polls=0;

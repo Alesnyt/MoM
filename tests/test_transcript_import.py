@@ -130,6 +130,7 @@ def test_auth_and_owner_isolation(client):
     assert client.get("/api/meetings").json() == []
     for method, suffix, kwargs in [
         ("get", "", {}), ("delete", "", {}), ("get", "/export.md", {}), ("get", "/export.docx", {}),
+        ("get", "/email.eml", {}),
         ("post", "/protocol", {}), ("post", "/retry", {}), ("post", "/restart", {}),
         ("patch", "/speakers/S1", {"json": {"name": "Changed"}}),
         ("patch", "/segments", {"json": {"speaker_id": "S1", "segment_indexes": [0]}}),
@@ -138,6 +139,7 @@ def test_auth_and_owner_isolation(client):
     client.cookies.clear()
     assert client.post("/api/meetings/transcript", data={"text": "А: Б"}).status_code == 401
     assert client.get(path + "/export.docx").status_code == 401
+    assert client.get(path + "/email.eml").status_code == 401
 
 
 def test_word_export_contains_the_protocol_and_preserves_russian_text(client):

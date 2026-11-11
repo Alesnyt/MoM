@@ -8,15 +8,21 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .pipeline import format_duration
+from .audio import format_duration
+from .speakers import participant_labels
 
 MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
-_PRIORITY = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}
+PRIORITY_LABELS = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}
 
 
 def _text(value: str) -> str:
     return _INVALID_XML.sub("", value)
+
+
+def docx_filename(title: str) -> str:
+    name = " ".join("".join(char if char.isalnum() or char in " -_" else " " for char in title).split())[:80]
+    return f"{name or 'Протокол'}.docx"
 
 
 def to_docx(meeting: dict, result: dict) -> bytes:
@@ -50,8 +56,8 @@ def to_docx(meeting: dict, result: dict) -> bytes:
         document.add_paragraph("Дата встречи: " + _text(result["date_hint"]))
     if duration := format_duration(meeting.get("duration_seconds")):
         document.add_paragraph("Длительность: " + duration)
-    if result["participants"]:
-        document.add_paragraph("Участники: " + _text(", ".join(result["participants"])))
+    if participants := participant_labels(meeting, result):
+        document.add_paragraph("Участники: " + _text(", ".join(participants)))
 
     document.add_heading("Саммари", 1)
     summary_lines = [line.strip() for line in result["summary"].splitlines() if line.strip()]
@@ -76,7 +82,7 @@ def to_docx(meeting: dict, result: dict) -> bytes:
             cell.paragraphs[0].add_run(label).bold = True
             cell.paragraphs[0].paragraph_format.space_after = Pt(3)
         for item in result["action_items"]:
-            values = (item["task"], item["assignee"] or "Не назначен", item["due"] or "Не указан", _PRIORITY[item["priority"]])
+            values = (item["task"], item["assignee"] or "Не назначен", item["due"] or "Не указан", PRIORITY_LABELS[item["priority"]])
             row = table.add_row()
             row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
             for cell, value in zip(row.cells, values):

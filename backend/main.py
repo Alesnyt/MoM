@@ -26,9 +26,9 @@ from . import transcript_import, upload
 from . import word_protocol
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
-from .mail import email_body, open_or_save_eml, send_mail, smtp_snapshot
+from .mail import build_eml, email_body, open_or_save_eml, send_mail, smtp_snapshot
 from .pipeline import format_duration
-from .speakers import SpeakerError, reassign_segments, rename_speaker, render_transcript, replace_speaker_label, select_protocol_recipients
+from .speakers import SpeakerError, participant_labels, reassign_segments, rename_speaker, render_transcript, replace_speaker_label, select_protocol_recipients
 
 log = logging.getLogger("mom.api")
 
@@ -105,6 +105,7 @@ class LdapTestIn(BaseModel):
 class SpeakerNameIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     email: str | None = Field(default=None, max_length=254)
+    job_title: str | None = Field(default=None, max_length=200)
 
 
 class ProtocolRecipientIn(BaseModel):
@@ -1149,7 +1150,9 @@ def rename_meeting_speaker(
         meeting = _owned(row, user)
         document = _segments_doc(meeting)
         try:
-            updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name, payload.email)
+            updated, old_name, new_name = rename_speaker(
+                document, speaker_id, payload.name, payload.email, job_title=payload.job_title,
+            )
         except SpeakerError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _save_segments(
@@ -1218,9 +1221,7 @@ def export_word(meeting_id: str, user: dict = Depends(require_user)) -> Response
         result = ProtocolResult.model_validate(meeting["result"]).model_dump()
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
-    title = result["title"] or meeting["title"]
-    name = " ".join("".join(char if char.isalnum() or char in " -_" else " " for char in title).split())[:80]
-    filename = quote(f"{name or 'Протокол'}.docx", safe="")
+    filename = quote(word_protocol.docx_filename(result["title"] or meeting["title"]), safe="")
     return Response(word_protocol.to_docx(meeting, result), media_type=word_protocol.MEDIA_TYPE, headers={
         "Content-Disposition": f"attachment; filename=protocol.docx; filename*=UTF-8''{filename}",
         "Cache-Control": "no-store",
@@ -1235,12 +1236,30 @@ def meeting_email_text(meeting_id: str, user: dict = Depends(require_user)) -> s
     return email_body(meeting)
 
 
+@app.get("/api/meetings/{meeting_id}/email.eml", response_class=Response)
+def download_meeting_email(meeting_id: str, user: dict = Depends(require_user)) -> Response:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    if meeting["status"] != "done" or not meeting.get("result"):
+        raise HTTPException(status_code=409, detail="Протокол ещё не готов")
+    try:
+        draft = build_eml(meeting)
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
+    store.record_audit(_actor_name(user), "email.open", meeting_id, "скачан черновик с протоколом")
+    return Response(draft, media_type="message/rfc822", headers={
+        "Content-Disposition": 'attachment; filename="protocol.eml"', "Cache-Control": "no-store",
+    })
+
+
 @app.post("/api/meetings/{meeting_id}/email")
 def send_meeting_email(meeting_id: str, user: dict = Depends(require_user)) -> dict:
     meeting = _owned(store.get_meeting(meeting_id), user)
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
-    opened = open_or_save_eml(meeting)
+    try:
+        opened = open_or_save_eml(meeting)
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
     store.record_audit(
         _actor_name(user),
         "email.open",
@@ -1262,8 +1281,8 @@ def to_markdown(meeting: dict) -> str:
         lines.append(f"- Длительность: {duration}")
     if result.get("date_hint"):
         lines.append(f"- Дата из обсуждения: {result['date_hint']}")
-    if result.get("participants"):
-        lines.append("- Участники: " + ", ".join(result["participants"]))
+    if participants := participant_labels(meeting, result):
+        lines.append("- Участники: " + ", ".join(participants))
     lines += ["", "## Саммари", "", result.get("summary") or "—", ""]
 
     if result.get("key_points"):

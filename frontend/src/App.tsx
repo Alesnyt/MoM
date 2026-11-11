@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { AdminSection } from "./admin";
+import { loadAppearance, resolveAppearance, saveAppearance, type Appearance } from "./appearance";
 import {
   createMeeting,
   createTranscript,
@@ -79,6 +80,7 @@ export default function App() {
   const [adminHealth, setAdminHealth] = useState<Health | null>(null);
   const [adminTab, setAdminTab] = useState<AdminTab>("monitoring");
   const [railOpen, setRailOpen] = useState(false);
+  const [appearance, setAppearance] = useState(loadAppearance);
 
   const selected = useMemo(
     () => meetings.find((item) => item.id === selectedId) ?? null,
@@ -141,6 +143,18 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = health?.theme === "t2" ? "t2" : "classic";
   }, [health?.theme]);
+
+  useEffect(() => {
+    const sync = () => { document.documentElement.dataset.appearance = resolveAppearance(appearance, new Date()); };
+    sync();
+    if (appearance !== "auto") return;
+    const timer = window.setInterval(sync, 30_000);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [appearance]);
 
   useEffect(() => {
     if (!composing && !meetings.some((item) => item.id === selectedId) && meetings.length > 0) {
@@ -302,6 +316,18 @@ export default function App() {
         <p className={`top-status ${userReady ? "ok" : "missing"}`}>
           {userReady ? `${user?.email}` : "Нет входа в профиль"}
         </p>
+        <label className="appearance-picker">
+          <span>Тема</span>
+          <select title="В режиме «По времени» светлая тема с 07:00 до 19:00 по часам устройства" value={appearance} onChange={(event) => {
+            const value = event.target.value as Appearance;
+            saveAppearance(value);
+            setAppearance(value);
+          }}>
+            <option value="auto">По времени</option>
+            <option value="light">Светлая</option>
+            <option value="dark">Тёмная</option>
+          </select>
+        </label>
         <button type="button" className={`top-key ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
           {health ? connectionLabel(openai) : "Проверяю ключ"}
         </button>

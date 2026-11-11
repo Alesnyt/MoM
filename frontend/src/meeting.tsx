@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { downloadProtocol, getEmailBody, openMeetingEmail, startProtocol } from "./api";
+import { downloadMeetingEmail, downloadProtocol, getEmailBody, startProtocol } from "./api";
 import { copyForWord } from "./copy";
 import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
 import { isProtocolResult } from "./protocol";
@@ -35,7 +35,13 @@ export function MeetingPane({
   onUpdated: (meeting: Meeting) => void;
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
-  const result = isProtocolResult(meeting.result) ? meeting.result : null;
+  const rawResult = isProtocolResult(meeting.result) ? meeting.result : null;
+  const roles = new Map((meeting.speakers || []).filter((speaker) => speaker.job_title)
+    .map((speaker) => [speaker.name.toLocaleLowerCase(), speaker.job_title]));
+  const result = rawResult && { ...rawResult, participants: rawResult.participants.map((name) => {
+    const role = roles.get(name.toLocaleLowerCase());
+    return role ? `${name} — ${role}` : name;
+  }) };
   const wide = meeting.status === "review" || (meeting.status === "done" && (tab === "transcript" || !result));
   const [mailNote, setMailNote] = useState<string | null>(null);
   const wordContent = useRef<HTMLElement>(null);
@@ -69,17 +75,16 @@ export function MeetingPane({
     }
   }
 
-  async function sendByEmail() {
+  async function downloadEmail() {
     setMailNote(null);
-    const mode = await openMeetingEmail(meeting);
-    if (mode === "opened-outlook") {
-      setMailNote("Черновик открыт в Outlook. Текст письма также скопирован в буфер.");
-    } else if (mode === "opened-mail") {
-      setMailNote(
-        "Открыто в Почте Apple — Outlook на Mac блокирует скачанные .eml. Текст скопирован: Новое письмо → вставить.",
-      );
-    } else if (mode === "opened" || mode === "saved") {
-      setMailNote("Текст письма скопирован в буфер. Вставьте его в новое письмо Outlook.");
+    setDownloading(true);
+    try {
+      await downloadMeetingEmail(meeting);
+      setMailNote("Письмо скачано. Откройте файл .eml в почтовом клиенте, чтобы переслать его с протоколом Word.");
+    } catch (err) {
+      setMailNote(err instanceof Error ? err.message : "Не удалось скачать письмо.");
+    } finally {
+      setDownloading(false);
     }
   }
 
@@ -129,10 +134,10 @@ export function MeetingPane({
               <button
                 className="ghost"
                 type="button"
-                title="Откроет почту. Длинный протокол не скачивается как .eml — Apple иначе блокирует файл."
-                onClick={() => void sendByEmail()}
+                disabled={downloading}
+                onClick={() => void downloadEmail()}
               >
-                Отправить письмом
+                Скачать письмо с Word
               </button>
               <button
                 className="ghost"

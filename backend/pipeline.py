@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import shutil
 import time
 from pathlib import Path
@@ -18,7 +17,7 @@ from .analyze import (
     transcribe_file,
 )
 from . import config
-from .audio import AudioError, extract_audio_async, extract_wav, split_audio_async
+from .audio import AudioError, extract_audio_async, extract_wav, format_duration, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import complete_protocol
 from .diarize import DiarizeUnavailable, apply_diarization, available as diarization_available, diarize_turns
@@ -68,7 +67,10 @@ def _clock(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-async def _analyze_with_heartbeat(client, transcript: str, title: str, progress: _Progress, prefix: str):
+async def _analyze_with_heartbeat(
+    client, transcript: str, title: str, progress: _Progress, prefix: str,
+    participant_roles: list[dict[str, str]] | None = None,
+):
     start = time.monotonic()
     stop = asyncio.Event()
 
@@ -102,7 +104,7 @@ async def _analyze_with_heartbeat(client, transcript: str, title: str, progress:
                 force=True,
             )
 
-        return await analyze_long_transcript(client, transcript, title, on_part=on_part)
+        return await analyze_long_transcript(client, transcript, title, on_part=on_part, participant_roles=participant_roles)
     finally:
         stop.set()
         await task
@@ -305,8 +307,10 @@ async def _process_meeting(meeting_id: str) -> None:
         progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
         log.info("шаг: протокол model=%s", config.get_chat_model())
         protocol_input = render_transcript(document, numbered=True) if document["segments"] else transcript
+        roles = [{"name": speaker["name"], "job_title": speaker["job_title"]}
+                 for speaker in document["speakers"] if speaker.get("job_title")]
         with stage_timer("protocol"):
-            result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix)
+            result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix, roles)
         # A cloud LLM request cannot always be interrupted immediately. Ignore
         # its late response when the user has requested stop/restart.
         if control.is_stopped(meeting_id):
@@ -416,14 +420,3 @@ def public_error(exc: BaseException) -> str:
     if "429" in text or "rate" in lowered:
         return "Провайдер временно ограничил запросы. Повторите позже."
     return "Обработка не удалась. Подробности в журнале сервера."
-
-
-def format_duration(seconds: float | None) -> str:
-    if not seconds or not math.isfinite(seconds):
-        return ""
-    total = int(round(seconds))
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours} ч {minutes:02d} мин"
-    return f"{minutes} мин {secs:02d} с"

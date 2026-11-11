@@ -102,6 +102,12 @@ def init_db() -> None:
             UNIQUE(meeting_id, recipient)
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_protocol_mail_due ON protocol_mail(state, due_at)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS protocol_mail_format (
+            meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+            html TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            docx BLOB NOT NULL
+        )""")
         user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "auth_mode" not in user_columns:
             conn.execute(

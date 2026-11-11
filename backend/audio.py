@@ -20,6 +20,17 @@ class AudioError(RuntimeError):
     pass
 
 
+def format_duration(seconds: float | None) -> str:
+    if not seconds or not math.isfinite(seconds):
+        return ""
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours} ч {minutes:02d} мин"
+    return f"{minutes} мин {secs:02d} с"
+
+
 def looks_like_audio(path: Path) -> bool:
     try:
         with path.open("rb") as source:
