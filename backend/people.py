@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import logging
-
-from . import config, ldap_auth, store
-
-log = logging.getLogger("mom.people")
+from . import config, corporate_context, ldap_auth, store
 
 
 def suggest(query: str = "") -> dict:
-    """MoM users always. LDAP names only when the directory is on and the query is long enough."""
+    """MoM users plus locally synchronized AD names; no network calls on the user path."""
     needle = query.strip()
     people: list[dict[str, str]] = []
     by_email: dict[str, dict[str, str]] = {}
@@ -23,22 +19,19 @@ def suggest(query: str = "") -> dict:
         people.append(item)
         by_email[email.casefold()] = item
     if config.ldap_configured() and len(needle) >= 2:
-        try:
-            for person in ldap_auth.search_people(needle):
-                email = (person.get("email") or "").strip()
-                key = email.casefold()
-                item = {"name": person["name"], "email": email, "source": "ldap"}
-                if person.get("job_title"):
-                    item["job_title"] = person["job_title"]
-                if key and key in by_email:
-                    by_email[key].update(item)
-                    continue
-                people.append(item)
-                if key:
-                    by_email[key] = people[-1]
-        except ldap_auth.LdapError:
-            log.warning("Каталог не отдал подсказки имён, остаются пользователи MoM")
-            error = "Поиск в AD временно недоступен. Можно выбрать сохранённого пользователя или ввести имя вручную."
+        found, error = corporate_context.search_people(needle)
+        for person in found:
+            email = (person.get("email") or "").strip()
+            key = email.casefold()
+            item = {"name": person["name"], "email": email, "source": "ldap"}
+            if person.get("job_title"):
+                item["job_title"] = person["job_title"]
+            if key and key in by_email:
+                by_email[key].update(item)
+                continue
+            people.append(item)
+            if key:
+                by_email[key] = people[-1]
     return {"people": people[:40], "ldap": config.ldap_configured(), **({"error": error} if error else {})}
 
 

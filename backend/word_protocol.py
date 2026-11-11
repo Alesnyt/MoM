@@ -9,7 +9,6 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 from .audio import format_duration
-from .speakers import participant_labels
 
 MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
@@ -56,8 +55,16 @@ def to_docx(meeting: dict, result: dict) -> bytes:
         document.add_paragraph("Дата встречи: " + _text(result["date_hint"]))
     if duration := format_duration(meeting.get("duration_seconds")):
         document.add_paragraph("Длительность: " + duration)
-    if participants := participant_labels(meeting, result):
-        document.add_paragraph("Участники: " + _text(", ".join(participants)))
+    if participants := result.get("participants"):
+        document.add_heading("Участники", 2)
+        titles = {speaker["name"].casefold(): speaker["job_title"] for speaker in meeting.get("speakers") or []
+                  if speaker.get("name") and speaker.get("job_title")}
+        for name in participants:
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.keep_together = True
+            paragraph.add_run(_text(name)).bold = True
+            if job_title := titles.get(name.casefold()):
+                paragraph.add_run("\n" + _text(job_title))
 
     document.add_heading("Саммари", 1)
     summary_lines = [line.strip() for line in result["summary"].splitlines() if line.strip()]

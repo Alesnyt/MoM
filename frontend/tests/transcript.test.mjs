@@ -149,11 +149,11 @@ test('AD search is explained before typing, stays visible while waiting, and lab
   const input = view.getByRole('combobox', {name:'Найти сотрудника в AD для Спикер 1'});
   fireEvent.focus(input);
   fireEvent.change(input, {target:{value:'Иван'}});
-  assert.ok(view.getByText('Ищем сотрудника в AD…'));
+  assert.ok(view.getByText('Ищем сотрудника в справочнике AD…'));
   assert.equal(input.getAttribute('aria-busy'), 'true');
   await waitFor(() => assert.ok(finish));
   await act(async () => finish(response({people:[{name:'Иван Петров',email:'ivan@example.com',source:'ldap',job_title:'Архитектор'}],ldap:true})));
-  assert.equal(view.queryByText('Ищем сотрудника в AD…'), null);
+  assert.equal(view.queryByText('Ищем сотрудника в справочнике AD…'), null);
   assert.equal(input.getAttribute('aria-busy'), 'false');
   const option = view.getByRole('option', {name:/Иван Петров/});
   assert.match(option.textContent, /Иван ПетровADАрхитектор/);
@@ -169,7 +169,7 @@ test('a failed AD lookup is distinct from no matches and retains saved people', 
   fireEvent.change(view.getByRole('combobox', {name:'Найти сотрудника в AD для Спикер 1'}), {target:{value:'saved'}});
   assert.ok(await view.findByText('Поиск в AD временно недоступен.'));
   assert.ok(view.getByRole('option', {name:/saved@example.com/}));
-  assert.equal(view.queryByText(/В AD совпадений не найдено/), null);
+  assert.equal(view.queryByText(/В справочнике AD совпадений не найдено/), null);
 });
 
 test('a superseded AD request cannot erase newer matches or leave the spinner running', async () => {
@@ -185,6 +185,6 @@ test('a superseded AD request cannot erase newer matches or leave the spinner ru
   await act(async () => requests[1].resolve(response({ldap:true,people:[{name:'Иван Петров',email:'ivan@example.com',source:'ldap'}]})));
   await act(async () => requests[0].reject(new Error('Old failure')));
   assert.ok(view.getByRole('option', {name:/Иван Петров/}));
-  assert.equal(view.queryByText('Ищем сотрудника в AD…'), null);
+  assert.equal(view.queryByText('Ищем сотрудника в справочнике AD…'), null);
   assert.equal(view.queryByText(/Поиск недоступен/), null);
 });

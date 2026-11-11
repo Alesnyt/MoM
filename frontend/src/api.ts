@@ -14,11 +14,13 @@ async function parseError(response: Response): Promise<string> {
 }
 
 export type CorporateTerm = { term: string; aliases: string[]; description: string; department: string };
+export type DirectoryPolicy = { fields: string[]; domains: string[] };
 export type CorporateContext = {
   enabled: boolean; sync_ad: boolean; revision: number; term_count: number; people_count: number;
   directory_current: boolean; ldap_configured: boolean; synced_at: string | null; imported_at: string | null;
   sync_error: string | null; syncing: boolean; terms: CorporateTerm[]; matched_terms: number;
   sync_time: string; sync_timezone: string; next_sync_at: string | null;
+  directory_policy: DirectoryPolicy;
 };
 
 export async function getCorporateContext(query: string, signal?: AbortSignal): Promise<CorporateContext> {
@@ -36,6 +38,13 @@ export async function saveCorporateContext(enabled: boolean, sync_ad: boolean, s
 
 export async function syncCorporateDirectory(): Promise<CorporateContext> {
   const response = await fetch("/api/admin/context/sync", {method: "POST", credentials: "include"});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function saveDirectoryPolicy(policy: DirectoryPolicy): Promise<CorporateContext> {
+  const response = await fetch("/api/admin/context/directory", {method: "POST", credentials: "include",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(policy)});
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

@@ -71,6 +71,7 @@ function SpeakerNameEditor({
   const listId = useId();
   const inputId = useId();
   const activeOption = useRef<HTMLButtonElement>(null);
+  const searchFeedback = useRef<HTMLDivElement>(null);
   const savingRef = useRef(false);
   const defaultName = /^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : null;
 
@@ -88,6 +89,7 @@ function SpeakerNameEditor({
     }
     const controller = new AbortController();
     let active = true;
+    setPeople([]); setActiveIndex(-1);
     setSearchState("loading");
     setDirectoryError(null);
     const handle = window.setTimeout(() => {
@@ -106,6 +108,9 @@ function SpeakerNameEditor({
   }, [draft, open, speaker.name, disabled]);
 
   useEffect(() => { activeOption.current?.scrollIntoView({ block: "nearest" }); }, [activeIndex]);
+  useEffect(() => {
+    if (open && (searchState !== "idle" || people.length)) searchFeedback.current?.scrollIntoView?.({ block: "nearest" });
+  }, [open, searchState, people]);
 
   function closeList() {
     setOpen(false); setPeople([]); setActiveIndex(-1); setSearchState("idle"); setDirectoryError(null);
@@ -195,15 +200,15 @@ function SpeakerNameEditor({
             {open && searchState === "loading" && <span className="speaker-input-spinner speaker-search-spinner" aria-hidden="true" />}
           </div>
           <p className="speaker-input-hint" id={`${inputId}-hint`}>
-            {directoryEnabled ? "Введите от 2 букв ФИО и выберите сотрудника из списка." : "Выберите сохранённого пользователя или введите имя вручную."}
+            {directoryEnabled ? "Введите от 2 букв ФИО. Поиск по локальному справочнику AD — выберите сотрудника из списка." : "Выберите сохранённого пользователя или введите имя вручную."}
           </p>
-          {open && searchState === "loading" && <div className="speaker-search-status" role="status">
+          {open && searchState === "loading" && <div ref={searchFeedback} className="speaker-search-status" role="status">
             <span className="speaker-search-spinner" aria-hidden="true" />
-            {directoryEnabled ? "Ищем сотрудника в AD…" : "Ищем сохранённого пользователя…"}
+            <span className="speaker-search-label">{directoryEnabled ? "Ищем сотрудника в справочнике AD…" : "Ищем сохранённого пользователя…"}</span>
           </div>}
           {open && (people.length > 0 || searchState === "empty" || searchState === "error") && (
-            <div className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
-              {searchState === "empty" && <div className="speaker-search-note" role="status">{directoryEnabled ? "В AD совпадений не найдено." : "Совпадений нет."} Уточните ФИО или сохраните имя вручную.</div>}
+            <div ref={searchFeedback} className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
+              {searchState === "empty" && <div className="speaker-search-note" role="status">{directoryEnabled ? "В справочнике AD совпадений не найдено." : "Совпадений нет."} Уточните ФИО или сохраните имя вручную.</div>}
               {searchState === "error" && <div className="speaker-search-note" role="status">{directoryError || "Поиск недоступен. Можно сохранить имя вручную."}</div>}
               <ul id={listId} role="listbox" aria-label="Имена из каталога" style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {people.map((person, index) => (

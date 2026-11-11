@@ -264,7 +264,15 @@ def sync_people() -> list[dict[str, str]]:
         return []
     search_filter = people_filter("")
     mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-    attributes = sorted({mail_attr, "mail", "cn", "displayName", "title", "department", "sn"})
+    policy = directory_scope.sync_policy()
+    fields, domains = policy["fields"], policy["domains"]
+    attributes = sorted({mail_attr, "mail", "cn", "displayName"} |
+                        {directory_scope.OPTIONAL_FIELDS[field][0] for field in fields})
+    if domains:
+        from ldap3.utils.conv import escape_filter_chars
+        domain_filter = "(|" + "".join(f"({attr}=*@{escape_filter_chars(domain)})"
+            for domain in domains for attr in sorted({mail_attr, "mail"})) + ")"
+        search_filter = f"(&{search_filter}{domain_filter})"
     connection = None
     people, seen = [], set()
     deadline = time.monotonic() + 60
@@ -287,16 +295,19 @@ def sync_people() -> list[dict[str, str]]:
                     if len(dn) < len(base_key) or dn[-len(base_key):] != base_key:
                         raise LdapError("AD вернул сотрудника вне выбранной области")
                     email = _entry_attr(entry, mail_attr) or _entry_attr(entry, "mail")
+                    if domains and email.rpartition("@")[2].casefold() not in domains:
+                        continue
                     key = email.casefold() if email else dn
                     if key in seen:
                         continue
                     seen.add(key)
                     name = _entry_attr(entry, "displayName") or _entry_attr(entry, "cn")
                     if name:
-                        people.append({"name": " ".join(name.split())[:200], "email": email[:320],
-                            "job_title": " ".join(_entry_attr(entry, "title").split())[:200],
-                            "department": " ".join(_entry_attr(entry, "department").split())[:120],
-                            "surname": " ".join(_entry_attr(entry, "sn").split())[:120]})
+                        person = {"name": " ".join(name.split())[:200], "email": email[:320]}
+                        for field in fields:
+                            attribute, length = directory_scope.OPTIONAL_FIELDS[field]
+                            person[field] = " ".join(_entry_attr(entry, attribute).split())[:length]
+                        people.append(person)
                     if len(people) > 50000:
                         raise LdapError("Выбрано больше 50 000 сотрудников. Сузьте области поиска")
                 control = (result.get("controls") or {}).get("1.2.840.113556.1.4.319")

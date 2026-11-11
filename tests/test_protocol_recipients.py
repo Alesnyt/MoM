@@ -11,12 +11,26 @@ from unittest.mock import patch
 
 import pytest
 from docx import Document
+
+
 from fastapi.testclient import TestClient
 
 from backend import auth, config, keys, mail, main, pipeline, store, worker
 
 real_send_mail = mail.send_mail
 
+
+def test_word_participants_keep_long_titles_in_separate_blocks():
+    from backend.word_protocol import to_docx
+    names = ["Анна Петрова", "Борис Иванов", "Вера Соколова"]
+    titles = ["Руководитель департамента технологического развития дата-сервисов", "Архитектор, ведущий эксперт"]
+    meeting = {"title": "Обсуждение", "speakers": [dict(name=name, job_title=title) for name, title in zip(names, titles)]}
+    result = {"title": "Обсуждение", "date_hint": "", "participants": names, "summary": "Согласовали план.",
+              "decisions": [], "key_points": [], "action_items": [], "mom": {"agenda": [], "next_meeting": ""}}
+    document = Document(BytesIO(to_docx(meeting, result)))
+    blocks = [paragraph for paragraph in document.paragraphs if any(paragraph.text.startswith(name) for name in names)]
+    assert [paragraph.text for paragraph in blocks] == [names[0] + "\n" + titles[0], names[1] + "\n" + titles[1], names[2]]
+    assert all(paragraph.runs[0].bold and paragraph.paragraph_format.keep_together for paragraph in blocks)
 
 @pytest.fixture
 def delivery(tmp_path, monkeypatch):

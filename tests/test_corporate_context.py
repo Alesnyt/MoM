@@ -224,17 +224,92 @@ def test_schedule_change_midnight_disabled_mode_and_retry(db, monkeypatch):
             cc.save_settings(True, True, "admin", sync_time=invalid)
 
 
-def test_people_lookup_reports_ad_failure_without_hiding_saved_users(db, monkeypatch):
+def test_people_lookup_reports_missing_cache_without_hiding_saved_users(db, monkeypatch):
     from backend import people
     monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
     def unavailable(_query):
-        raise ldap_auth.LdapError("Private server diagnostics")
+        pytest.fail("Speaker lookup must never call LDAP")
     monkeypatch.setattr(ldap_auth, "search_people", unavailable)
     result = people.suggest("anna")
     assert result["ldap"] is True
     assert result["people"][0]["email"] == "anna@example.com"
-    assert "AD временно недоступен" in result["error"]
+    assert "AD ещё не обновлён" in result["error"]
     assert "Private" not in result["error"]
+
+
+def test_cached_directory_partial_search_survives_outage_and_refreshes(db, monkeypatch):
+    from backend import people
+    roster = [{"name": "Анна Семёнова", "email": "anna@example.com", "job_title": "Архитектор"},
+              {"name": "Семён Петров", "email": "petr@example.com"}]
+    monkeypatch.setattr(ldap_auth, "search_people", lambda *args: pytest.fail("No LDAP in speaker lookup"))
+    cc._update(people=roster, directory_signature=cc.directory_signature(), sync_error="server offline")
+    monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
+    assert people.suggest("anna")["people"] == [dict(roster[0], source="ldap")]
+    assert cc.search_people("семено АН")[0] == [roster[0]]
+    assert len(cc.search_people("сем")[0]) == 2
+    # Another process commits a new snapshot; the warm index must be invalidated.
+    cc._update(people=[{"name": "Анна Соколова", "email": "anna@example.com"}])
+    assert cc.search_people("сем")[0] == []
+    assert cc.search_people("сокол")[0][0]["name"] == "Анна Соколова"
+    directory_scope.save_sync_policy([], ["example.com"])
+    assert cc.search_people("сокол")[0] == []
+    assert cc.search_people("сокол")[1]
+
+
+@pytest.mark.parametrize("domains", [["*.ru"], ["user@company.ru"], ["https://company.ru"], ["x)(mail=*)"], ["a..ru"], ["-a.ru"]])
+def test_directory_policy_rejects_invalid_domains_atomically(db, domains):
+    before = directory_scope.sync_policy()
+    with pytest.raises(ValueError):
+        directory_scope.save_sync_policy([], domains)
+    assert directory_scope.sync_policy() == before
+
+
+def test_directory_policy_normalizes_and_rejects_unused_fields(db):
+    assert directory_scope.save_sync_policy(["surname"], [" @EXAMPLE.com ", "example.com"]) == {
+        "fields": ["surname"], "domains": ["example.com"]}
+    with pytest.raises(ValueError):
+        directory_scope.save_sync_policy(["password"], [])
+
+
+def test_directory_policy_requests_only_selected_fields_and_enforces_domain_and_ou(db, monkeypatch):
+    directory_scope.save("selected", ["OU=IT,DC=example,DC=com"])
+    directory_scope.save_sync_policy(["department"], ["example.com"])
+    class Contractor(Entry):
+        def __getitem__(self, key):
+            return SimpleNamespace(value="external@contractor.com") if key == "mail" else super().__getitem__(key)
+    class Connection:
+        entries = [Entry(), Contractor()]
+        result = {"description": "success", "controls": {"1.2.840.113556.1.4.319": {"value": {"cookie": b""}}}}
+        def search(self, **kwargs):
+            assert kwargs["search_base"] == "OU=IT,DC=example,DC=com"
+            assert set(kwargs["attributes"]) == {"mail", "cn", "displayName", "department"}
+            assert "(mail=*@example.com)" in kwargs["search_filter"]
+        def unbind(self):
+            pass
+    conn = Connection()
+    monkeypatch.setattr(ldap_auth, "_service_connection", lambda: (conn, None))
+    assert ldap_auth.sync_people() == [{"name": "Анна Иванова", "email": "anna@example.com", "department": "ИТ"}]
+    outside = Entry()
+    outside.entry_dn = "CN=Anna,OU=Contractors,DC=example,DC=com"
+    conn.entries = [outside]
+    with pytest.raises(ldap_auth.LdapError, match="вне выбранной области"):
+        ldap_auth.sync_people()
+
+
+def test_directory_policy_api_requires_admin_and_invalidates_old_snapshot(db):
+    client = TestClient(main.app)
+    route = "/api/admin/context/directory"
+    payload = {"fields": ["job_title"], "domains": ["example.com"]}
+    assert client.post(route, json=payload).status_code == 401
+    store.put_session("admin", "admin", username="admin", expires=time.time() + 3600)
+    client.cookies.set(auth.COOKIE_NAME, "admin")
+    cc._update(people=[{"name": "Анна"}], directory_signature=cc.directory_signature())
+    result = client.post(route, json=payload)
+    assert result.status_code == 200
+    assert result.json()["directory_policy"] == payload
+    assert result.json()["people_count"] == 0
+    assert not result.json()["directory_current"]
+    assert client.post(route, json={"fields": ["bad"], "domains": []}).status_code == 400
 
 
 def test_large_department_does_not_displace_dictionary_and_surnames_need_unique_matches():

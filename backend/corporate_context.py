@@ -11,6 +11,7 @@ import logging
 import re
 import secrets
 import time
+import threading
 from xml.etree.ElementTree import ParseError
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,9 @@ def _write(conn, data: dict) -> None:
     conn.execute("INSERT INTO app_settings(key,payload) VALUES ('corporate_context',?) "
                  "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
                  (json.dumps(data, ensure_ascii=False),))
+    # A tiny cross-process invalidation key avoids decoding a 50k-person JSON on every keystroke.
+    conn.execute("INSERT INTO app_settings(key,payload) VALUES ('corporate_context_version',?) "
+                 "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", (json.dumps(secrets.token_hex(16)),))
 
 
 def _update(*, _expected_sync_id: str | None = None, **changes) -> dict | None:
@@ -57,6 +61,10 @@ def _update(*, _expected_sync_id: str | None = None, **changes) -> dict | None:
 def directory_signature() -> str:
     data = [config.ldap_configured(), config.get_ldap_url(), config.get_ldap_base_dn(),
             config.get_ldap_email_attr(), config.get_ldap_bind_dn(), directory_scope.search_bases()]
+    policy = directory_scope.sync_policy()
+    # Preserve existing complete snapshots on upgrade when the defaults are unchanged.
+    if set(policy["fields"]) != set(directory_scope.OPTIONAL_FIELDS) or policy["domains"]:
+        data.append(policy)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -71,12 +79,42 @@ def snapshot(query: str = "") -> dict:
         [entry["term"], *entry["aliases"], entry["description"], entry["department"]]))]
     return {"enabled": data["enabled"], "sync_ad": data["sync_ad"], "revision": data["revision"],
             "sync_time": data["sync_time"], "sync_timezone": "UTC+3",
+            "directory_policy": directory_scope.sync_policy(),
             "next_sync_at": datetime.fromtimestamp(max(now, next_sync), timezone.utc).isoformat() if next_sync is not None else None,
             "term_count": len(data["terms"]), "people_count": len(data["people"]) if matches else 0,
             "directory_current": matches, "ldap_configured": config.ldap_configured(),
             "synced_at": data.get("synced_at"), "imported_at": data.get("imported_at"),
             "sync_error": data.get("sync_error"), "syncing": data.get("sync_until", 0) > time.time(),
             "terms": terms[:100], "matched_terms": len(terms)}
+
+
+_people_cache_lock = threading.Lock()
+_people_cache: tuple | None = None
+
+
+def search_people(query: str, limit: int = 20) -> tuple[list[dict], str | None]:
+    """Search the last complete snapshot, never LDAP. Scope changes fail closed immediately."""
+    global _people_cache
+    signature = directory_signature()
+    version = store.get_app_setting("corporate_context_version")
+    key = (str(store.DB_PATH), version, signature)
+    with _people_cache_lock:
+        if _people_cache is None or _people_cache[0] != key:
+            data = _read()
+            current = data.get("directory_signature") == signature
+            index = [(normalize(person["name"] + " " + person.get("email", "")), person)
+                     for person in data["people"]] if current else []
+            _people_cache = (key, current, index)
+        _, current, index = _people_cache
+    if not current:
+        return [], "Справочник AD ещё не обновлён. Администратор может запустить синхронизацию; пока введите имя вручную."
+    parts = normalize(query).split()
+    if not parts:
+        return [], None
+    needle = normalize(query)
+    matches = (person for text, person in index if all(part in text for part in parts))
+    return [dict(person) for person in heapq.nsmallest(limit, matches,
+            key=lambda person: (not normalize(person["name"]).startswith(needle), person["name"].casefold()))], None
 
 
 def save_settings(enabled: bool, sync_ad: bool, actor: str, *, sync_time: str | None = None) -> dict:
