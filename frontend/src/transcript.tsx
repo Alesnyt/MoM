@@ -457,6 +457,10 @@ function TranscriptTurns({
               </label>
             </header>
             <p>{turn.text}</p>
+            {turn.indexes.some((index) => segments[index].context_original_text) &&
+              <details><summary>До корпоративного словаря</summary><p className="original-transcript">
+                {turn.indexes.map((index) => segments[index].context_original_text ?? segments[index].original_text ?? segments[index].text).join(" ")}
+              </p></details>}
             {turn.indexes.some((index) => segments[index].original_text && segments[index].original_text !== segments[index].text) &&
               <details><summary>До проверки имён</summary><p className="original-transcript">
                 {turn.indexes.map((index) => segments[index].original_text ?? segments[index].text).join(" ")}

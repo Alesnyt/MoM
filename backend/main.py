@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, ValidationError
 from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
-from . import transcript_import, upload
+from . import transcript_import, upload, corporate_context
 from . import word_protocol
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
@@ -50,6 +50,11 @@ SECURITY_HEADERS = {
 
 class SettingsIn(BaseModel):
     openai_api_key: str = Field(min_length=8)
+
+
+class ContextSettingsIn(BaseModel):
+    enabled: bool
+    sync_ad: bool
 
 
 class PromptsIn(BaseModel):
@@ -363,6 +368,37 @@ async def security_headers(request: Request, call_next):
 @app.get("/api/health")
 def health() -> dict:
     return _health(full=False)
+
+
+@app.get("/api/admin/context")
+def get_context(q: str = Query(default="", max_length=200), _admin: dict = Depends(require_admin)) -> dict:
+    return corporate_context.snapshot(q)
+
+
+@app.post("/api/admin/context/settings")
+def save_context(payload: ContextSettingsIn, admin: dict = Depends(require_admin)) -> dict:
+    return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"])
+
+
+@app.post("/api/admin/context/sync")
+def sync_context(admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return corporate_context.sync_directory(admin["username"])
+    except (ldap_auth.LdapError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/context/import")
+async def import_context(request: Request, admin: dict = Depends(require_admin)) -> dict:
+    async with request.form(max_files=1, max_fields=0, max_part_size=corporate_context.MAX_FILE_BYTES) as form:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(status_code=400, detail="Выберите Excel или CSV со словарём")
+        content = await file.read(corporate_context.MAX_FILE_BYTES + 1)
+        try:
+            return await asyncio.to_thread(corporate_context.import_dictionary, file.filename or "", content, admin["username"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/auth/status")
@@ -1039,6 +1075,7 @@ def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dic
             "segments": meeting.get("segments") or [],
             "note": meeting.get("diarization_note"),
             "name_review": meeting.get("name_review"),
+            "corporate_context": meeting.get("corporate_context"),
             "source_type": meeting.get("source_type", "audio"),
         }
         try:
@@ -1119,6 +1156,7 @@ def _segments_doc(meeting: dict) -> dict:
         "segments": meeting.get("segments") or [],
         "note": meeting.get("diarization_note"),
         "name_review": meeting.get("name_review"),
+        "corporate_context": meeting.get("corporate_context"),
         "source_type": meeting.get("source_type", "audio"),
     }
 

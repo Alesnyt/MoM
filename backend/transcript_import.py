@@ -26,7 +26,10 @@ class TranscriptBodyLimit:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path", "").rstrip("/") != "/api/meetings/transcript":
+        limits = {"/api/meetings/transcript": (MAX_REQUEST_BYTES, "Транскрипт больше 1 МБ"),
+                  "/api/admin/context/import": (2 * 1024 * 1024 + 65536, "Словарь больше 2 МБ")}
+        limit = limits.get(scope.get("path", "").rstrip("/"))
+        if scope["type"] != "http" or scope.get("method") != "POST" or limit is None:
             return await self.app(scope, receive, send)
         body = bytearray()
         while True:
@@ -34,8 +37,8 @@ class TranscriptBodyLimit:
             if message["type"] == "http.disconnect":
                 return
             chunk = message.get("body", b"")
-            if len(body) + len(chunk) > MAX_REQUEST_BYTES:
-                return await JSONResponse({"detail": "Транскрипт больше 1 МБ"}, status_code=413)(scope, receive, send)
+            if len(body) + len(chunk) > limit[0]:
+                return await JSONResponse({"detail": limit[1]}, status_code=413)(scope, receive, send)
             body.extend(chunk)
             if not message.get("more_body", False):
                 break

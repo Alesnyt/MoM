@@ -8,7 +8,7 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "monitoring" | "prompts" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
+export type AdminTab = "monitoring" | "prompts" | "context" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
 
 export type AuditEvent = {
   id: number;
@@ -69,6 +69,7 @@ export type NameReview = {
 
 export type TranscriptSegment = {
   original_text?: string;
+  context_original_text?: string;
   start: number | null;
   end: number | null;
   speaker: string;

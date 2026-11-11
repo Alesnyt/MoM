@@ -608,6 +608,7 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
         data["segments"] = parsed.get("segments") or []
         data["diarization_note"] = parsed.get("note")
         data["name_review"] = parsed.get("name_review")
+        data["corporate_context"] = parsed.get("corporate_context")
         data["source_type"] = parsed.get("source_type", "audio")
     else:
         data.pop("transcript", None)

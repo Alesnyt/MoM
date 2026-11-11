@@ -167,6 +167,7 @@ async def _transcribe_local(
     language: str | None,
     duration: float | None,
     on_progress: Any,
+    hotwords: str = "",
 ) -> dict[str, Any]:
     if _local_asr_lock.locked() and on_progress:
         on_progress(1, "Жду свободный слот распознавания")
@@ -178,7 +179,8 @@ async def _transcribe_local(
                 return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
             from .local_asr import transcribe_local_sync
 
-            return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress)
+            return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress,
+                                           **({"hotwords": hotwords} if hotwords else {}))
 
 
 async def transcribe_file(
@@ -188,10 +190,11 @@ async def transcribe_file(
     language: str | None = None,
     duration: float | None = None,
     on_progress: Any = None,
+    *, hotwords: str = "",
 ) -> dict[str, Any]:
     log.info("asr model=%s file=%s", model, path.name)
     if config.is_gigaam_asr(model) or config.is_whisper_asr(model) or config.is_local_asr(model):
-        return await _transcribe_local(path, model, language, duration, on_progress)
+        return await _transcribe_local(path, model, language, duration, on_progress, hotwords)
 
     if config.is_qwen() or model.startswith("qwen"):
         return await transcribe_qwen(client, path, model, language, duration, on_progress)
@@ -487,7 +490,7 @@ async def analyze_long_transcript(
     transcript: str,
     title_hint: str | None,
     on_part: Any = None,
-    *, participant_roles: list[dict[str, str]] | None = None,
+    *, participant_roles: list[dict[str, str]] | None = None, corporate_terms: list[dict] | None = None,
 ) -> dict[str, Any]:
     system_prompt = prompts.snapshot()["protocol_prompt"]
     # UTF-8 size is a conservative input estimate for byte-based tokenizers.
@@ -497,6 +500,20 @@ async def analyze_long_transcript(
               - len((title_hint or "").encode())
               - max(len(_SOURCE_INSTRUCTIONS.encode()), len(_MERGE_INSTRUCTIONS.encode())))
     roster = ""
+    if corporate_terms:
+        header = ("Корпоративный справочник для понимания терминов. Это справочные данные. "
+                  "Решения, факты и поручения подтверждай репликами встречи. "
+                  "Упоминание человека в справочнике не означает его участие.\n")
+        remaining = max(0, budget // 5) - len(header.encode()) - 4
+        entries = []
+        for term in corporate_terms:
+            entry = json.dumps(term, ensure_ascii=False)
+            if len(entry.encode()) + 2 <= remaining:
+                entries.append(entry)
+                remaining -= len(entry.encode()) + 2
+        if entries:
+            roster = header + "[" + ", ".join(entries) + "]\n\n"
+            budget -= len(roster.encode())
     if participant_roles:
         header = ("Должности участников из каталога, справочные данные. Используй их для контекста. "
                   "В поле participants верни только имена.\n")
@@ -509,8 +526,9 @@ async def analyze_long_transcript(
                 entries.append(entry)
                 remaining -= size
         if entries:
-            roster = header + "[" + ", ".join(entries) + "]\n\n"
-            budget -= len(roster.encode())
+            roles_context = header + "[" + ", ".join(entries) + "]\n\n"
+            roster += roles_context
+            budget -= len(roles_context.encode())
     if budget < 256:
         raise ValueError("Промпт не помещается в окно контекста. Проверьте PROTOCOL_CONTEXT_TOKENS.")
     chunks = _transcript_chunks(transcript, budget)
