@@ -487,6 +487,7 @@ async def analyze_long_transcript(
     transcript: str,
     title_hint: str | None,
     on_part: Any = None,
+    *, participant_roles: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     system_prompt = prompts.snapshot()["protocol_prompt"]
     # UTF-8 size is a conservative input estimate for byte-based tokenizers.
@@ -495,6 +496,21 @@ async def analyze_long_transcript(
     budget = (context - min(8192, context // 4) - 768 - len(system_prompt.encode())
               - len((title_hint or "").encode())
               - max(len(_SOURCE_INSTRUCTIONS.encode()), len(_MERGE_INSTRUCTIONS.encode())))
+    roster = ""
+    if participant_roles:
+        header = ("Должности участников из каталога, справочные данные. Используй их для контекста. "
+                  "В поле participants верни только имена.\n")
+        remaining = max(0, budget // 4) - len(header.encode()) - 4
+        entries = []
+        for person in participant_roles:
+            entry = json.dumps(person, ensure_ascii=False)
+            size = len(entry.encode()) + 2
+            if size <= remaining:
+                entries.append(entry)
+                remaining -= size
+        if entries:
+            roster = header + "[" + ", ".join(entries) + "]\n\n"
+            budget -= len(roster.encode())
     if budget < 256:
         raise ValueError("Промпт не помещается в окно контекста. Проверьте PROTOCOL_CONTEXT_TOKENS.")
     chunks = _transcript_chunks(transcript, budget)
@@ -507,7 +523,7 @@ async def analyze_long_transcript(
         sources = {int(value) for value in _TURN_ID.findall(chunk)}
         allowed.update(sources)
         intro = f"Это часть {index} из {len(chunks)}. Составь промежуточный протокол.\n\n" if len(chunks) > 1 else ""
-        prompt = intro + (_SOURCE_INSTRUCTIONS if sources else "") + chunk
+        prompt = roster + intro + (_SOURCE_INSTRUCTIONS if sources else "") + chunk
         summary = await analyze_transcript(client, prompt, title_hint, system_prompt=system_prompt)
         parts.append(_with_sources(summary, sources))
 
@@ -529,7 +545,7 @@ async def analyze_long_transcript(
             if on_part:
                 on_part(total, total)
             payload = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
-            result = await analyze_transcript(client, _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
+            result = await analyze_transcript(client, roster + _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
             merged.append(_with_sources(_retain_grounded_items(_with_sources(result, allowed), group), allowed))
         if len(merged) == len(parts):
             return _with_sources(_merge_locally(merged), allowed)

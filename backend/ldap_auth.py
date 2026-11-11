@@ -213,7 +213,7 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
         from ldap3 import SUBTREE, DEREF_NEVER
 
         mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-        attributes = sorted({mail_attr, "mail", "cn", "displayName"})
+        attributes = sorted({mail_attr, "mail", "cn", "displayName", "title"})
         people: list[dict[str, str]] = []
         seen: set[str] = set()
         cap = max(1, min(int(limit), 30))
@@ -236,7 +236,10 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
                 if not name or key in seen:
                     continue
                 seen.add(key)
-                people.append({"name": name, "email": mail, "source": "ldap"})
+                person = {"name": name, "email": mail, "source": "ldap"}
+                if title := " ".join(_entry_attr(entry, "title").split())[:200]:
+                    person["job_title"] = title
+                people.append(person)
                 if len(people) >= cap:
                     return people
         return people

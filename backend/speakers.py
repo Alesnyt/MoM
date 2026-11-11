@@ -209,7 +209,10 @@ def select_protocol_recipients(document: dict[str, Any], recipients: list[dict[s
     return {**document, "speakers": speakers}
 
 
-def rename_speaker(document: dict[str, Any], speaker_id: str, name: str, email: str | None = None) -> tuple[dict[str, Any], str, str]:
+def rename_speaker(
+    document: dict[str, Any], speaker_id: str, name: str, email: str | None = None,
+    *, job_title: str | None = None,
+) -> tuple[dict[str, Any], str, str]:
     speakers = [dict(item) for item in document.get("speakers") or []]
     target = next((item for item in speakers if item["id"] == speaker_id), None)
     if not target:
@@ -222,6 +225,7 @@ def rename_speaker(document: dict[str, Any], speaker_id: str, name: str, email: 
         address = clean_speaker_email(email) if email.strip() else ""
         if address != target.get("email") or old_name != new_name:
             target.pop("send_protocol", None)
+            target.pop("job_title", None)
         if address:
             target["email"] = address
         else:
@@ -230,9 +234,23 @@ def rename_speaker(document: dict[str, Any], speaker_id: str, name: str, email: 
         # A manually changed/reset name must not inherit another person's address.
         target.pop("email", None)
         target.pop("send_protocol", None)
+        target.pop("job_title", None)
+    if job_title is not None:
+        title = " ".join(job_title.split())
+        if title:
+            target["job_title"] = title
+        else:
+            target.pop("job_title", None)
     target["name"] = new_name
     updated = {**document, "speakers": speakers}
     return updated, old_name, new_name
+
+
+def participant_labels(meeting: dict, result: dict) -> list[str]:
+    titles = {item["name"].casefold(): item["job_title"] for item in meeting.get("speakers") or []
+              if item.get("name") and item.get("job_title")}
+    return [f"{name} — {titles[name.casefold()]}" if name.casefold() in titles else name
+            for name in result.get("participants") or []]
 
 
 def reassign_segments(document: dict[str, Any], indexes: list[int], speaker_id: str) -> dict[str, Any]:

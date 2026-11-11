@@ -47,6 +47,36 @@
   color-scheme: dark;
 }
 
+[data-appearance="light"] {
+  --bg: #f3f4f6;
+  --rail: #ffffff;
+  --stage: #f8f9fb;
+  --line: #d5d9e1;
+  --text: #202633;
+  --muted: #555f70;
+  --accent: #985011;
+  --accent-dim: #fae8d6;
+  --accent-on: #ffffff;
+  --ok: #31663b;
+  --danger: #a3262f;
+  --paper: #ffffff;
+  --ink: #222633;
+  --ink-soft: #515b6a;
+  --card: #ffffff;
+  --hover: #e9edf4;
+  --stage-glow: #e7eef7;
+  --banner-text: #862b2f;
+  --paper-rule: #d5d9e1;
+  --shine: #d4dce94a;
+  color-scheme: light;
+}
+
+[data-theme="t2"][data-appearance="light"] {
+  --accent: #ae1461;
+  --accent-dim: #fce4ef;
+  --stage-glow: #fceaf2;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -141,6 +171,23 @@ button {
   padding: 12px 24px;
   background: var(--rail);
   border-bottom: 1px solid var(--line);
+}
+
+.appearance-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.appearance-picker select {
+  font: inherit;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
 }
 
 .topbar .brand {
@@ -1268,7 +1315,7 @@ select.title-input {
 }
 
 [data-theme="t2"] .paper {
-  box-shadow: 0 0 0 1px #000000, 0 16px 40px rgba(255, 52, 149, 0.12);
+  box-shadow: 0 0 0 1px var(--paper-rule), 0 16px 40px rgba(255, 52, 149, 0.12);
 }
 
 .paper h2 {

@@ -26,18 +26,13 @@ def suggest(query: str = "") -> dict:
             for person in ldap_auth.search_people(needle):
                 email = (person.get("email") or "").strip()
                 key = email.casefold()
+                item = {"name": person["name"], "email": email, "source": "ldap"}
+                if person.get("job_title"):
+                    item["job_title"] = person["job_title"]
                 if key and key in by_email:
-                    if person["name"] and person["name"] != by_email[key]["name"]:
-                        by_email[key]["name"] = person["name"]
-                        by_email[key]["source"] = "ldap"
+                    by_email[key].update(item)
                     continue
-                people.append(
-                    {
-                        "name": person["name"],
-                        "email": email,
-                        "source": "ldap",
-                    }
-                )
+                people.append(item)
                 if key:
                     by_email[key] = people[-1]
         except ldap_auth.LdapError:

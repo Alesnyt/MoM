@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import base64
 import logging
 import smtplib
 import subprocess
 import sys
 import time
-from email.header import Header
+from dataclasses import dataclass
 from email.message import EmailMessage
+from email.policy import SMTP
 from email.utils import formatdate
 from pathlib import Path
 
-from . import config, retention, store
-from .speakers import SpeakerError, clean_speaker_email
+from . import config, protocol_email, retention, store, word_protocol
+from .analyze import ProtocolResult
+from .speakers import SpeakerError, clean_speaker_email, participant_labels
 
 log = logging.getLogger("mom.mail")
 RETRY_DELAYS = (30, 120, 600)
@@ -36,7 +37,7 @@ def email_body(meeting: dict) -> str:
     lines.append("")
     if result.get("date_hint"):
         lines.append(f"Дата: {result['date_hint']}")
-    participants = result.get("participants") or []
+    participants = participant_labels(meeting, result)
     if participants:
         lines.append(f"Участники: {', '.join(participants)}")
     lines.append("")
@@ -68,24 +69,48 @@ def email_body(meeting: dict) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def build_eml(subject: str, body: str) -> bytes:
-    payload = base64.encodebytes(body.replace("\n", "\r\n").encode("utf-8")).decode("ascii")
-    text = "\r\n".join(
-        [
-            "From: MoM <mom@localhost>",
-            "To: ",
-            f"Date: {formatdate(localtime=True)}",
-            f"Subject: {Header(subject, 'utf-8')}",
-            "MIME-Version: 1.0",
-            "Content-Type: text/plain; charset=UTF-8",
-            "Content-Transfer-Encoding: base64",
-            "X-Unsent: 1",
-            "",
-            payload.strip(),
-            "",
-        ]
-    )
-    return text.encode("utf-8")
+@dataclass(frozen=True)
+class ProtocolMail:
+    body: str
+    html: str
+    filename: str
+    docx: bytes
+
+
+def prepare_protocol_mail(meeting: dict) -> ProtocolMail:
+    result = ProtocolResult.model_validate(meeting["result"]).model_dump()
+    filename = word_protocol.docx_filename(result["title"] or meeting["title"])
+    public_url = protocol_email.meeting_url(config.get_public_base_url())
+    body = email_body({**meeting, "result": result}) + f"\nВо вложении: {filename}\n"
+    if public_url:
+        body += f"\nОткрыть в MoM: {public_url}\n"
+    return ProtocolMail(body, protocol_email.render_html(meeting, result, filename, public_url),
+                        filename, word_protocol.to_docx(meeting, result))
+
+
+def _make_message(
+    subject: str, body: str, *, html: str | None = None, attachment: tuple[str, bytes] | None = None,
+) -> EmailMessage:
+    message = EmailMessage(policy=SMTP)
+    message["Subject"] = " ".join(subject.splitlines())
+    message.set_content(body, cte="base64")
+    if html is not None:
+        message.add_alternative(html, subtype="html", cte="base64")
+    if attachment is not None:
+        filename, data = attachment
+        maintype, subtype = word_protocol.MEDIA_TYPE.split("/", 1)
+        message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+    return message
+
+
+def build_eml(meeting: dict) -> bytes:
+    packet = prepare_protocol_mail(meeting)
+    message = _make_message(email_subject(meeting), packet.body, html=packet.html,
+                            attachment=(packet.filename, packet.docx))
+    message["From"] = "MoM <mom@localhost>"
+    message["Date"] = formatdate(localtime=True)
+    message["X-Unsent"] = "1"
+    return message.as_bytes()
 
 
 def _slug(value: str) -> str:
@@ -101,7 +126,7 @@ def open_or_save_eml(meeting: dict) -> dict[str, str]:
     export_dir.mkdir(parents=True, exist_ok=True)
     result = meeting.get("result") or {}
     path = export_dir / f"{_slug(result.get('title') or meeting.get('title') or 'mom')}.eml"
-    path.write_bytes(build_eml(email_subject(meeting), email_body(meeting)))
+    path.write_bytes(build_eml(meeting))
     config.restrict_path(path, 0o600)
     opened = _open_local_eml(path)
     return {"mode": opened}
@@ -138,18 +163,18 @@ def smtp_snapshot(*, full: bool = False) -> dict:
     return data
 
 
-def send_mail(to: str, subject: str, body: str) -> None:
+def send_mail(
+    to: str, subject: str, body: str, *, html: str | None = None, attachment: tuple[str, bytes] | None = None,
+) -> None:
     host = config.get_smtp_host()
     from_addr = config.get_smtp_from()
     if not host or not from_addr:
         raise RuntimeError("Сначала укажите SMTP-сервер и адрес отправителя")
     if not to or "@" not in to:
         raise RuntimeError("Нет адреса получателя")
-    message = EmailMessage()
-    message["Subject"] = subject
+    message = _make_message(subject, body, html=html, attachment=attachment)
     message["From"] = from_addr
     message["To"] = to
-    message.set_content(body)
 
     port = config.get_smtp_port()
     user = config.get_smtp_user()
@@ -189,7 +214,7 @@ def send_mail(to: str, subject: str, body: str) -> None:
                 client.close()
 
 
-def _protocol_messages(meeting: dict) -> list[tuple[str, str, str]]:
+def _protocol_recipients(meeting: dict) -> list[str]:
     if not config.smtp_configured():
         return []
     user_id = meeting.get("user_id")
@@ -210,34 +235,40 @@ def _protocol_messages(meeting: dict) -> list[tuple[str, str, str]]:
             continue
         if normalized not in recipients:
             recipients.append(normalized)
-    extra = ""
-    public = config.get_public_base_url()
-    if public:
-        extra = f"\n\nОткрыть в MoM: {public}/"
-    body = (
-        "Встреча расшифрована, протокол готов.\n\n"
-        + email_body(meeting)
-        + extra
-    )
-    subject = email_subject(meeting)
-    return [(to, subject, body) for to in recipients]
+    return recipients
 
 
 def complete_protocol(meeting: dict, **fields) -> None:
     meeting_id = meeting["id"]
     user_id = meeting.get("user_id")
-    messages = _protocol_messages({**meeting, **fields})
+    finished = {**meeting, **fields}
+    recipients = _protocol_recipients(finished)
+    packet = None
+    status_message = "Готово"
+    if recipients:
+        try:
+            packet = prepare_protocol_mail(finished)
+            status_message = "Готово, письма в очереди"
+        except Exception:
+            log.exception("Не удалось подготовить письмо с протоколом встречи %s", meeting_id)
+            status_message = "Готово. Не удалось подготовить письмо с протоколом."
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         store.update_meeting(
             meeting_id, connection=conn, **fields, status="done", error=None, progress=100,
-            status_message="Готово, письма в очереди" if messages else "Готово",
+            status_message=status_message,
         )
         conn.execute("DELETE FROM protocol_mail WHERE meeting_id = ?", (meeting_id,))
-        conn.executemany(
-            "INSERT INTO protocol_mail (meeting_id, recipient, subject, body) VALUES (?, ?, ?, ?)",
-            [(meeting_id, *message) for message in messages],
-        )
+        conn.execute("DELETE FROM protocol_mail_format WHERE meeting_id = ?", (meeting_id,))
+        if packet is not None:
+            conn.execute(
+                "INSERT INTO protocol_mail_format (meeting_id, html, filename, docx) VALUES (?, ?, ?, ?)",
+                (meeting_id, packet.html, packet.filename, packet.docx),
+            )
+            conn.executemany(
+                "INSERT INTO protocol_mail (meeting_id, recipient, subject, body) VALUES (?, ?, ?, ?)",
+                [(meeting_id, to, email_subject(finished), packet.body) for to in recipients],
+            )
         removed = store.prune_user_meetings(user_id, connection=conn) if user_id else []
     retention.remove_pruned(removed)
 
@@ -260,6 +291,8 @@ def _delivery_status(conn, meeting_id: str) -> bool:
         if counts.get("unknown"):
             message += " Для некоторых писем SMTP не подтвердил отправку."
     conn.execute("UPDATE meetings SET status_message = ? WHERE id = ? AND status = 'done'", (message, meeting_id))
+    if not pending:
+        conn.execute("DELETE FROM protocol_mail_format WHERE meeting_id = ?", (meeting_id,))
     return pending
 
 
@@ -281,8 +314,10 @@ def deliver_pending() -> bool:
                 if owner and owner["user_id"]:
                     removed.extend(store.prune_user_meetings(owner["user_id"], connection=conn))
         row = conn.execute(
-            """SELECT mail.*, meetings.user_id FROM protocol_mail AS mail
+            """SELECT mail.*, meetings.user_id, content.html, content.filename, content.docx
+               FROM protocol_mail AS mail
                JOIN meetings ON meetings.id = mail.meeting_id AND meetings.status = 'done'
+               LEFT JOIN protocol_mail_format AS content ON content.meeting_id = mail.meeting_id
                WHERE mail.state = 'pending' AND mail.due_at <= ? ORDER BY mail.due_at, mail.id LIMIT 1""", (now,),
         ).fetchone()
         if row:
@@ -296,7 +331,16 @@ def deliver_pending() -> bool:
     state = "sent"
     due_at = 0
     try:
-        send_mail(row["recipient"], row["subject"], row["body"])
+        if row["docx"] is not None:
+            packet = ProtocolMail(row["body"], row["html"], row["filename"], row["docx"])
+        else:
+            # Pending rows created before the MIME upgrade still have a saved protocol.
+            meeting = store.get_meeting(row["meeting_id"])
+            if not meeting or meeting["status"] != "done":
+                raise RuntimeError("Сохранённый протокол недоступен")
+            packet = prepare_protocol_mail(meeting)
+        send_mail(row["recipient"], row["subject"], packet.body, html=packet.html,
+                  attachment=(packet.filename, packet.docx))
     except TemporaryMailError:
         state = "failed"
         if row["attempts"] < len(RETRY_DELAYS):

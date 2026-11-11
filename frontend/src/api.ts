@@ -386,6 +386,7 @@ export type Person = {
   name: string;
   email: string;
   source: "mom" | "ldap";
+  job_title?: string;
 };
 
 export async function listPeople(query: string, signal?: AbortSignal): Promise<Person[]> {
@@ -395,12 +396,12 @@ export async function listPeople(query: string, signal?: AbortSignal): Promise<P
   return data.people ?? [];
 }
 
-export async function renameSpeaker(id: string, speakerId: string, name: string, email?: string): Promise<Meeting> {
+export async function renameSpeaker(id: string, speakerId: string, name: string, email?: string, jobTitle?: string): Promise<Meeting> {
   const response = await fetch(`/api/meetings/${id}/speakers/${encodeURIComponent(speakerId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, email }),
+    body: JSON.stringify({ name, email, job_title: jobTitle }),
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
@@ -423,38 +424,22 @@ export async function getEmailBody(id: string): Promise<string> {
   return response.text();
 }
 
-export async function openMeetingEmail(meeting: Meeting): Promise<string> {
-  if (!meeting.result) throw new Error("Протокол ещё не готов");
-  const subject = `MoM: ${meeting.result.title || meeting.title}`;
-  const body = await getEmailBody(meeting.id);
-  const draft = `${subject}\n\n${body}`;
-  try {
-    await navigator.clipboard.writeText(draft);
-  } catch {
-    /* браузер может запретить буфер вне HTTPS */
-  }
-  const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  if (mailto.length <= 1800) {
-    window.location.assign(mailto);
-    return "opened-mailto";
-  }
-  const response = await fetch(`/api/meetings/${meeting.id}/email`, {
-    method: "POST",
-    credentials: "include",
-  });
-  if (!response.ok) throw new Error(await parseError(response));
-  const payload = (await response.json()) as { mode?: string };
-  return payload.mode || "saved";
+export async function downloadMeetingEmail(meeting: Meeting): Promise<void> {
+  await downloadFile(`/api/meetings/${meeting.id}/email.eml`, `${slug(meeting.title)}.eml`);
 }
 
 export async function downloadProtocol(id: string, title: string, format: "docx" | "md"): Promise<void> {
-  const response = await fetch(`/api/meetings/${id}/export.${format}`, { credentials: "include" });
+  await downloadFile(`/api/meetings/${id}/export.${format}`, `${slug(title)}.${format}`);
+}
+
+async function downloadFile(path: string, filename: string): Promise<void> {
+  const response = await fetch(path, { credentials: "include" });
   if (!response.ok) throw new Error(await parseError(response));
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${slug(title)}.${format}`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();

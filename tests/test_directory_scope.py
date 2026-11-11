@@ -87,12 +87,15 @@ def test_server_change_does_not_broaden_search(db, monkeypatch):
 def test_people_search_hits_only_selected_subtrees_and_deduplicates(db, monkeypatch):
     a, b = "OU=IT,DC=example,DC=com", "OU=HR,DC=example,DC=com"
     directory_scope.save("selected", [a, b])
-    anna = Entry("CN=Anna," + a, displayName="Анна", mail="anna@example.com")
+    anna = Entry("CN=Anna," + a, displayName="Анна", mail="anna@example.com", title="Руководитель проекта")
     boris = Entry("CN=Boris," + b, displayName="Борис", mail="boris@example.com")
     conn = Connection({a: ([anna], "success"), b: ([anna, boris], "success")})
     monkeypatch.setattr(ldap_auth, "_service_connection", lambda: (conn, None))
     result = ldap_auth.search_people("a*(b)", limit=2)
     assert [p["email"] for p in result] == ["anna@example.com", "boris@example.com"]
+    assert result[0]["job_title"] == "Руководитель проекта"
+    assert "job_title" not in result[1]
+    assert all("title" in call["attributes"] for call in conn.calls)
     assert [c["search_base"] for c in conn.calls] == [a, b]
     assert all(c["search_scope"] == "SUBTREE" and c["dereference_aliases"] == "NEVER" for c in conn.calls)
     assert all("a\\2a\\28b\\29" in c["search_filter"] for c in conn.calls)

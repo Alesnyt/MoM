@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
 import time
+from concurrent.futures import ThreadPoolExecutor
+from email import policy
+from email.parser import BytesParser
+from io import BytesIO
+from threading import Barrier
+from unittest.mock import patch
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
 
 from backend import auth, config, keys, mail, main, pipeline, store, worker
+
+real_send_mail = mail.send_mail
 
 
 @pytest.fixture
@@ -30,7 +37,7 @@ def delivery(tmp_path, monkeypatch):
     monkeypatch.setattr(keys, "snapshot", lambda: {"connected": True})
     monkeypatch.setattr(keys, "reset_status", lambda *a, **kw: None)
     sent = []
-    monkeypatch.setattr(mail, "send_mail", lambda to, subject, body: sent.append((to, subject, body)))
+    monkeypatch.setattr(mail, "send_mail", lambda to, subject, body, **formatting: sent.append((to, subject, body, formatting)))
 
     async def idle(stop):
         await stop.wait()
@@ -49,9 +56,11 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
     client, meeting, sent = delivery
     mid = meeting["id"]
     path = f"/api/meetings/{mid}"
-    renamed = client.patch(path + "/speakers/S1", json={"name": "Анна Петрова", "email": "ANNA@example.com"})
+    renamed = client.patch(path + "/speakers/S1", json={"name": "Анна Петрова", "email": "ANNA@example.com",
+                                                       "job_title": "Руководитель проекта"})
     assert renamed.status_code == 200
     assert renamed.json()["speakers"][0]["email"] == "anna@example.com"
+    assert renamed.json()["speakers"][0]["job_title"] == "Руководитель проекта"
     assert not renamed.json()["speakers"][0].get("send_protocol")
     # Saving a catalog contact is not permission to email that contact.
     client.patch(path + "/speakers/S3", json={"name": "Вера", "email": "vera@example.com"})
@@ -70,6 +79,7 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
     monkeypatch.setattr(pipeline, "make_client", lambda key: object())
 
     async def analyze(*args, **kwargs):
+        assert args[-1] == [{"name": "Анна Петрова", "job_title": "Руководитель проекта"}]
         return {"title": "Совещание", "summary": "Готовый протокол", "participants": ["Анна Петрова"], "mom": {}}
 
     monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", analyze)
@@ -81,6 +91,10 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
         pass
     assert [item[0] for item in sent] == ["owner@example.com", "anna@example.com"]
     assert all("Готовый протокол" in item[2] for item in sent)
+    assert all("Руководитель проекта" in item[3]["html"] for item in sent)
+    assert sent[0][3]["attachment"] == sent[1][3]["attachment"]
+    assert sent[0][3]["attachment"][0] == "Совещание.docx"
+    assert any("Руководитель проекта" in p.text for p in Document(BytesIO(sent[0][3]["attachment"][1])).paragraphs)
     assert store.get_meeting(mid)["status"] == "done"
 
 
@@ -144,9 +158,54 @@ def test_name_reset_clears_contact_and_delivery_flag(delivery):
 
 def test_same_name_can_be_linked_to_catalog_email(delivery):
     client, meeting, _ = delivery
-    response = client.patch(f'/api/meetings/{meeting["id"]}/speakers/S1', json={"name": "Анна", "email": "a@example.com"})
+    path = f'/api/meetings/{meeting["id"]}/speakers/S1'
+    response = client.patch(path, json={"name": "Анна", "email": "a@example.com", "job_title": "Аналитик"})
     assert response.status_code == 200
-    assert response.json()["speakers"][0] == {"id": "S1", "name": "Анна", "email": "a@example.com"}
+    assert response.json()["speakers"][0] == {"id": "S1", "name": "Анна", "email": "a@example.com", "job_title": "Аналитик"}
+    assert client.patch(path, json={"name": "Другой участник"}).json()["speakers"][0] == {"id": "S1", "name": "Другой участник"}
+
+
+def test_downloaded_email_and_smtp_have_the_word_attachment(delivery, monkeypatch):
+    client, meeting, _ = delivery
+    mid = meeting["id"]
+    result = {"title": "План & сроки", "summary": "Первый абзац\n\nВторой абзац",
+              "decisions": ["Утвердить <пилот>"], "action_items": [{"task": "Проверить пилот", "assignee": "Анна"}]}
+    mail.complete_protocol(meeting, result=result)
+    captured = []
+
+    class SMTP:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def send_message(self, message):
+            captured.append(message.as_bytes())
+
+        def quit(self):
+            pass
+
+    with patch.object(mail, "send_mail", real_send_mail), patch.object(mail.smtplib, "SMTP", SMTP):
+        monkeypatch.setattr(config, "get_smtp_host", lambda: "smtp.example.com")
+        monkeypatch.setattr(config, "get_smtp_from", lambda: "mom@example.com")
+        monkeypatch.setattr(config, "get_smtp_user", lambda: "")
+        monkeypatch.setattr(config, "get_smtp_port", lambda: 25)
+        monkeypatch.setattr(config, "get_smtp_starttls", lambda: False)
+        assert mail.deliver_pending()
+    response = client.get(f"/api/meetings/{mid}/email.eml")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "message/rfc822"
+    assert response.headers["cache-control"] == "no-store"
+    word = client.get(f"/api/meetings/{mid}/export.docx")
+    for raw in (captured[0], response.content):
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        assert "Первый абзац" in message.get_body(("plain",)).get_content()
+        html = message.get_body(("html",)).get_content()
+        assert "Утвердить &lt;пилот&gt;" in html and "<table" in html
+        attachment, = message.iter_attachments()
+        assert attachment.get_filename() == "План сроки.docx"
+        attached_doc = Document(BytesIO(attachment.get_payload(decode=True)))
+        export_doc = Document(BytesIO(word.content))
+        assert [p.text for p in attached_doc.paragraphs] == [p.text for p in export_doc.paragraphs]
+        assert attached_doc.tables[0].cell(1, 0).text == "Проверить пилот"
 
 
 def test_simultaneous_speaker_edits_keep_both_updates(delivery):
@@ -177,7 +236,7 @@ def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch
     ], "segments": meeting["segments"]}
     store.update_meeting(meeting["id"], transcript_segments=document, status="done", result={"summary": "Текст"})
 
-    def send(to, subject, body):
+    def send(to, subject, body, **formatting):
         sent.append(to)
         if to == "b@example.com":
             raise RuntimeError("SMTP refused")
@@ -211,7 +270,7 @@ def test_delivery_retries_only_the_recipient_with_a_temporary_failure(delivery, 
     mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
     calls = []
 
-    def send(to, _subject, _body):
+    def send(to, _subject, _body, **formatting):
         calls.append(to)
         if to == "speaker@example.com" and calls.count(to) == 1:
             raise mail.TemporaryMailError("try later")

@@ -54,6 +54,7 @@ export type Speaker = {
   id: string;
   name: string;
   email?: string;
+  job_title?: string;
   send_protocol?: boolean;
 };
 
