@@ -73,6 +73,7 @@ def transcribe_local_sync(
     language: str | None = None,
     duration: float | None = None,
     on_progress: ProgressFn | None = None,
+    *, hotwords: str = "",
 ) -> dict[str, Any]:
     log.info("whisper size=%s file=%s", config.local_whisper_size(), path.name)
     model = _load(on_progress)
@@ -81,6 +82,8 @@ def transcribe_local_sync(
     kwargs: dict[str, Any] = {"vad_filter": True}
     if language:
         kwargs["language"] = language
+    if hotwords:
+        kwargs["hotwords"] = hotwords
     segments, info = model.transcribe(str(path), **kwargs)
     total = float(duration or getattr(info, "duration", 0) or 0)
     texts: list[str] = []

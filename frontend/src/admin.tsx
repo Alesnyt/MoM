@@ -34,6 +34,7 @@ import {
 import { encodeAsrModel, formatAsrLabel, parseAsrModel, WHISPER_SIZES, type AsrEngine } from "./asr";
 import { connectionClass, connectionLabel, formatBytes, formatDate } from "./format";
 import { MonitoringPanel } from "./monitoring";
+import { CorporateContextPanel } from "./corporate-context";
 import type { AdminTab, AuditEvent, AuthStatus, Health, PlatformUser } from "./types";
 
 export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
@@ -41,6 +42,7 @@ export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "llm", label: "LLM" },
   { id: "prompts", label: "Промпты" },
   { id: "asr", label: "Расшифровка" },
+  { id: "context", label: "Контекст" },
   { id: "queue", label: "Очередь" },
   { id: "smtp", label: "Почта" },
   { id: "ldap", label: "Каталог" },
@@ -226,6 +228,8 @@ export function AdminSection({
       </div>}
       {tab === "monitoring" ? (
         <MonitoringPanel />
+      ) : tab === "context" ? (
+        <CorporateContextPanel />
       ) : tab === "users" ? (
         <UsersPanel ldapConfigured={Boolean(health?.ldap?.configured)} />
       ) : tab === "ldap" ? (
@@ -697,6 +701,7 @@ function LdapPanel({ health, onChange }: { health: Health | null; onChange: (hea
 }
 
 function adminHeading(tab: AdminTab): { title: string; lead: string } {
+  if (tab === "context") return { title: "Корпоративный контекст", lead: "Общий словарь и сотрудники AD для автоматического подбора подсказок к записям." };
   if (tab === "monitoring") return { title: "Мониторинг", lead: "Текущая обработка встреч и нагрузка на MoM." };
   if (tab === "prompts") return { title: "Промпты и проверка имён", lead: "Инструкции, которые получает LLM при обработке встреч." };
   if (tab === "llm") {

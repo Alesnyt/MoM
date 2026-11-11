@@ -253,6 +253,74 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
             connection.unbind()
 
 
+def sync_people() -> list[dict[str, str]]:
+    """Enumerate the configured people scopes, committing only a complete result."""
+    from ldap3 import SUBTREE, DEREF_NEVER
+
+    if not config.ldap_configured():
+        raise LdapError("Сначала настройте подключение AD в разделе «Каталог»")
+    bases = directory_scope.search_bases()
+    if not bases:
+        return []
+    search_filter = people_filter("")
+    mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
+    attributes = sorted({mail_attr, "mail", "cn", "displayName", "title", "department", "sn"})
+    connection = None
+    people, seen = [], set()
+    deadline = time.monotonic() + 60
+    try:
+        connection, _server = _service_connection()
+        for base in bases:
+            base_key = directory_scope.dn_key(base)
+            cookie, cookies = None, set()
+            while True:
+                if time.monotonic() >= deadline:
+                    raise LdapError("Синхронизация AD превысила минуту. Сузьте области поиска")
+                connection.search(search_base=base, search_filter=search_filter, search_scope=SUBTREE,
+                    dereference_aliases=DEREF_NEVER, attributes=attributes, time_limit=8,
+                    paged_size=500, paged_cookie=cookie, paged_criticality=True)
+                result = connection.result or {}
+                if result.get("description") != "success":
+                    raise LdapError("AD вернул неполный результат. Проверьте области поиска и права доступа")
+                for entry in connection.entries:
+                    dn = directory_scope.dn_key(str(entry.entry_dn))
+                    if len(dn) < len(base_key) or dn[-len(base_key):] != base_key:
+                        raise LdapError("AD вернул сотрудника вне выбранной области")
+                    email = _entry_attr(entry, mail_attr) or _entry_attr(entry, "mail")
+                    key = email.casefold() if email else dn
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    name = _entry_attr(entry, "displayName") or _entry_attr(entry, "cn")
+                    if name:
+                        people.append({"name": " ".join(name.split())[:200], "email": email[:320],
+                            "job_title": " ".join(_entry_attr(entry, "title").split())[:200],
+                            "department": " ".join(_entry_attr(entry, "department").split())[:120],
+                            "surname": " ".join(_entry_attr(entry, "sn").split())[:120]})
+                    if len(people) > 50000:
+                        raise LdapError("Выбрано больше 50 000 сотрудников. Сузьте области поиска")
+                control = (result.get("controls") or {}).get("1.2.840.113556.1.4.319")
+                if not control:
+                    raise LdapError("AD не подтвердил постраничную выгрузку сотрудников")
+                cookie = control.get("value", {}).get("cookie")
+                if not cookie:
+                    break
+                if cookie in cookies:
+                    raise LdapError("AD повторил страницу сотрудников")
+                cookies.add(cookie)
+        return people
+    except LdapError:
+        raise
+    except Exception as exc:
+        raise LdapError("Не удалось синхронизировать сотрудников AD") from exc
+    finally:
+        if connection is not None:
+            try:
+                connection.unbind()
+            except Exception:
+                log.warning("Не удалось закрыть соединение синхронизации AD")
+
+
 def browse_scopes(base_dn: str = "", cursor: str = "") -> dict:
     """Read directory structure, never enumerate people or follow referrals."""
     from ldap3 import BASE, LEVEL, DEREF_NEVER

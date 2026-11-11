@@ -754,6 +754,12 @@ h1 {
   color: var(--danger);
 }
 
+.context-toggle { display: flex; align-items: center; gap: 10px; }
+.context-search { display: grid; gap: 8px; margin-top: 20px; }
+.context-table { overflow-x: auto; }
+.context-table table { border-collapse: collapse; width: 100%; }
+.context-table th, .context-table td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }
+
 .composer-row {
   display: flex;
   gap: 12px;

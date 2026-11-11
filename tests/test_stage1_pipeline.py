@@ -372,3 +372,44 @@ def test_cloud_asr_keeps_mp3_path(recording_db, monkeypatch):
     asyncio.run(pipeline.process_meeting(meeting_id))
     assert store.get_meeting(meeting_id)["status"] == "review"
     assert mp3.exists()
+
+
+def test_corporate_context_reaches_asr_review_and_protocol(recording_db, monkeypatch):
+    from backend import corporate_context as context
+    context.import_dictionary("terms.csv", "Термин;Варианты\nTrueConf;труконф\n".encode(), "admin")
+    monkeypatch.setattr(config, "WHISPER_MODEL", "local-whisper")
+    meeting_id = "with-context"
+    source = config.UPLOAD_DIR / f"{meeting_id}.wav"
+    source.write_bytes(b"source")
+    store.create_meeting(meeting_id, "Встреча", source.name, recording_db)
+
+    def extract(src, dst):
+        dst.write_bytes(b"wav")
+        return 10.0
+
+    async def transcribe(*args, **kwargs):
+        assert kwargs["hotwords"] == "TrueConf"
+        return {"text": "Откройте труконф", "segments": [{"start": 0, "end": 1, "text": "Откройте труконф"}]}
+
+    def diarize(path, body, callback, **kwargs):
+        return {"speakers": [{"id": "S1", "name": "Спикер 1"}],
+                "segments": [{**body["segments"][0], "speaker": "S1"}]}
+
+    async def analyze(*args, **kwargs):
+        assert "TrueConf" in args[1]
+        assert kwargs["corporate_terms"][0]["term"] == "TrueConf"
+        return _result()
+
+    monkeypatch.setattr(pipeline, "extract_wav", extract)
+    monkeypatch.setattr(pipeline, "_transcribe", transcribe)
+    monkeypatch.setattr(pipeline, "apply_diarization", diarize)
+    monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", analyze)
+    asyncio.run(pipeline.process_meeting(meeting_id))
+    meeting = store.get_meeting(meeting_id)
+    assert meeting["status"] == "review"
+    assert meeting["segments"][0]["text"] == "Откройте TrueConf"
+    assert meeting["segments"][0]["context_original_text"] == "Откройте труконф"
+    assert meeting["corporate_context"]["entries"][0]["term"] == "TrueConf"
+    store.update_meeting(meeting_id, status="queued")
+    asyncio.run(pipeline.process_meeting(meeting_id))
+    assert store.get_meeting(meeting_id)["status"] == "done"

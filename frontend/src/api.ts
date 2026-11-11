@@ -13,6 +13,40 @@ async function parseError(response: Response): Promise<string> {
   return `Ошибка ${response.status}`;
 }
 
+export type CorporateTerm = { term: string; aliases: string[]; description: string; department: string };
+export type CorporateContext = {
+  enabled: boolean; sync_ad: boolean; revision: number; term_count: number; people_count: number;
+  directory_current: boolean; ldap_configured: boolean; synced_at: string | null; imported_at: string | null;
+  sync_error: string | null; syncing: boolean; terms: CorporateTerm[]; matched_terms: number;
+};
+
+export async function getCorporateContext(query: string, signal?: AbortSignal): Promise<CorporateContext> {
+  const response = await fetch(`/api/admin/context?q=${encodeURIComponent(query)}`, {credentials: "include", signal});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function saveCorporateContext(enabled: boolean, sync_ad: boolean): Promise<CorporateContext> {
+  const response = await fetch("/api/admin/context/settings", {method: "POST", credentials: "include",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({enabled, sync_ad})});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function syncCorporateDirectory(): Promise<CorporateContext> {
+  const response = await fetch("/api/admin/context/sync", {method: "POST", credentials: "include"});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function importCorporateDictionary(file: File): Promise<CorporateContext> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch("/api/admin/context/import", {method: "POST", credentials: "include", body});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
 export async function getHealth(): Promise<Health> {
   const response = await fetch("/api/health");
   if (!response.ok) throw new Error(await parseError(response));

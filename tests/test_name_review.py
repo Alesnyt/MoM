@@ -230,6 +230,25 @@ def test_oversized_intermediate_protocols_stay_inside_model_context(db, monkeypa
     assert result["decisions"] == [f"Решение {index}" for index in range(1, 5)]
 
 
+def test_corporate_glossary_and_roles_share_a_bounded_prompt(db, monkeypatch):
+    monkeypatch.setattr(config, "PROTOCOL_CONTEXT_TOKENS", 8192)
+    store.save_llm_settings({**prompts.snapshot(), "protocol_prompt": "Return JSON"}, "admin")
+    calls = []
+    async def create(**kwargs):
+        messages = kwargs["messages"]
+        calls.append(messages)
+        assert sum(len(message["content"].encode()) for message in messages) < 8192 - 2048
+        assert 'TrueConf' in messages[1]["content"]
+        assert 'Архитектор' in messages[1]["content"]
+        assert 'подтверждай репликами' in messages[1]["content"]
+        return response({"summary": "Обсудили настройку связи."})
+    terms = [{"term": "TrueConf", "description": "Видеоконференции", "aliases": []}] + [
+        {"term": f"Термин {i}", "description": "Д" * 500} for i in range(29)]
+    asyncio.run(analyze.analyze_long_transcript(client_for(create), "[реплика 1] Анна: Настроим связь.", "Связь",
+        corporate_terms=terms, participant_roles=[{"name": "Анна", "job_title": "Архитектор"}]))
+    assert len(calls) == 1
+
+
 def test_prompts_api_requires_admin_and_persists_versions(db):
     import time
     from fastapi.testclient import TestClient

@@ -16,7 +16,7 @@ from .analyze import (
     merge_transcripts,
     transcribe_file,
 )
-from . import config
+from . import config, corporate_context
 from .audio import AudioError, extract_audio_async, extract_wav, format_duration, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import complete_protocol
@@ -70,6 +70,7 @@ def _clock(seconds: int) -> str:
 async def _analyze_with_heartbeat(
     client, transcript: str, title: str, progress: _Progress, prefix: str,
     participant_roles: list[dict[str, str]] | None = None,
+    corporate_terms: list[dict] | None = None,
 ):
     start = time.monotonic()
     stop = asyncio.Event()
@@ -104,7 +105,8 @@ async def _analyze_with_heartbeat(
                 force=True,
             )
 
-        return await analyze_long_transcript(client, transcript, title, on_part=on_part, participant_roles=participant_roles)
+        return await analyze_long_transcript(client, transcript, title, on_part=on_part, participant_roles=participant_roles,
+                                             **({"corporate_terms": corporate_terms} if corporate_terms else {}))
     finally:
         stop.set()
         await task
@@ -144,6 +146,7 @@ async def _process_meeting(meeting_id: str) -> None:
         return
 
     asr_model = config.get_asr_model()
+    context = await asyncio.to_thread(corporate_context.for_meeting, meeting)
     local_audio = config.is_local_asr(asr_model)
     audio_path = AUDIO_DIR / f"{meeting_id}{'.wav' if local_audio else '.mp3'}"
     client = make_client(api_key)
@@ -242,7 +245,9 @@ async def _process_meeting(meeting_id: str) -> None:
             if voiced is None:
                 step = "расшифровка"
                 log.info("шаг: расшифровка model=%s", asr_model)
-                payload = await _transcribe(client, audio_path, meeting_id, duration, progress, asr_model=asr_model)
+                hints = await asyncio.to_thread(context.hotwords, meeting["title"])
+                payload = await _transcribe(client, audio_path, meeting_id, duration, progress, asr_model=asr_model,
+                                            **({"hotwords": hints} if hints else {}))
                 if known_turns is not None:
                     voiced = assign_speakers(payload.get("segments") or [], known_turns)
                     voiced["note"] = known_note
@@ -260,7 +265,8 @@ async def _process_meeting(meeting_id: str) -> None:
                                 lambda message: progress.set(86, message, status="transcribing", force=True),
                                 prepared=audio_path if local_audio else None,
                             )
-            transcript = (voiced.get("text") or "").strip()
+            voiced = await asyncio.to_thread(context.apply, voiced)
+            transcript = (render_transcript(voiced) if voiced.get("segments") else voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
             # Cancellation can arrive while ASR/diarization runs in a thread.
@@ -275,6 +281,7 @@ async def _process_meeting(meeting_id: str) -> None:
                     "speakers": voiced.get("speakers") or [],
                     "segments": voiced.get("segments") or [],
                     "note": voiced.get("note"),
+                    "corporate_context": voiced.get("corporate_context"),
                 },
                 language=payload.get("language"),
                 status="review",
@@ -291,6 +298,7 @@ async def _process_meeting(meeting_id: str) -> None:
             "note": meeting.get("diarization_note"),
             "source_type": meeting.get("source_type", "audio"),
             "name_review": meeting.get("name_review"),
+            "corporate_context": meeting.get("corporate_context"),
         }
         if document["segments"]:
             with stage_timer("name_review"):
@@ -309,8 +317,12 @@ async def _process_meeting(meeting_id: str) -> None:
         protocol_input = render_transcript(document, numbered=True) if document["segments"] else transcript
         roles = [{"name": speaker["name"], "job_title": speaker["job_title"]}
                  for speaker in document["speakers"] if speaker.get("job_title")]
+        terms = await asyncio.to_thread(context.select, protocol_input)
+        document["corporate_context"] = {"revision": context.revision, "entries": terms}
+        store.update_meeting(meeting_id, transcript_segments=document)
         with stage_timer("protocol"):
-            result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix, roles)
+            result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix, roles,
+                                                   **({"corporate_terms": terms} if terms else {}))
         # A cloud LLM request cannot always be interrupted immediately. Ignore
         # its late response when the user has requested stop/restart.
         if control.is_stopped(meeting_id):
@@ -348,7 +360,7 @@ async def _process_meeting(meeting_id: str) -> None:
 
 async def _transcribe(
     client, audio_path: Path, meeting_id: str, duration: float, progress: _Progress,
-    *, asr_model: str | None = None,
+    *, asr_model: str | None = None, hotwords: str = "",
 ) -> dict:
     asr_model = asr_model or config.get_asr_model()
 
@@ -369,6 +381,7 @@ async def _transcribe(
             asr_model,
             duration=duration,
             on_progress=on_asr,
+            **({"hotwords": hotwords} if hotwords else {}),
         )
 
     with stage_timer("asr_cloud"):
