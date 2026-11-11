@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import logging
-import shutil
 import sqlite3
 import threading
 import uuid
@@ -20,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, prompts, store, worker
+from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
 from . import transcript_import, upload
@@ -228,16 +227,6 @@ def _valid_email(value: str) -> bool:
     return bool(local and "." in domain)
 
 
-def _purge_files(meeting_id: str) -> None:
-    for leftover in UPLOAD_DIR.glob(f"{meeting_id}.*"):
-        leftover.unlink(missing_ok=True)
-    (AUDIO_DIR / f"{meeting_id}.mp3").unlink(missing_ok=True)
-    (AUDIO_DIR / f"{meeting_id}.wav").unlink(missing_ok=True)
-    chunks = AUDIO_DIR / f"{meeting_id}_chunks"
-    if chunks.exists():
-        shutil.rmtree(chunks, ignore_errors=True)
-
-
 def _owned(meeting: dict | None, user: dict) -> dict:
     if not meeting or meeting.get("user_id") != user["user_id"]:
         raise HTTPException(status_code=404, detail="Встреча не найдена")
@@ -277,20 +266,6 @@ def _check_ldap_settings(payload: LdapIn) -> None:
 
 def _actor_name(session: dict) -> str:
     return (session.get("username") or session.get("email") or "система").strip() or "система"
-
-
-def _note_purged(actor: str, removed: list[dict]) -> None:
-    for item in removed:
-        meeting_id = item.get("id") or ""
-        if not meeting_id:
-            continue
-        store.record_audit(
-            actor,
-            "meeting.delete",
-            meeting_id,
-            f"{item.get('title') or 'встреча'} · вытеснено из архива",
-        )
-        _purge_files(meeting_id)
 
 
 _EMAIL_OPENED = {
@@ -336,7 +311,7 @@ async def lifespan(_app: FastAPI):
     config.migrate_token_plan_asr()
     if config.get_api_key():
         try:
-            await asyncio.wait_for(keys.verify_key(thorough=False), timeout=float(config.VERIFY_TIMEOUT_SECONDS) + 5)
+            await asyncio.wait_for(keys.verify_key(), timeout=float(config.VERIFY_TIMEOUT_SECONDS) + 5)
         except Exception:
             keys.note_check_failed("Не удалось связаться с провайдером при запуске.")
     else:
@@ -595,7 +570,7 @@ def admin_update_user(
     if fields:
         store.update_user(user_id, **fields)
     if payload.archive_limit is not None:
-        _note_purged(actor, store.prune_user_meetings(user_id))
+        retention.trim_archive(user_id, actor)
     user = store.get_user(user_id)
     if generated:
         return {"user": user, "password": generated}
@@ -631,7 +606,7 @@ def admin_delete_user(user_id: str, _admin: dict = Depends(require_admin)) -> di
     if removed is None:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     for meeting_id in removed:
-        _purge_files(meeting_id)
+        retention.purge_files(meeting_id)
     store.record_audit(
         _actor_name(_admin),
         "user.delete",
@@ -652,6 +627,7 @@ def admin_monitoring(response: Response, _admin: dict = Depends(require_admin)) 
     return {
         "queue": store.queue_monitoring(),
         "resources": monitoring.resources.snapshot(),
+        "performance": performance.snapshot(),
         "disk": disk.snapshot(),
         "sampled_at": store.utc_now(),
     }
@@ -712,11 +688,14 @@ async def save_settings(
 
 @app.post("/api/settings/models")
 def save_models(payload: ModelsIn, _admin: dict = Depends(require_admin)) -> dict:
-    chat = (payload.chat_model or config.get_chat_model()).strip()
+    previous = config.get_chat_model()
+    chat = (payload.chat_model or previous).strip()
     asr = (payload.asr_model or config.get_asr_model()).strip()
     if not chat or not asr:
         raise HTTPException(status_code=400, detail="Укажите модели чата и расшифровки")
     config.apply_connection(config.get_base_url(), chat, asr)
+    if chat != previous:
+        keys.reset_status("Подключение ещё не проверено")
     store.record_audit(_actor_name(_admin), "models.save", "llm", f"чат {chat}, расшифровка {asr}")
     return _health(full=True)
 
@@ -919,7 +898,6 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
         uuid.uuid4().hex, title.strip() or (Path(original).stem[:200] if file else "Текстовая встреча"),
         original[:255], user["user_id"], document,
     )
-    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"], preserve_id=meeting["id"]))
     return meeting
 
 
@@ -998,7 +976,6 @@ async def _create_audio_meeting(request: Request, file: StarletteUploadFile, tit
 
     display_title = (title or "").strip() or Path(original).stem
     meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"])
-    _note_purged(_actor_name(user), store.prune_user_meetings(user["user_id"]))
     worker.notify_work()
     return meeting
 
@@ -1041,33 +1018,34 @@ async def retry_meeting(
 
 @app.post("/api/meetings/{meeting_id}/protocol")
 def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dict = Depends(require_user)) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    if meeting["status"] != "review":
-        raise HTTPException(status_code=409, detail="Протокол собирается после готовой расшифровки")
-    if not (meeting.get("transcript") or "").strip():
-        raise HTTPException(status_code=409, detail="Нет расшифровки")
-    if not keys.snapshot()["connected"]:
-        status = keys.snapshot()
-        raise HTTPException(
-            status_code=400,
-            detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-        )
-    recipients = [item.model_dump() for item in payload.recipients] if payload else []
-    if recipients and not config.smtp_configured():
-        raise HTTPException(status_code=400, detail="Для отправки протокола спикерам настройте SMTP в админке")
-    document = {
-        "speakers": meeting.get("speakers") or [],
-        "segments": meeting.get("segments") or [],
-        "note": meeting.get("diarization_note"),
-        "name_review": meeting.get("name_review"),
-        "source_type": meeting.get("source_type", "audio"),
-    }
-    try:
-        document = select_protocol_recipients(document, recipients)
-    except SpeakerError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not store.queue_review_protocol(meeting_id, document):
-        raise HTTPException(status_code=409, detail="Протокол уже поставлен в очередь")
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        if meeting["status"] != "review":
+            raise HTTPException(status_code=409, detail="Протокол собирается после готовой расшифровки")
+        if not (meeting.get("transcript") or "").strip():
+            raise HTTPException(status_code=409, detail="Нет расшифровки")
+        if not keys.snapshot()["connected"]:
+            status = keys.snapshot()
+            raise HTTPException(
+                status_code=400,
+                detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
+            )
+        recipients = [item.model_dump() for item in payload.recipients] if payload else []
+        if recipients and not config.smtp_configured():
+            raise HTTPException(status_code=400, detail="Для отправки протокола спикерам настройте SMTP в админке")
+        document = {
+            "speakers": meeting.get("speakers") or [],
+            "segments": meeting.get("segments") or [],
+            "note": meeting.get("diarization_note"),
+            "name_review": meeting.get("name_review"),
+            "source_type": meeting.get("source_type", "audio"),
+        }
+        try:
+            document = select_protocol_recipients(document, recipients)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not store.queue_review_protocol(meeting_id, document, connection=connection):
+            raise HTTPException(status_code=409, detail="Протокол уже поставлен в очередь")
     store.record_audit(_actor_name(user), "protocol.recipients", meeting_id, f"Дополнительных получателей: {len(recipients)}")
     store.refresh_queue_messages()
     worker.notify_work()
@@ -1125,7 +1103,7 @@ def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
         )
     if not store.delete_meeting(meeting_id):
         raise HTTPException(status_code=404, detail="Встреча не найдена")
-    _purge_files(meeting_id)
+    retention.purge_files(meeting_id)
     store.record_audit(_actor_name(user), "meeting.delete", meeting_id, meeting.get("title") or "")
     return {"ok": True}
 
@@ -1144,41 +1122,20 @@ def _segments_doc(meeting: dict) -> dict:
     }
 
 
-def _save_segments(meeting_id: str, document: dict, result: dict | None, *, replace_from: str | None = None, replace_to: str | None = None) -> dict:
+def _save_segments(
+    connection: sqlite3.Connection, meeting_id: str, document: dict, result: dict | None,
+    *, replace_from: str | None = None, replace_to: str | None = None, rebuild: bool = False,
+) -> None:
     if document.get("name_review") and (not replace_from or replace_from != replace_to):
         document["name_review"] = {**document["name_review"], "status": "stale",
             "message": "Разметка спикеров изменена. Для новой проверки имён пересоберите протокол."}
-    stored_result = result
-    if stored_result is not None and replace_from and replace_to:
-        stored_result = replace_speaker_label(stored_result, replace_from, replace_to)
-    store.update_meeting(
-        meeting_id,
-        transcript=render_transcript(document),
-        transcript_segments=document,
-        result=stored_result,
-    )
-    updated = store.get_meeting(meeting_id)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Встреча не найдена")
-    return updated
-
-
-def _queue_protocol(meeting_id: str, message: str) -> dict:
-    store.update_meeting(
-        meeting_id,
-        status="queued",
-        status_message=message,
-        error=None,
-        result=None,
-        progress=88,
-        queued_at=store.utc_now(),
-    )
-    store.refresh_queue_messages()
-    worker.notify_work()
-    updated = store.get_meeting(meeting_id)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Встреча не найдена")
-    return updated
+    if result is not None and replace_from and replace_to:
+        result = replace_speaker_label(result, replace_from, replace_to)
+    fields = {"transcript": render_transcript(document), "transcript_segments": document, "result": result}
+    if rebuild:
+        fields.update(status="queued", status_message="Обновляю протокол после правки спикеров",
+                      error=None, progress=88, queued_at=store.utc_now())
+    store.update_meeting(meeting_id, connection=connection, **fields)
 
 
 @app.patch("/api/meetings/{meeting_id}/speakers/{speaker_id}")
@@ -1188,22 +1145,24 @@ def rename_meeting_speaker(
     payload: SpeakerNameIn,
     user: dict = Depends(require_user),
 ) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    document = _segments_doc(meeting)
-    try:
-        updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name, payload.email)
-    except SpeakerError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    saved = _save_segments(
-        meeting_id,
-        updated,
-        meeting.get("result"),
-        replace_from=old_name,
-        replace_to=new_name,
-    )
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        document = _segments_doc(meeting)
+        try:
+            updated, old_name, new_name = rename_speaker(document, speaker_id, payload.name, payload.email)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _save_segments(
+            connection,
+            meeting_id,
+            updated,
+            meeting.get("result"),
+            replace_from=old_name,
+            replace_to=new_name,
+        )
     if old_name != new_name:
         store.record_audit(_actor_name(user), "speaker.rename", meeting_id, f"{old_name} → {new_name}")
-    return saved
+    return store.get_meeting(meeting_id)
 
 
 @app.patch("/api/meetings/{meeting_id}/segments")
@@ -1212,34 +1171,34 @@ def reassign_meeting_segments(
     payload: SpeakerAssignIn,
     user: dict = Depends(require_user),
 ) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    document = _segments_doc(meeting)
-    try:
-        updated = reassign_segments(document, payload.segment_indexes, payload.speaker_id)
-    except SpeakerError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    old_ids = {item["id"] for item in document.get("speakers") or []}
-    if payload.speaker_id == "new":
-        created = next((item for item in updated.get("speakers") or [] if item.get("id") not in old_ids), None)
-        label = (created or {}).get("name") or "новый спикер"
-    else:
-        label = next(
-            (item.get("name") for item in updated.get("speakers") or [] if item.get("id") == payload.speaker_id),
-            payload.speaker_id,
-        )
-    _save_segments(meeting_id, updated, None)
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        document = _segments_doc(meeting)
+        try:
+            updated = reassign_segments(document, payload.segment_indexes, payload.speaker_id)
+        except SpeakerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        old_ids = {item["id"] for item in document.get("speakers") or []}
+        if payload.speaker_id == "new":
+            created = next((item for item in updated.get("speakers") or [] if item.get("id") not in old_ids), None)
+            label = (created or {}).get("name") or "новый спикер"
+        else:
+            label = next(
+                (item.get("name") for item in updated.get("speakers") or [] if item.get("id") == payload.speaker_id),
+                payload.speaker_id,
+            )
+        rebuild = meeting["status"] != "review"
+        _save_segments(connection, meeting_id, updated, None, rebuild=rebuild)
     store.record_audit(
         _actor_name(user),
         "speaker.reassign",
         meeting_id,
         f"{len(payload.segment_indexes)} реплик → {label}",
     )
-    if meeting["status"] == "review":
-        saved = store.get_meeting(meeting_id)
-        if not saved:
-            raise HTTPException(status_code=404, detail="Встреча не найдена")
-        return saved
-    return _queue_protocol(meeting_id, "Обновляю протокол после правки спикеров")
+    if rebuild:
+        store.refresh_queue_messages()
+        worker.notify_work()
+    return store.get_meeting(meeting_id)
 
 
 @app.get("/api/meetings/{meeting_id}/export.md", response_class=PlainTextResponse)

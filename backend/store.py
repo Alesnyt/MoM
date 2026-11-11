@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -12,6 +12,7 @@ import stat
 import time
 
 from .config import DB_PATH, ensure_dirs, get_max_jobs, restrict_path
+from .performance import record_timing
 from .protocol_text import deduplicate
 
 STATUSES = (
@@ -89,6 +90,18 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS protocol_mail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+            recipient TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            due_at REAL NOT NULL DEFAULT 0,
+            UNIQUE(meeting_id, recipient)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_protocol_mail_due ON protocol_mail(state, due_at)")
         user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "auth_mode" not in user_columns:
             conn.execute(
@@ -211,7 +224,7 @@ def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str
     return get_meeting(meeting_id)
 
 
-def update_meeting(meeting_id: str, **fields: Any) -> None:
+def update_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = None, **fields: Any) -> None:
     if not fields:
         return
     allowed = {
@@ -241,21 +254,29 @@ def update_meeting(meeting_id: str, **fields: Any) -> None:
         sets.append(f"{key} = ?")
         values.append(value)
     values.append(meeting_id)
-    with connect() as conn:
+    with (connect() if connection is None else nullcontext(connection)) as conn:
         conn.execute(f"UPDATE meetings SET {', '.join(sets)} WHERE id = ?", values)
 
 
 def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        row = conn.execute(f"SELECT meetings.*, {_MAIL_PENDING} FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
     if not row:
         return None
     return attach_queue_info([_serialize(row, body=True)])[0]
 
 
-def queue_review_protocol(meeting_id: str, document: dict) -> bool:
-    """Save explicitly selected recipients and claim review in one transaction."""
+@contextmanager
+def edit_meeting(meeting_id: str) -> Iterator[tuple[sqlite3.Connection, dict | None]]:
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        yield conn, _serialize(row) if row else None
+
+
+def queue_review_protocol(meeting_id: str, document: dict, *, connection: sqlite3.Connection | None = None) -> bool:
+    """Save explicitly selected recipients and claim review in one transaction."""
+    with (connect() if connection is None else nullcontext(connection)) as conn:
         cursor = conn.execute(
             """UPDATE meetings SET status='queued', status_message='Собираю протокол',
                error=NULL, result_json=NULL, progress=88, queued_at=?, segments_json=?
@@ -265,10 +286,14 @@ def queue_review_protocol(meeting_id: str, document: dict) -> bool:
         return cursor.rowcount == 1
 
 
-_LIST_COLUMNS = """
+_MAIL_PENDING = """CASE WHEN meetings.status = 'done' THEN EXISTS(SELECT 1 FROM protocol_mail
+    WHERE meeting_id = meetings.id AND state IN ('pending', 'sending')) ELSE 0 END AS mail_pending"""
+
+
+_LIST_COLUMNS = f"""
     id, title, filename, status, status_message, created_at,
     duration_seconds, language, error, progress, queued_at, user_id,
-    NULL AS transcript, NULL AS result_json
+    NULL AS transcript, NULL AS result_json, {_MAIL_PENDING}
 """
 
 
@@ -277,7 +302,7 @@ def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dic
         if body:
             if user_id:
                 rows = conn.execute(
-                    "SELECT * FROM meetings WHERE user_id = ? ORDER BY created_at DESC",
+                    "SELECT * FROM meetings WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
                     (user_id,),
                 ).fetchall()
             else:
@@ -286,7 +311,7 @@ def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dic
                 ).fetchall()
         elif user_id:
             rows = conn.execute(
-                f"SELECT {_LIST_COLUMNS} FROM meetings WHERE user_id = ? ORDER BY created_at DESC",
+                f"SELECT {_LIST_COLUMNS} FROM meetings WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
                 (user_id,),
             ).fetchall()
         else:
@@ -299,23 +324,24 @@ def list_meetings(user_id: str | None = None, *, body: bool = False) -> list[dic
 ACTIVE_STATUSES = {"queued", "extracting", "transcribing", "analyzing"}
 
 
-def prune_user_meetings(user_id: str, *, preserve_id: str | None = None) -> list[dict[str, str]]:
-    user = get_user(user_id)
-    if not user:
-        return []
-    limit = max(1, int(user["archive_limit"]))
-    meetings = list_meetings(user_id)
-    over = len(meetings) - limit
-    removed: list[dict[str, str]] = []
-    for item in reversed(meetings):
-        if over <= 0:
-            break
-        if item["id"] == preserve_id or item.get("status") in ACTIVE_STATUSES:
-            continue
-        if delete_meeting(item["id"]):
-            removed.append({"id": item["id"], "title": item.get("title") or ""})
-            over -= 1
-    return removed
+def prune_user_meetings(user_id: str, *, connection: sqlite3.Connection | None = None) -> list[dict[str, str]]:
+    with (connect() if connection is None else nullcontext(connection)) as conn:
+        if connection is None:
+            conn.execute("BEGIN IMMEDIATE")
+        user = conn.execute("SELECT archive_limit FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user:
+            return []
+        expired = conn.execute(
+            """SELECT id, title FROM (
+                   SELECT id, title, status FROM meetings WHERE user_id = ? AND status IN ('done', 'error')
+                   ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+               ) AS expired WHERE status = 'error' OR NOT EXISTS (
+                   SELECT 1 FROM protocol_mail WHERE meeting_id = expired.id AND state IN ('pending', 'sending')
+               )""",
+            (user_id, max(1, int(user["archive_limit"]))),
+        ).fetchall()
+        conn.executemany("DELETE FROM meetings WHERE id = ?", [(row["id"],) for row in expired])
+        return [dict(row) for row in expired]
 
 
 def queue_wait_message(ahead: int) -> str:
@@ -356,6 +382,9 @@ def queue_monitoring() -> dict[str, Any]:
         counts = dict(conn.execute(
             "SELECT status, COUNT(*) FROM meetings WHERE status IN ('queued', 'review') GROUP BY status"
         ).fetchall())
+        oldest = conn.execute(
+            "SELECT MIN(COALESCE(queued_at, created_at)) FROM meetings WHERE status = 'queued'",
+        ).fetchone()[0]
         jobs = conn.execute(
             """SELECT id, status, progress FROM meetings
                WHERE status IN ('extracting', 'transcribing', 'analyzing')
@@ -366,12 +395,23 @@ def queue_monitoring() -> dict[str, Any]:
         "waiting": counts.get("queued", 0),
         "review": counts.get("review", 0),
         "limit": get_max_jobs(),
+        "oldest_wait_seconds": _seconds_since(oldest) if oldest else None,
         "jobs": [dict(job) for job in jobs],
     }
 
 
+def _seconds_since(stamp: str) -> float:
+    try:
+        value = datetime.fromisoformat(stamp)
+        return max(0, time.time() - value.replace(tzinfo=value.tzinfo or timezone.utc).timestamp())
+    except ValueError:
+        return 0
+
+
 def attach_queue_info(meetings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not meetings:
+    if not any(item.get("status") == "queued" for item in meetings):
+        for item in meetings:
+            item["queue_ahead"] = 0
         return meetings
     with connect() as conn:
         active = conn.execute(
@@ -444,7 +484,7 @@ def claim_next_meeting(max_jobs: int) -> str | None:
         busy_users = {row["user_id"] for row in running if row["user_id"]}
         queued = conn.execute(
             """
-            SELECT id, user_id FROM meetings
+            SELECT id, user_id, COALESCE(queued_at, created_at) AS entered FROM meetings
             WHERE status = 'queued'
             ORDER BY COALESCE(queued_at, created_at) ASC, id ASC
             """
@@ -452,10 +492,12 @@ def claim_next_meeting(max_jobs: int) -> str | None:
         for row in queued:
             if row["user_id"] and row["user_id"] in busy_users:
                 continue
-            chosen = row["id"]
+            selected = row
+            chosen = selected["id"]
             break
         if not chosen and queued:
-            chosen = queued[0]["id"]
+            selected = queued[0]
+            chosen = selected["id"]
         if not chosen:
             conn.execute("COMMIT")
             return None
@@ -474,6 +516,7 @@ def claim_next_meeting(max_jobs: int) -> str | None:
             conn.execute("COMMIT")
             return None
         conn.execute("COMMIT")
+        record_timing("queue_wait", _seconds_since(selected["entered"]))
         return chosen
     except Exception:
         try:
@@ -548,6 +591,8 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
     raw = data.pop("result_json", None)
     raw_segments = data.pop("segments_json", None)
     data["progress"] = int(data.get("progress") or 0)
+    if "mail_pending" in data:
+        data["mail_pending"] = bool(data["mail_pending"])
     data["user_id"] = data.get("user_id")
     if body:
         result = json.loads(raw) if raw else None
@@ -609,7 +654,7 @@ def list_users() -> list[dict[str, Any]]:
         counts = {
             item["user_id"]: item["n"]
             for item in conn.execute(
-                "SELECT user_id, COUNT(*) AS n FROM meetings WHERE user_id IS NOT NULL GROUP BY user_id"
+                "SELECT user_id, COUNT(*) AS n FROM meetings WHERE status IN ('done', 'error') GROUP BY user_id"
             )
         }
     return [_serialize_user(row, counts.get(row["id"], 0)) for row in rows]
@@ -621,7 +666,7 @@ def get_user(user_id: str) -> dict[str, Any] | None:
         if not row:
             return None
         count = conn.execute(
-            "SELECT COUNT(*) AS n FROM meetings WHERE user_id = ?", (user_id,)
+            "SELECT COUNT(*) AS n FROM meetings WHERE user_id = ? AND status IN ('done', 'error')", (user_id,)
         ).fetchone()["n"]
     return _serialize_user(row, count)
 

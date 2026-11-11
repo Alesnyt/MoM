@@ -35,6 +35,7 @@ test('searches anywhere in model names and keeps selection until a model is chos
       catalogRequests++;
       return Response.json({ models });
     }
+    if (url === '/api/settings/verify') return Response.json(health);
     assert.equal(url, '/api/settings/models');
     saves.push(JSON.parse(options.body));
     return Response.json(health);
@@ -59,7 +60,7 @@ test('searches anywhere in model names and keeps selection until a model is chos
   fireEvent.change(search, { target: { value: '' } });
   assert.deepEqual(selectableModels(), models);
   assert.equal(catalogRequests, 1);
-  fireEvent.click(view.getByRole('button', { name: 'Сохранить модель' }));
+  fireEvent.click(view.getByRole('button', { name: 'Сохранить и проверить модель' }));
   await waitFor(() => assert.deepEqual(saves, [{ chat_model: 'google/gemini-flash-lite', asr_model: 'local-whisper' }]));
 });
 

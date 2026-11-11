@@ -970,12 +970,6 @@ function SettingsPanel({
     };
   }, [topic, openai?.configured, openai?.hint, openai?.checked_at]);
 
-  useEffect(() => {
-    if (chatCatalog && chatCatalog.length > 0 && !chatCatalog.includes(chatModel)) {
-      setChatModel(chatCatalog[0]);
-    }
-  }, [chatCatalog, chatModel]);
-
   async function run(
     kind: "delete" | "models" | "theme" | "smtp" | "queue",
     action: () => Promise<Health>,
@@ -994,20 +988,22 @@ function SettingsPanel({
     }
   }
 
-  async function checkConnection(key?: string) {
+  async function checkConnection(key?: string, model?: string) {
     if (busy !== null || verification.current) return;
     const controller = new AbortController();
     verification.current = controller;
     setError(null);
     setVerificationNote("");
     try {
-      if (key !== undefined) {
+      if (key !== undefined || model !== undefined) {
         setBusy("save");
-        const saved = await saveApiKey(key);
+        const saved = key !== undefined ? await saveApiKey(key)
+          : await saveModels(model!, asrModel.trim() || health?.openai.asr_model || "local-whisper");
         if (controller.signal.aborted) return;
         onChange(saved);
-        setApiKey("");
+        if (key !== undefined) setApiKey("");
       }
+      if (model !== undefined && !openai?.configured) return;
       setBusy(key === undefined ? "verify" : "verify-key");
       const next = await verifyApiKey(controller.signal);
       if (!controller.signal.aborted) onChange(next);
@@ -1093,7 +1089,7 @@ function SettingsPanel({
             className="key-box"
             onSubmit={(event) => {
               event.preventDefault();
-              void run("models", () => saveModels(chatModel.trim(), asrModel.trim() || health?.openai.asr_model || "local-whisper"));
+              void checkConnection(undefined, chatModel.trim());
             }}
           >
             <p>Модель, которая собирает протокол.</p>
@@ -1120,7 +1116,7 @@ function SettingsPanel({
             )}
             <div className="composer-row">
               <button className="primary" type="submit" disabled={busy !== null || !chatModel.trim()}>
-                {busy === "models" ? "Сохраняю…" : "Сохранить модель"}
+                {openai?.configured ? "Сохранить и проверить модель" : "Сохранить модель"}
               </button>
             </div>
           </form>

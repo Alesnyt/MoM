@@ -227,11 +227,13 @@ export function TranscriptView({
   onUpdated,
   disabled = false,
   onBusyChange,
+  focusSegment,
 }: {
   meeting: Meeting;
   onUpdated: (meeting: Meeting) => void;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
+  focusSegment?: number;
 }) {
   const segments = meeting.segments || [];
   const speakers = meeting.speakers || [];
@@ -345,7 +347,7 @@ export function TranscriptView({
           <h2 id={transcriptHeadingId}>Транскрипт по спикерам</h2>
           {hasUnclear && <p className="speaker-hint">Уточняйте спикера у каждой реплики с пометкой «Неясно».</p>}
           <TranscriptTurns key={meeting.id} turns={turns} segments={segments} speakers={speakers}
-            disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} />
+            disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} focusSegment={focusSegment} />
         </section>
       </div>
     </div>
@@ -354,17 +356,20 @@ export function TranscriptView({
 
 const TURNS_PER_PAGE = 50;
 
-function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingId }: {
+function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingId, focusSegment }: {
   turns: Turn[];
   segments: TranscriptSegment[];
   speakers: Speaker[];
   disabled: boolean;
   onMove: (indexes: number[], speakerId: string) => Promise<void>;
   headingId: string;
+  focusSegment?: number;
 }) {
   const [query, setQuery] = useState("");
-  const [page, setPage] = useState(0);
+  const [page, setPage] = useState(() => focusSegment === undefined ? 0
+    : Math.max(0, Math.floor(turns.findIndex((turn) => turn.indexes.includes(focusSegment)) / TURNS_PER_PAGE)));
   const listRef = useRef<HTMLDivElement>(null);
+  const focusedTurn = useRef<HTMLElement>(null);
   const names = useMemo(() => new Map(speakers.map((item) => [item.id, item.name])), [speakers]);
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -377,6 +382,10 @@ function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingI
   const visibleTurns = filtered.slice(start, start + TURNS_PER_PAGE);
 
   useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0; }, [currentPage, query]);
+  useEffect(() => {
+    focusedTurn.current?.focus({ preventScroll: true });
+    focusedTurn.current?.scrollIntoView?.({ block: "nearest" });
+  }, [focusSegment]);
 
   return <>
     <div className="transcript-controls">
@@ -398,8 +407,11 @@ function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingI
     <div ref={listRef} className="turns" role="region" aria-labelledby={headingId} tabIndex={0}>
       {visibleTurns.map((turn) => {
         const name = names.get(turn.speaker) || turn.speaker;
+        const focused = focusSegment !== undefined && turn.indexes.includes(focusSegment);
         return (
-          <article key={`${turn.speaker}-${turn.indexes[0]}`} className="turn" style={{ borderLeftColor: speakerColor(turn.speaker) }}>
+          <article key={`${turn.speaker}-${turn.indexes[0]}`} className={`turn${focused ? " turn--focused" : ""}`}
+            ref={focused ? focusedTurn : undefined} tabIndex={focused ? -1 : undefined}
+            style={{ borderLeftColor: speakerColor(turn.speaker) }}>
             <header className="turn-head">
               <strong className="speaker-name">{name}</strong>
               {turn.start !== null && <time>{formatClock(turn.start)}</time>}

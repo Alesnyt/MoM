@@ -79,7 +79,8 @@ export function connectionLabel(status: OpenAIStatus | undefined): string {
   if (!status?.configured) return "Ключ не задан";
   if (status.connected) return `${name} подключён`;
   if (status.auth_rejected) return `${name}: ключ не принят`;
-  if (status.model_unavailable || (status.message || "").toLowerCase().includes("модел")) {
+  if (status.rate_limited) return `${name}: лимит запросов`;
+  if (status.model_unavailable || status.denied_models?.length) {
     return `${name}: модель недоступна`;
   }
   if (!status.checked_at) return `${name}: ключ не проверен`;
@@ -89,7 +90,8 @@ export function connectionLabel(status: OpenAIStatus | undefined): string {
 export function uploadBlockedReason(status: OpenAIStatus | null): string | null {
   if (status === null || status.connected) return null;
   if (!status.configured) return "Ключ ещё не подключён. Без рабочего ключа запись обработать нельзя.";
-  if (status.model_unavailable || (status.message || "").toLowerCase().includes("модел")) {
+  if (status.rate_limited) return "Провайдер ограничил запросы. Повторите проверку в админке позже.";
+  if (status.model_unavailable || status.denied_models?.length) {
     return "Выбранная модель недоступна этому ключу. Запись обработать нельзя, пока в админке не выберут другую.";
   }
   if (status.auth_rejected) return "Ключ не принят. Запись обработать нельзя, пока в админке не сохранят другой.";

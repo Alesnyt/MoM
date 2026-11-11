@@ -254,7 +254,8 @@ def test_auto_mail_is_audited(db: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(mail, "send_mail", lambda *args, **kwargs: None)
     meeting = store.get_meeting("meet1")
     assert meeting
-    mail.notify_meeting_done(meeting)
+    mail.complete_protocol(meeting, result=meeting["result"])
+    assert mail.deliver_pending()
     rows = store.list_audit()
     assert rows[0]["action"] == "email.send"
     assert rows[0]["actor"] == "a@example.com"

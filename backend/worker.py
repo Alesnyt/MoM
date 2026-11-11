@@ -4,9 +4,10 @@ import asyncio
 import logging
 import time
 
-from . import config, gigaam_asr, local_asr, store
+from . import config, gigaam_asr, local_asr, mail, retention, store
 from . import control
 from .logctx import meeting_scope
+from .performance import record_outcome
 from .pipeline import process_meeting
 
 log = logging.getLogger("mom.queue")
@@ -33,6 +34,7 @@ async def run_worker(stop: asyncio.Event) -> None:
     _wake = asyncio.Event()
     running: set[asyncio.Task[None]] = set()
     idle_since: float | None = None
+    delivery = asyncio.create_task(_run_delivery(stop), name="mom-mail")
     try:
         while not stop.is_set():
             running = {task for task in running if not task.done()}
@@ -69,11 +71,26 @@ async def run_worker(stop: asyncio.Event) -> None:
             finally:
                 _wake.clear()
     finally:
+        delivery.cancel()
+        await asyncio.gather(delivery, return_exceptions=True)
         for task in running:
             task.cancel()
         if running:
             await asyncio.gather(*running, return_exceptions=True)
         _wake = None
+
+
+async def _run_delivery(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            if await asyncio.to_thread(mail.deliver_pending):
+                continue
+        except Exception:
+            log.exception("Ошибка очереди писем")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=2)
+        except TimeoutError:
+            continue
 
 
 async def _run_job(meeting_id: str) -> None:
@@ -104,4 +121,10 @@ async def _run_job_scoped(meeting_id: str) -> None:
                 error="Внутренняя ошибка очереди",
             )
     finally:
+        meeting = store.get_meeting(meeting_id)
+        if meeting and meeting["status"] == "error":
+            if meeting["status_message"] != "Остановлено":
+                record_outcome("error")
+            if meeting.get("user_id"):
+                await asyncio.to_thread(retention.trim_archive, meeting["user_id"])
         notify_work()

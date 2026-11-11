@@ -1,5 +1,4 @@
 from backend import config
-from backend.keys import chat_models_for_check
 
 
 def test_chat_label_uses_the_saved_model(monkeypatch) -> None:
@@ -22,11 +21,6 @@ def test_gemini_key_selects_google_chat_and_local_asr(monkeypatch) -> None:
         assert config.default_chat_model() == "gemini-3.8-flash"
         assert config.default_asr_model() == config.LOCAL_ASR_MODEL
     assert config.chat_label("gemini-2.5-pro") == "Gemini"
-    models = chat_models_for_check(thorough=True)
-    assert models[0] == "gemini-3.8-flash"
-    assert "gemini-2.5-flash" in models
-    monkeypatch.setattr(config, "OPENAI_MODEL", "gpt-4o")
-    assert chat_models_for_check(thorough=False) == ["gemini-3.8-flash"]
 
 
 def test_openrouter_key_uses_router_and_local_asr(monkeypatch) -> None:
@@ -44,7 +38,6 @@ def test_openrouter_key_uses_router_and_local_asr(monkeypatch) -> None:
     assert config.get_asr_model() == config.LOCAL_ASR_MODEL
     assert config.chat_label() == "OpenAI"
     assert config.chat_label("anthropic/claude-sonnet-4") == "Claude"
-    assert chat_models_for_check(thorough=False) == ["openai/gpt-4o-mini"]
     from backend.keys import chat_model_ids
 
     assert chat_model_ids(
@@ -120,27 +113,29 @@ def test_private_openai_stays_in_contour_and_clouds_use_their_own_hosts(monkeypa
     assert public_ids == ["gpt-4o"]
 
 
-def test_connected_status_shows_the_saved_model(monkeypatch) -> None:
+def test_verified_status_is_bound_to_model_and_endpoint(monkeypatch) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
     from backend import keys
 
-    key = "sk-or-v1-" + "x" * 24
-    previous = dict(keys._status)
-    monkeypatch.setattr(config, "OPENAI_API_KEY", key)
+    monkeypatch.setattr(keys, "_status", {})
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-or-v1-" + "x" * 24)
     monkeypatch.setattr(config, "OPENAI_BASE_URL", config.OPENROUTER_BASE)
     monkeypatch.setattr(config, "OPENAI_MODEL", "openai/gpt-4o-mini")
-    keys._mark(
-        connected=True,
-        message="OpenRouter принял ключ. Модель: openai/gpt-4o-mini",
-        checked_at="t",
-        key=key,
-    )
-    monkeypatch.setattr(config, "OPENAI_MODEL", "nvidia/nemotron-3.5-super-vl:free")
-    try:
-        assert keys.snapshot()["message"] == "OpenRouter принял ключ. Модель: nvidia/nemotron-3.5-super-vl:free"
-        assert keys.snapshot()["chat_model"] == "nvidia/nemotron-3.5-super-vl:free"
-    finally:
-        keys._status.clear()
-        keys._status.update(previous)
+    ping = AsyncMock()
+    monkeypatch.setattr(keys, "_ping", ping)
+    assert asyncio.run(keys.verify_key())["connected"]
+    ping.assert_awaited_once()
+    assert ping.await_args.args[1] == "openai/gpt-4o-mini"
+
+    monkeypatch.setattr(config, "OPENAI_MODEL", "another-model")
+    assert keys.snapshot()["chat_model"] == "another-model"
+    assert not keys.snapshot()["connected"]
+    assert keys.snapshot()["checked_at"] is None
+
+    monkeypatch.setattr(config, "OPENAI_MODEL", "openai/gpt-4o-mini")
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://private.example.test/v1")
+    assert not keys.snapshot()["connected"]
 
 
 def test_chat_catalog_keeps_text_models_only() -> None:
@@ -163,16 +158,24 @@ def test_chat_catalog_keeps_text_models_only() -> None:
     assert ids == ["gemini-3.8-flash", "gemini-2.5-pro"]
 
 
-def test_startup_checks_only_saved_model(monkeypatch) -> None:
-    monkeypatch.setattr(config, "OPENAI_MODEL", "qwen3.7-plus")
-    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-sp-test")
-    assert chat_models_for_check(thorough=False) == ["qwen3.7-plus"]
+def test_unavailable_qwen_model_does_not_change_saved_settings(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from openai import NotFoundError
+    from backend import keys
 
-
-def test_manual_check_tries_other_qwen_models(monkeypatch) -> None:
-    monkeypatch.setattr(config, "OPENAI_MODEL", "qwen3.7-plus")
+    monkeypatch.setattr(keys, "_status", {})
+    monkeypatch.setattr(config, "OPENAI_MODEL", "selected-qwen")
     monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-sp-test")
-    models = chat_models_for_check(thorough=True)
-    assert models[0] == "qwen3.7-plus"
-    assert "qwen-turbo" in models
-    assert len(models) > 1
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", config.QWEN_BASE_INTL)
+    response = SimpleNamespace(status_code=404, headers={}, request=None)
+    ping = AsyncMock(side_effect=NotFoundError("model not found", response=response, body=None))
+    monkeypatch.setattr(keys, "_ping", ping)
+
+    status = asyncio.run(keys.verify_key())
+    assert status["denied_models"] == ["selected-qwen"]
+    assert not status["connected"]
+    assert config.get_chat_model() == "selected-qwen"
+    assert config.get_base_url() == config.QWEN_BASE_INTL
+    assert [call.args[1] for call in ping.await_args_list] == ["selected-qwen"]

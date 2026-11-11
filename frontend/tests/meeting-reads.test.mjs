@@ -127,3 +127,46 @@ test('failed detail load offers an explicit retry and clears the error after suc
   assert.equal(calls,2);
   assert.equal(view.queryByText('Временный сбой загрузки'),null);
 });
+
+test('a speaker save in another meeting does not discard transcript details', async () => {
+  let saveA, loadB;
+  const withSpeaker = (id) => ({ ...full(id), speakers: [{ id: 'S1', name: 'Спикер 1' }],
+    segments: [{ start: 0, end: 5, speaker: 'S1', text: `Реплика ${id}` }] });
+  mockApi((url, options) => {
+    if (url === '/api/meetings') return response([row('A'), row('B')]);
+    if (url === '/api/meetings/A') return response(withSpeaker('A'));
+    if (url === '/api/meetings/A/speakers/S1' && options.method === 'PATCH') return new Promise(resolve => { saveA = resolve; });
+    if (url === '/api/meetings/B') return new Promise(resolve => { loadB = resolve; });
+    throw new Error(`Unexpected ${url}`);
+  });
+  const view = render(React.createElement(App));
+  const input = await view.findByRole('combobox', { name: 'Имя спикера Спикер 1' });
+  fireEvent.change(input, { target: { value: 'Анна' } });
+  fireEvent.submit(input.closest('form'));
+  await waitFor(() => assert.ok(saveA));
+  fireEvent.click(view.getByRole('button', { name: /Встреча B Проверьте спикеров/ }));
+  await waitFor(() => assert.ok(loadB));
+  await act(async () => saveA(response({ ...withSpeaker('A'), speakers: [{ id: 'S1', name: 'Анна' }] })));
+  await act(async () => loadB(response(withSpeaker('B'))));
+  assert.ok(view.getByRole('heading', { name: 'Встреча B' }));
+  assert.ok(view.getAllByText('Реплика B').length > 0);
+  assert.equal(view.queryByText('Загружаю транскрипт…'), null);
+});
+
+test('a decision source opens and focuses the corresponding transcript page', async () => {
+  const meeting = { ...full('A'), status: 'done', status_message: 'Готово',
+    speakers: [{ id: 'S1', name: 'Анна' }, { id: 'S2', name: 'Борис' }],
+    segments: Array.from({ length: 60 }, (_, i) => ({ start: i, end: i + 1, speaker: `S${i % 2 + 1}`, text: `Фраза ${i + 1}` })),
+    result: { title: 'Встреча A', summary: '', date_hint: null, participants: [], key_points: [],
+      decisions: ['Одобрили пилот'], decision_sources: [{ decision: 'Одобрили пилот', turns: [58] }],
+      action_items: [], mom: { agenda: [], next_meeting: null } } };
+  mockApi(url => {
+    if (url === '/api/meetings') return response([row('A', 'done')]);
+    if (url === '/api/meetings/A') return response(meeting);
+    throw new Error(`Unexpected ${url}`);
+  });
+  const view = render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', { name: 'Реплика 58' }));
+  assert.ok(view.getByText('Реплики 51–60 из 60'));
+  assert.equal(document.activeElement, view.getByText('Фраза 58').closest('article'));
+});

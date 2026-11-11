@@ -20,12 +20,12 @@ from .analyze import (
 from . import config
 from .audio import AudioError, extract_audio_async, extract_wav, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
-from .mail import notify_meeting_done
+from .mail import complete_protocol
 from .diarize import DiarizeUnavailable, apply_diarization, available as diarization_available, diarize_turns
 from . import control
 from .gigaam_asr import transcribe_spans
 from .logctx import meeting_scope
-from .performance import stage_timer
+from .performance import record_outcome, stage_timer
 from .speakers import assign_speakers, render_transcript, speaker_spans
 
 log = logging.getLogger("mom.pipeline")
@@ -301,33 +301,24 @@ async def _process_meeting(meeting_id: str) -> None:
             transcript = render_transcript(document)
             store.update_meeting(meeting_id, transcript=transcript, transcript_segments=document)
         step = "протокол"
-        parts = max(1, (len(transcript) + 79_999) // 80_000)
-        label = config.chat_label()
-        if parts == 1:
-            prefix = f"{label} пишет протокол"
-        elif parts < 5:
-            prefix = f"{label} пишет протокол ({parts} запроса)"
-        else:
-            prefix = f"{label} пишет протокол ({parts} запросов)"
+        prefix = f"{config.chat_label()} пишет протокол"
         progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
-        log.info("шаг: протокол model=%s частей %s", config.get_chat_model(), parts)
+        log.info("шаг: протокол model=%s", config.get_chat_model())
+        protocol_input = render_transcript(document, numbered=True) if document["segments"] else transcript
         with stage_timer("protocol"):
-            result = await _analyze_with_heartbeat(client, transcript, meeting["title"], progress, prefix)
+            result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix)
         # A cloud LLM request cannot always be interrupted immediately. Ignore
         # its late response when the user has requested stop/restart.
         if control.is_stopped(meeting_id):
             raise control.ProcessingStopped()
         title = (result.get("title") or meeting["title"]).strip() or meeting["title"]
-        store.update_meeting(
-            meeting_id,
+        complete_protocol(
+            {**meeting, "speakers": document["speakers"]},
             title=title,
             result=result,
             language=result.get("language") or meeting.get("language"),
-            status="done",
-            status_message="Готово",
-            error=None,
-            progress=100,
         )
+        record_outcome("done")
         log.info("готово")
     except control.ProcessingStopped:
         control.finish(meeting_id)
@@ -349,10 +340,6 @@ async def _process_meeting(meeting_id: str) -> None:
                 audio_path.unlink(missing_ok=True)
             except OSError:
                 log.warning("Не удалось удалить временный WAV %s", audio_path.name, exc_info=True)
-    meeting = store.get_meeting(meeting_id)
-    if meeting and meeting.get("status") == "done":
-        log.info("шаг: почта")
-        await asyncio.to_thread(notify_meeting_done, meeting)
 
 
 async def _transcribe(

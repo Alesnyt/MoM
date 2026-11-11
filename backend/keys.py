@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -17,19 +18,11 @@ from .analyze import make_client
 
 log = logging.getLogger("mom.keys")
 
-_status: dict[str, Any] = {
-    "configured": False,
-    "connected": False,
-    "auth_rejected": False,
-    "denied_models": [],
-    "hint": None,
-    "message": "Ключ не задан",
-    "checked_at": None,
-    "provider": "none",
-    "base_url": None,
-    "chat_model": None,
-    "asr_model": None,
-}
+_status: dict[str, Any] = {}
+
+
+def _connection_id(key: str, base: str, model: str) -> tuple[str, str, str]:
+    return hashlib.sha256(key.encode()).hexdigest(), base, model
 
 
 def mask_api_key(key: str) -> str | None:
@@ -43,8 +36,7 @@ def mask_api_key(key: str) -> str | None:
 
 def public_snapshot() -> dict[str, Any]:
     data = snapshot()
-    message = data.get("message") or ""
-    model_unavailable = "модел" in message.lower()
+    model_unavailable = bool(data.get("denied_models"))
     data["model_unavailable"] = model_unavailable
     data["hint"] = None
     data["base_url"] = None
@@ -55,117 +47,49 @@ def public_snapshot() -> dict[str, Any]:
         data["message"] = "Выбранная модель недоступна этому ключу"
     elif data.get("auth_rejected"):
         data["message"] = "Ключ не принят"
+    elif data.get("rate_limited"):
+        data["message"] = "Провайдер ограничил запросы. Повторите проверку позже."
     elif data.get("configured") and not data.get("connected") and data.get("checked_at"):
         data["message"] = "Нет связи с провайдером"
     return data
 
 
-def _message() -> str:
-    message = str(_status.get("message") or "")
-    model = config.get_chat_model()
-    if _status.get("connected") and model and "Модель:" in message:
-        prefix, _, _old = message.partition("Модель:")
-        return f"{prefix}Модель: {model}"
-    return message
-
-
 def snapshot() -> dict[str, Any]:
     key = config.get_api_key()
     provider = config.detect_provider()
-    label = config.provider_label(provider)
-    if not key:
-        return {
-            "configured": False,
-            "connected": False,
-            "auth_rejected": False,
-            "denied_models": [],
-            "hint": None,
-            "message": "Ключ не задан",
-            "checked_at": None,
-            "provider": "none",
-            "provider_label": label,
-            "base_url": None,
-            "chat_model": None,
-            "asr_model": None,
-        }
+    base = config.get_base_url()
+    model = config.get_chat_model()
+    checked = _status if _status.get("connection") == _connection_id(key, base, model) else {}
     return {
-        "configured": True,
-        "connected": bool(_status["connected"]),
-        "auth_rejected": bool(_status.get("auth_rejected")),
-        "denied_models": list(_status.get("denied_models") or []),
+        "configured": bool(key),
+        "connected": bool(checked.get("connected")),
+        "auth_rejected": bool(checked.get("auth_rejected")),
+        "rate_limited": bool(checked.get("rate_limited")),
+        "denied_models": list(checked.get("denied_models") or []),
         "hint": mask_api_key(key),
-        "message": _message(),
-        "checked_at": _status["checked_at"],
-        "provider": provider,
-        "provider_label": label,
-        "base_url": config.get_base_url() or None,
-        "chat_model": config.get_chat_model(),
-        "asr_model": config.canonical_asr_model(),
+        "message": checked.get("message", "Подключение ещё не проверено" if key else "Ключ не задан"),
+        "checked_at": checked.get("checked_at"),
+        "provider": provider if key else "none",
+        "provider_label": config.provider_label(provider),
+        "base_url": (base or None) if key else None,
+        "chat_model": model if key else None,
+        "asr_model": config.canonical_asr_model() if key else None,
     }
 
 
 def reset_status(message: str = "Ключ не задан") -> dict[str, Any]:
-    _status.update(
-        {
-            "configured": False,
-            "connected": False,
-            "auth_rejected": False,
-            "denied_models": [],
-            "hint": None,
-            "message": message,
-            "checked_at": None,
-            "provider": "none",
-            "base_url": None,
-            "chat_model": None,
-            "asr_model": None,
-        }
-    )
-    return snapshot()
-
-
-def _mark(
-    *,
-    connected: bool,
-    message: str,
-    checked_at: str,
-    key: str,
-    auth_rejected: bool = False,
-    denied_models: list[str] | None = None,
-) -> dict[str, Any]:
-    _status.update(
-        {
-            "configured": True,
-            "connected": connected,
-            "auth_rejected": auth_rejected,
-            "denied_models": list(denied_models or []),
-            "hint": mask_api_key(key),
-            "message": message,
-            "checked_at": checked_at,
-        }
-    )
+    _status.clear()
+    if config.get_api_key():
+        _status.update(
+            connection=_connection_id(config.get_api_key(), config.get_base_url(), config.get_chat_model()),
+            message=message,
+        )
     return snapshot()
 
 
 def note_check_failed(message: str) -> None:
-    _status["connected"] = False
-    _status["auth_rejected"] = False
-    _status["denied_models"] = []
-    _status["message"] = message
+    reset_status(message)
     _status["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def chat_models_for_check(*, thorough: bool) -> list[str]:
-    current = config.get_chat_model()
-    provider = config.detect_provider()
-    if provider == "gemini" and not current.startswith("gemini"):
-        current = config.GEMINI_CHAT_MODELS[0]
-    if provider == "openrouter" and "/" not in current:
-        current = config.OPENROUTER_CHAT_MODEL
-    if thorough and provider == "qwen":
-        return list(dict.fromkeys([current, *config.QWEN_CHAT_MODELS]))
-    if thorough and provider == "gemini":
-        return list(dict.fromkeys([current, *config.GEMINI_CHAT_MODELS]))
-    return [current]
 
 
 def _model_id(raw: object) -> str:
@@ -243,97 +167,43 @@ def _model_denied(exc: APIStatusError) -> bool:
     return "unpurchased" in text or "model" in text or "eligible" in text
 
 
-async def verify_key(key: str | None = None, *, thorough: bool = True) -> dict[str, Any]:
+async def verify_key(key: str | None = None) -> dict[str, Any]:
     secret = (key if key is not None else config.get_api_key()).strip()
-    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if not secret:
-        return reset_status("Ключ не задан")
+        return reset_status()
+    base = config.get_base_url()
+    model = config.get_chat_model()
+    connection = _connection_id(secret, base, model)
+    label = config.provider_label(config.detect_provider(secret))
+    result: dict[str, Any] = {"connection": connection}
+    try:
+        client = make_client(secret, base_url=base, timeout=float(config.VERIFY_TIMEOUT_SECONDS))
+        await _ping(client, model)
+        result.update(connected=True, message=f"{label} принял ключ. Модель: {model}")
+    except AuthenticationError:
+        result.update(auth_rejected=True, message=f"{label} отклонил ключ. Проверьте его в админке.")
+    except RateLimitError:
+        result.update(rate_limited=True, message=f"{label} ограничил запросы. Повторите проверку позже.")
+    except (APIConnectionError, APITimeoutError):
+        result["message"] = f"Нет связи с {label}."
+    except APIStatusError as exc:
+        log.warning("%s вернул HTTP %s при проверке модели", label, exc.status_code)
+        text = str(getattr(exc, "body", None) or exc).lower()
+        if exc.status_code == 401:
+            result.update(auth_rejected=True, message=f"{label} отклонил ключ. Проверьте его в админке.")
+        elif _model_denied(exc) or (
+            exc.status_code in {400, 404} and any(term in text for term in ("model", "not found", "not exist"))
+        ):
+            result.update(denied_models=[model], message=_denied_message([model]))
+        else:
+            result["message"] = f"{label} не ответил ({exc.status_code})."
+    except Exception:
+        log.exception("Проверка ключа не удалась")
+        result["message"] = "Не удалось проверить ключ."
 
-    provider = config.detect_provider(secret)
-    label = config.provider_label(provider)
-    current = config.get_base_url()
-    if provider == "qwen" and thorough:
-        bases = [config.QWEN_BASE_INTL, config.QWEN_BASE_CN]
-        if current and current not in bases:
-            bases.insert(0, current)
-    elif provider == "gemini":
-        bases = [current or config.GEMINI_BASE]
-    elif provider == "openrouter":
-        bases = [current or config.OPENROUTER_BASE]
-    else:
-        bases = [current] if current else [""]
-    models = chat_models_for_check(thorough=thorough)
-
-    last_error = ""
-    denied: list[str] = []
-    ping_timeout = float(config.VERIFY_TIMEOUT_SECONDS)
-    for base in bases:
-        client = make_client(secret, base_url=base or None, timeout=ping_timeout)
-        for model in models:
-            try:
-                await _ping(client, model)
-                asr_model = config.get_asr_model()
-                if config.is_token_plan() and not config.is_local_asr(asr_model) and asr_model != "qwen-audio-3.0-asr-flash":
-                    asr_model = config.default_asr_model()
-                config.apply_connection(base, model, asr_model)
-                return _mark(
-                    connected=True,
-                    message=f"{label} принял ключ. Модель: {model}",
-                    checked_at=checked_at,
-                    key=secret,
-                    denied_models=denied,
-                )
-            except AuthenticationError as exc:
-                detail = getattr(exc, "body", None) or getattr(exc, "message", None) or str(exc)
-                log.warning("Ключ отклонён на %s: %s", base or "api.openai.com", str(detail)[:500])
-                return _mark(
-                    connected=False,
-                    auth_rejected=True,
-                    message=f"{label} отклонил ключ. Проверьте его в админке.",
-                    checked_at=checked_at,
-                    key=secret,
-                )
-            except RateLimitError:
-                config.apply_connection(base or config.get_base_url(), model, config.get_asr_model())
-                return _mark(
-                    connected=True,
-                    message=f"{label} принял ключ, но сейчас упирается в лимит запросов.",
-                    checked_at=checked_at,
-                    key=secret,
-                )
-            except (APIConnectionError, APITimeoutError) as exc:
-                log.warning("Нет связи с %s: %s", label, exc)
-                last_error = f"Нет связи с {label}."
-                break
-            except APIStatusError as exc:
-                log.warning("%s вернул %s: %s", label, exc.status_code, exc.message or exc)
-                text = str(getattr(exc, "body", None) or exc).lower()
-                if exc.status_code == 401:
-                    return _mark(
-                        connected=False,
-                        auth_rejected=True,
-                        message=f"{label} отклонил ключ. Проверьте его в админке.",
-                        checked_at=checked_at,
-                        key=secret,
-                    )
-                if _model_denied(exc) or (
-                    exc.status_code in {400, 404}
-                    and ("model" in text or "not found" in text or "not exist" in text)
-                ):
-                    if model not in denied:
-                        denied.append(model)
-                    last_error = _denied_message(denied)
-                    continue
-                last_error = f"{label} не ответил ({exc.status_code})."
-                break
-            except Exception:
-                log.exception("Проверка ключа не удалась")
-                last_error = "Не удалось проверить ключ."
-
-    return _mark(
-        connected=False,
-        message=last_error or f"Не удалось подключиться к {label}",
-        checked_at=checked_at,
-        key=secret,
-        denied_models=denied,
-    )
+    if connection == _connection_id(config.get_api_key(), config.get_base_url(), config.get_chat_model()):
+        _status.update(
+            {"connected": False, "auth_rejected": False, "rate_limited": False, "denied_models": [],
+             "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **result},
+        )
+    return snapshot()

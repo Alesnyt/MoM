@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 from openai import APIStatusError, AsyncOpenAI, BadRequestError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import config, prompts
 from .performance import stage_timer
@@ -84,11 +85,25 @@ class ProtocolModel(BaseModel):
     model_config = ConfigDict(strict=True)
 
 
+def _turn_numbers(value: Any) -> list[int]:
+    return [number for number in value if type(number) is int and number > 0] if isinstance(value, list) else []
+
+
 class ProtocolAction(ProtocolModel):
     task: str = Field(min_length=1)
     assignee: str | None = None
     due: str | None = None
     priority: Literal["high", "medium", "low"] = "medium"
+    source_turns: list[int] = Field(default_factory=list)
+
+    _validate_turns = field_validator("source_turns", mode="before")(_turn_numbers)
+
+
+class DecisionSource(ProtocolModel):
+    decision: str
+    turns: list[int] = Field(default_factory=list)
+
+    _validate_turns = field_validator("turns", mode="before")(_turn_numbers)
 
 
 class ProtocolTopic(ProtocolModel):
@@ -110,8 +125,16 @@ class ProtocolResult(ProtocolModel):
     summary: str = ""
     key_points: list[str] = Field(default_factory=list)
     decisions: list[str] = Field(default_factory=list)
+    decision_sources: list[DecisionSource] = Field(default_factory=list)
     action_items: list[ProtocolAction] = Field(default_factory=list)
     mom: ProtocolMinutes = Field(default_factory=ProtocolMinutes)
+
+    @field_validator("decision_sources", mode="before")
+    @classmethod
+    def validate_decision_sources(cls, value: Any) -> list:
+        if not isinstance(value, list):
+            return []
+        return [entry for entry in value if isinstance(entry, dict) and isinstance(entry.get("decision"), str)]
 
 
 def _parse_result(raw: str) -> dict[str, Any]:
@@ -215,12 +238,8 @@ async def transcribe_qwen(
     for candidate in config.asr_model_candidates(model):
         try:
             payload = await _transcribe_qwen_once(client, data_uri, candidate, language)
-            if candidate != config.get_asr_model():
-                config.apply_connection(
-                    config.get_base_url(),
-                    config.get_chat_model(),
-                    candidate,
-                )
+            if candidate != model:
+                log.info("Для записи использована резервная ASR-модель %s", candidate)
             return payload
         except APIStatusError as exc:
             text = str(exc).lower()
@@ -367,6 +386,102 @@ async def analyze_transcript(
     return _parse_result(content)
 
 
+_TURN_ID = re.compile(r"^\[реплика (\d+)\] ", re.MULTILINE)
+_SOURCE_INSTRUCTIONS = (
+    "Если реплики пронумерованы, укажи подтверждающие номера. "
+    "В decision_sources добавь объекты {\"decision\": точный текст решения, \"turns\": [номера]}. "
+    "В каждом поручении добавь source_turns с номерами реплик. "
+    "Ссылайся на явное согласие или назначение, а при отсутствии подтверждения оставь список пустым.\n\n"
+)
+_MERGE_INSTRUCTIONS = (
+    "Объедини промежуточные протоколы в один итоговый JSON. Удали смысловые дубли. "
+    "Сохрани каждое отдельное решение и поручение с его исполнителем, сроком и номерами исходных реплик. "
+    "Для decision_sources используй точный текст итоговых решений. Не придумывай новые номера.\n\n"
+)
+
+
+def _transcript_chunks(transcript: str, budget: int) -> list[str]:
+    chunks: list[str] = []
+    lines: list[str] = []
+    size = 0
+    for line in transcript.splitlines(keepends=True):
+        line_size = len(line.encode())
+        if size + line_size > budget and lines:
+            chunks.append("".join(lines))
+            lines, size = [], 0
+        if line_size > budget:
+            prefix = _TURN_ID.match(line)
+            label = prefix[0] if prefix else ""
+            remaining = line[len(label):].encode()
+            while remaining:
+                head = remaining[:budget - len(label.encode())].decode(errors="ignore")
+                if len(remaining) > len(head.encode()):
+                    boundary = head.rfind(" ")
+                    if boundary > len(head) // 2:
+                        head = head[:boundary + 1]
+                chunks.append(label + head)
+                remaining = remaining[len(head.encode()):]
+        else:
+            lines.append(line)
+            size += line_size
+    if lines:
+        chunks.append("".join(lines))
+    return chunks or [transcript]
+
+
+def _with_sources(result: dict, allowed: set[int]) -> dict:
+    decisions = {item: set() for item in result.get("decisions") or []}
+    for entry in result.get("decision_sources") or []:
+        decision = entry["decision"].strip()
+        if decision in decisions:
+            decisions[decision].update(allowed.intersection(entry["turns"]))
+    result["decision_sources"] = [{"decision": item, "turns": sorted(turns)} for item, turns in decisions.items() if turns]
+    for item in result.get("action_items") or []:
+        item["source_turns"] = sorted(set(item.get("source_turns") or []) & allowed)
+    return result
+
+
+def _merge_locally(parts: list[dict]) -> dict:
+    combined = {**parts[0]}
+    combined["summary"] = "\n\n".join(dict.fromkeys(part["summary"] for part in parts if part.get("summary")))
+    for field in ("participants", "key_points", "decisions", "decision_sources", "action_items"):
+        combined[field] = [item for part in parts for item in part.get(field, [])]
+    combined["participants"] = list(dict.fromkeys(combined["participants"]))
+    combined["mom"] = {
+        "agenda": [item for part in parts for item in part.get("mom", {}).get("agenda", [])],
+        "next_meeting": next((part["mom"]["next_meeting"] for part in reversed(parts)
+                              if part.get("mom", {}).get("next_meeting")), None),
+    }
+    return deduplicate(combined)
+
+
+def _retain_grounded_items(result: dict, parts: list[dict]) -> dict:
+    """Keep cited decisions and tasks if a merge skips them."""
+    decisions = result.setdefault("decisions", [])
+    sources = result.setdefault("decision_sources", [])
+    actions = result.setdefault("action_items", [])
+    for part in parts:
+        for entry in part.get("decision_sources", []):
+            decision = entry["decision"]
+            if decision in decisions:
+                sources.append(entry)
+            elif not any(set(entry["turns"]).intersection(existing["turns"]) for existing in sources):
+                decisions.append(decision)
+                sources.append(entry)
+        for action in part.get("action_items", []):
+            turns = action.get("source_turns")
+            if not turns:
+                continue
+            same_assignment = [item for item in actions if item.get("assignee") == action.get("assignee")
+                               and item.get("due") == action.get("due")]
+            same_task = next((item for item in same_assignment if item["task"] == action["task"]), None)
+            if same_task is not None:
+                same_task["source_turns"] = sorted(set(turns).union(same_task.get("source_turns") or []))
+            elif not any(set(turns).intersection(item.get("source_turns") or []) for item in same_assignment):
+                actions.append(action)
+    return deduplicate(result)
+
+
 async def analyze_long_transcript(
     client: AsyncOpenAI,
     transcript: str,
@@ -374,34 +489,49 @@ async def analyze_long_transcript(
     on_part: Any = None,
 ) -> dict[str, Any]:
     system_prompt = prompts.snapshot()["protocol_prompt"]
-    limit = 90_000
-    if len(transcript) <= limit:
-        if on_part:
-            on_part(1, 1)
-        return await analyze_transcript(client, transcript, title_hint, system_prompt=system_prompt)
-
+    # UTF-8 size is a conservative input estimate for byte-based tokenizers.
+    # Leave room for the response, wrappers and any provider chat framing.
+    context = config.PROTOCOL_CONTEXT_TOKENS
+    budget = (context - min(8192, context // 4) - 768 - len(system_prompt.encode())
+              - len((title_hint or "").encode())
+              - max(len(_SOURCE_INSTRUCTIONS.encode()), len(_MERGE_INSTRUCTIONS.encode())))
+    if budget < 256:
+        raise ValueError("Промпт не помещается в окно контекста. Проверьте PROTOCOL_CONTEXT_TOKENS.")
+    chunks = _transcript_chunks(transcript, budget)
+    total = len(chunks) + (len(chunks) > 1)
     parts = []
-    step = 80_000
-    total = max(1, (len(transcript) + step - 1) // step)
-    for index, start in enumerate(range(0, len(transcript), step), start=1):
+    allowed: set[int] = set()
+    for index, chunk in enumerate(chunks, start=1):
         if on_part:
-            on_part(index, total + 1)
-        chunk = transcript[start : start + step]
-        summary = await analyze_transcript(
-            client,
-            f"Это часть {index} длинной встречи. Составь промежуточный протокол.\n\n{chunk}",
-            title_hint,
-            system_prompt=system_prompt,
-        )
-        parts.append(summary)
+            on_part(index, total)
+        sources = {int(value) for value in _TURN_ID.findall(chunk)}
+        allowed.update(sources)
+        intro = f"Это часть {index} из {len(chunks)}. Составь промежуточный протокол.\n\n" if len(chunks) > 1 else ""
+        prompt = intro + (_SOURCE_INSTRUCTIONS if sources else "") + chunk
+        summary = await analyze_transcript(client, prompt, title_hint, system_prompt=system_prompt)
+        parts.append(_with_sources(summary, sources))
 
-    if on_part:
-        on_part(total + 1, total + 1)
-    merged_source = json.dumps(parts, ensure_ascii=False, indent=2)
-    return await analyze_transcript(
-        client,
-        "Ниже несколько частичных протоколов одной встречи. Объедини их в один итоговый JSON "
-        "без дублей внутри и между разделами, сохранив отдельные решения и поручения.\n\n" + merged_source,
-        title_hint,
-        system_prompt=system_prompt,
-    )
+    while len(parts) > 1:
+        merged = []
+        cursor = 0
+        while cursor < len(parts):
+            group = [parts[cursor]]
+            cursor += 1
+            while cursor < len(parts):
+                candidate = json.dumps([*group, parts[cursor]], ensure_ascii=False, separators=(",", ":"))
+                if len(candidate.encode()) > budget:
+                    break
+                group.append(parts[cursor])
+                cursor += 1
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+            if on_part:
+                on_part(total, total)
+            payload = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
+            result = await analyze_transcript(client, _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
+            merged.append(_with_sources(_retain_grounded_items(_with_sources(result, allowed), group), allowed))
+        if len(merged) == len(parts):
+            return _with_sources(_merge_locally(merged), allowed)
+        parts = merged
+    return parts[0]

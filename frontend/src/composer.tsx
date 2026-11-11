@@ -14,6 +14,7 @@ export function Composer({
   maxUploadBytes,
   onOpenSettings,
   onUpload,
+  nextExpired,
 }: {
   busy: boolean;
   keyStatus: OpenAIStatus | null;
@@ -22,6 +23,7 @@ export function Composer({
   maxUploadBytes?: number;
   onOpenSettings: () => void;
   onUpload: (file: File | null, title: string, text?: string) => Promise<void>;
+  nextExpired?: string;
 }) {
   const [mode, setMode] = useState<"audio" | "text">("audio");
   const [text, setText] = useState("");
@@ -146,6 +148,7 @@ export function Composer({
           {busy ? "Загружаю…" : mode === "text" ? "Импортировать транскрипт" : "Обработать"}
         </button>
       </div>
+      {nextExpired && <p className="progress-hint">Архив заполнен. Когда новая встреча завершится, из архива может быть удалена «{nextExpired}».</p>}
     </section>
   );
 }

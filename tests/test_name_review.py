@@ -159,7 +159,6 @@ def test_protocol_receives_corrected_text_and_metadata_is_preserved(db, monkeypa
 
     monkeypatch.setattr(pipeline, "make_client", lambda key: client_for(create))
     monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", summarize)
-    monkeypatch.setattr(pipeline, "notify_meeting_done", lambda meeting: None)
     asyncio.run(pipeline.process_meeting("names-flow"))
     updated = store.get_meeting("names-flow")
     assert updated["status"] == "done"
@@ -184,6 +183,51 @@ def test_saved_prompt_used_for_every_summary_part_and_fallback(db):
     asyncio.run(analyze.analyze_long_transcript(client_for(create), "x" * 100_000, None))
     assert len(calls) == 6
     assert all(call["messages"][0]["content"] == "Custom JSON prompt\nSecond line" for call in calls)
+
+
+def test_long_protocol_groups_replies_and_retains_grounded_commitments(db, monkeypatch):
+    monkeypatch.setattr(config, "PROTOCOL_CONTEXT_TOKENS", 8192)
+    store.save_llm_settings({**prompts.snapshot(), "protocol_prompt": "Return JSON"}, "admin")
+    first = "[реплика 1] Анна: Утвердили пилот. " + "а" * 1400
+    second = "[реплика 2] Борис: Я подготовлю отчёт к пятнице. " + "б" * 1400
+    calls = []
+
+    async def create(**kwargs):
+        messages = kwargs["messages"]
+        body = messages[1]["content"]
+        calls.append(body)
+        assert sum(len(message["content"].encode()) for message in messages) < 8192 - 2048
+        if first in body:
+            assert second not in body
+            return response({"decisions": ["Одобрили пилот"],
+                             "decision_sources": [{"decision": "Одобрили пилот", "turns": [1, 999]}]})
+        if second in body:
+            return response({"action_items": [{"task": "Подготовить отчёт", "assignee": "Борис", "due": "к пятнице",
+                                               "source_turns": [1, 2]}]})
+        return response({"summary": "Обсудили запуск и следующие шаги."})
+
+    result = asyncio.run(analyze.analyze_long_transcript(client_for(create), first + "\n" + second, "Пилот"))
+    assert len(calls) == 3
+    assert result["decision_sources"] == [{"decision": "Одобрили пилот", "turns": [1]}]
+    assert result["action_items"][0]["source_turns"] == [2]
+    assert result["action_items"][0]["due"] == "к пятнице"
+
+
+def test_oversized_intermediate_protocols_stay_inside_model_context(db, monkeypatch):
+    monkeypatch.setattr(config, "PROTOCOL_CONTEXT_TOKENS", 8192)
+    store.save_llm_settings({**prompts.snapshot(), "protocol_prompt": "Return JSON"}, "admin")
+    calls = []
+
+    async def create(**kwargs):
+        body = kwargs["messages"][1]["content"]
+        calls.append(body)
+        assert len(body.encode()) < 8192 - 2048
+        return response({"summary": str(len(calls)) + "Я" * 4000, "decisions": [f"Решение {len(calls)}"]})
+
+    text = "\n".join(f"[реплика {index}] Анна: " + "А" * 1400 for index in range(1, 5))
+    result = asyncio.run(analyze.analyze_long_transcript(client_for(create), text, "Встреча"))
+    assert len(calls) == 4
+    assert result["decisions"] == [f"Решение {index}" for index in range(1, 5)]
 
 
 def test_prompts_api_requires_admin_and_persists_versions(db):
