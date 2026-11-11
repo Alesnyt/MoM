@@ -49,7 +49,7 @@ test('loading, empty, plain-text and untimed transcripts stay distinct', () => {
   assert.equal(view.container.querySelectorAll('.turn').length, 3);
 });
 
-test('renaming updates all visible turns and preserves speaker examples', async () => {
+test('renaming updates visible turns and keeps the assignment panel free of transcript text', async () => {
   const value = meeting();
   let finish, calls = 0;
   globalThis.fetch = async (url, init) => {
@@ -72,7 +72,8 @@ test('renaming updates all visible turns and preserves speaker examples', async 
   ]})));
   assert.deepEqual(Array.from(view.container.querySelectorAll('.speaker-name'), e => e.textContent),
     ['Анна Иванова', 'Спикер 2', 'Анна Иванова']);
-  assert.ok(view.container.querySelector('.speaker-card').textContent.includes('Реплика #0000'));
+  const assignment = view.getByRole('region', {name:'Назначение спикеров'});
+  assert.doesNotMatch(assignment.textContent, /Реплика #/);
 });
 
 test('failed save keeps the draft and allows a successful retry', async () => {
@@ -96,7 +97,7 @@ test('failed save keeps the draft and allows a successful retry', async () => {
   assert.equal(view.queryByRole('alert'), null);
 });
 
-test('5000 turns use bounded pages; search and reassignment retain original segment indexes', async () => {
+test('speaker selection filters all pages and composes with search and reassignment', async () => {
   const value = meeting(5000);
   let assigned;
   globalThis.fetch = async (_url, init) => {
@@ -111,10 +112,21 @@ test('5000 turns use bounded pages; search and reassignment retain original segm
   fireEvent.click(view.getByRole('button', {name:'Следующие реплики'}));
   assert.match(view.getByRole('status').textContent, /51–100 из 5000/);
   assert.match(view.container.querySelector('.turn > p').textContent, /#0050/);
+  const firstSpeaker = view.getByRole('button', {name:'Спикер 1'});
+  fireEvent.click(firstSpeaker);
+  assert.equal(firstSpeaker.getAttribute('aria-pressed'), 'true');
+  assert.match(view.getByRole('status').textContent, /1–50 из 2500/);
+  assert.match(view.container.querySelector('.turn > p').textContent, /#0000/);
+  assert.ok(Array.from(view.container.querySelectorAll('.turn .speaker-name'), e => e.textContent)
+    .every(name => name === 'Спикер 1'));
   fireEvent.change(view.getByRole('searchbox'), {target:{value:'#4500'}});
   assert.equal(view.container.querySelectorAll('.turn').length, 1);
   fireEvent.change(view.getByRole('combobox', {name:'Кто говорит эту реплику'}), {target:{value:'S2'}});
   await waitFor(() => assert.deepEqual(assigned, {speaker_id:'S2', segment_indexes:[4500]}));
+  await waitFor(() => assert.equal(view.getByRole('status').textContent, 'Реплик не найдено'));
+  fireEvent.click(view.getByRole('button', {name:'Все спикеры'}));
+  assert.equal(firstSpeaker.getAttribute('aria-pressed'), 'false');
+  assert.equal(view.getByRole('searchbox').value, '#4500');
   await waitFor(() => assert.equal(view.getByRole('combobox', {name:'Кто говорит эту реплику'}).disabled, false));
   assert.equal(view.container.querySelector('.turn .speaker-name').textContent, 'Спикер 2');
   assert.equal(view.getByRole('combobox', {name:'Кто говорит эту реплику'}).value, '');
