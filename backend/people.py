@@ -12,6 +12,7 @@ def suggest(query: str = "") -> dict:
     needle = query.strip()
     people: list[dict[str, str]] = []
     by_email: dict[str, dict[str, str]] = {}
+    error = None
     for user in store.list_users():
         email = (user.get("email") or "").strip()
         if not email:
@@ -37,7 +38,8 @@ def suggest(query: str = "") -> dict:
                     by_email[key] = people[-1]
         except ldap_auth.LdapError:
             log.warning("Каталог не отдал подсказки имён, остаются пользователи MoM")
-    return {"people": people[:40], "ldap": config.ldap_configured()}
+            error = "Поиск в AD временно недоступен. Можно выбрать сохранённого пользователя или ввести имя вручную."
+    return {"people": people[:40], "ldap": config.ldap_configured(), **({"error": error} if error else {})}
 
 
 def directory(query: str = "") -> dict:

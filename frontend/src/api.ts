@@ -18,6 +18,7 @@ export type CorporateContext = {
   enabled: boolean; sync_ad: boolean; revision: number; term_count: number; people_count: number;
   directory_current: boolean; ldap_configured: boolean; synced_at: string | null; imported_at: string | null;
   sync_error: string | null; syncing: boolean; terms: CorporateTerm[]; matched_terms: number;
+  sync_time: string; sync_timezone: string; next_sync_at: string | null;
 };
 
 export async function getCorporateContext(query: string, signal?: AbortSignal): Promise<CorporateContext> {
@@ -26,9 +27,9 @@ export async function getCorporateContext(query: string, signal?: AbortSignal): 
   return response.json();
 }
 
-export async function saveCorporateContext(enabled: boolean, sync_ad: boolean): Promise<CorporateContext> {
+export async function saveCorporateContext(enabled: boolean, sync_ad: boolean, sync_time?: string): Promise<CorporateContext> {
   const response = await fetch("/api/admin/context/settings", {method: "POST", credentials: "include",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify({enabled, sync_ad})});
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({enabled, sync_ad, sync_time})});
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
@@ -423,11 +424,11 @@ export type Person = {
   job_title?: string;
 };
 
-export async function listPeople(query: string, signal?: AbortSignal): Promise<Person[]> {
+export async function listPeople(query: string, signal?: AbortSignal): Promise<{people: Person[]; ldap: boolean; error?: string}> {
   const response = await fetch(`/api/people?q=${encodeURIComponent(query)}`, { credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   const data = await response.json();
-  return data.people ?? [];
+  return {people: data.people ?? [], ldap: Boolean(data.ldap), error: data.error};
 }
 
 export async function renameSpeaker(id: string, speakerId: string, name: string, email?: string, jobTitle?: string): Promise<Meeting> {

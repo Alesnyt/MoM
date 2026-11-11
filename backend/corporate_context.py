@@ -13,6 +13,7 @@ import secrets
 import time
 from xml.etree.ElementTree import ParseError
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from zipfile import BadZipFile, ZipFile
 
 from . import config, directory_scope, ldap_auth, store
@@ -20,6 +21,8 @@ from . import config, directory_scope, ldap_auth, store
 log = logging.getLogger("mom.context")
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TERMS = 5000
+SYNC_TIMEZONE = timezone(timedelta(hours=3))
+DEFAULT_SYNC_TIME = "03:00"
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 
 
@@ -28,7 +31,7 @@ def normalize(value: str) -> str:
 
 
 def _read() -> dict:
-    return {"enabled": True, "sync_ad": True, "revision": 0, "terms": [], "people": [],
+    return {"enabled": True, "sync_ad": True, "sync_time": DEFAULT_SYNC_TIME, "revision": 0, "terms": [], "people": [],
             **(store.get_app_setting("corporate_context") or {})}
 
 
@@ -59,11 +62,16 @@ def directory_signature() -> str:
 
 def snapshot(query: str = "") -> dict:
     data = _read()
-    matches = data.get("directory_signature") == directory_signature()
+    signature = directory_signature()
+    matches = data.get("directory_signature") == signature
+    now = time.time()
+    next_sync = _next_sync_at(data, now, signature) if data["sync_ad"] and config.ldap_configured() else None
     needle = normalize(query)
     terms = [entry for entry in data["terms"] if needle in normalize(" ".join(
         [entry["term"], *entry["aliases"], entry["description"], entry["department"]]))]
     return {"enabled": data["enabled"], "sync_ad": data["sync_ad"], "revision": data["revision"],
+            "sync_time": data["sync_time"], "sync_timezone": "UTC+3",
+            "next_sync_at": datetime.fromtimestamp(max(now, next_sync), timezone.utc).isoformat() if next_sync is not None else None,
             "term_count": len(data["terms"]), "people_count": len(data["people"]) if matches else 0,
             "directory_current": matches, "ldap_configured": config.ldap_configured(),
             "synced_at": data.get("synced_at"), "imported_at": data.get("imported_at"),
@@ -71,10 +79,34 @@ def snapshot(query: str = "") -> dict:
             "terms": terms[:100], "matched_terms": len(terms)}
 
 
-def save_settings(enabled: bool, sync_ad: bool, actor: str) -> dict:
-    _update(enabled=enabled, sync_ad=sync_ad)
-    store.record_audit(actor, "context.settings", detail=f"enabled={enabled}, sync_ad={sync_ad}")
+def save_settings(enabled: bool, sync_ad: bool, actor: str, *, sync_time: str | None = None) -> dict:
+    if sync_time is not None and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", sync_time):
+        raise ValueError("Укажите время синхронизации в формате ЧЧ:ММ")
+    data = _read()
+    changes = {"enabled": enabled, "sync_ad": sync_ad}
+    if sync_time is not None:
+        changes["sync_time"] = sync_time
+    if (sync_time is not None and sync_time != data["sync_time"]) or (sync_ad and not data["sync_ad"]):
+        changes["schedule_updated_at"] = time.time()
+    _update(**changes)
+    store.record_audit(actor, "context.settings", detail=f"enabled={enabled}, sync_ad={sync_ad}, time={sync_time or data['sync_time']} UTC+3")
     return snapshot()
+
+
+def _next_sync_at(data: dict, now: float, signature: str) -> float:
+    """Calendar scheduling survives restarts and never drifts after a manual run."""
+    changed = data.get("schedule_updated_at", 0)
+    if data.get("sync_id"):
+        return data.get("sync_until", now)
+    last = data.get("last_attempt", 0) if data.get("attempt_signature") == signature else 0
+    if data.get("sync_error") and last >= changed and last:
+        return last + 900
+    hour, minute = map(int, data.get("sync_time", DEFAULT_SYNC_TIME).split(":"))
+    target = datetime.fromtimestamp(now, SYNC_TIMEZONE).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    # A newly selected time starts at its next occurrence, including across midnight.
+    if target.timestamp() <= changed or target.timestamp() <= last:
+        target += timedelta(days=1)
+    return target.timestamp()
 
 
 def parse_dictionary(filename: str, content: bytes) -> list[dict]:
@@ -168,8 +200,7 @@ def _claim_sync(scheduled: bool) -> tuple[str, str] | None:
             raise ValueError("Синхронизация AD уже выполняется")
         if scheduled and (not data.get("sync_ad", True) or not config.ldap_configured()):
             return None
-        interval = 900 if data.get("sync_error") else 86400
-        if scheduled and signature == data.get("attempt_signature") and now - data.get("last_attempt", 0) < interval:
+        if scheduled and now < _next_sync_at(data, now, signature):
             return None
         token = secrets.token_hex(16)
         data.update(last_attempt=now, attempt_signature=signature, sync_id=token, sync_until=now + 120)

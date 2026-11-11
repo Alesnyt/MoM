@@ -505,6 +505,7 @@ export default function App() {
               meeting={selected}
               tab={tab}
               mailEnabled={Boolean(health?.smtp?.configured)}
+              directoryEnabled={Boolean(health?.ldap?.configured)}
               onTab={setTab}
               onRetry={() => void onRetry(selected.id)}
               onStop={() => void onStop(selected.id)}
