@@ -32,7 +32,7 @@ import {
 import { encodeAsrModel, formatAsrLabel, parseAsrModel, WHISPER_SIZES, type AsrEngine } from "./asr";
 import { connectionClass, connectionLabel, formatBytes, formatDate } from "./format";
 import { MonitoringPanel } from "./monitoring";
-import { DirectoryScopePanel } from "./directory-scope";
+import { DirectoryCachePanel } from "./directory-cache";
 import { CorporateContextPanel } from "./corporate-context";
 import type { AdminTab, AuditEvent, AuthStatus, Health, PlatformUser } from "./types";
 
@@ -681,7 +681,7 @@ function LdapPanel({ health, onChange }: { health: Health | null; onChange: (hea
                 setNote(
                   result.entries
                     ? `Найдена одна запись${result.mail ? `: ${result.mail}` : ""}`
-                    : "Служебная учётная запись подключилась",
+                    : "Служебная учётная запись подключилась. Чтение сотрудников проверяется при обновлении кэша ниже.",
                 ),
               )
               .catch((err: Error) => setError(err.message))
@@ -694,7 +694,7 @@ function LdapPanel({ health, onChange }: { health: Health | null; onChange: (hea
       {note && <p>{note}</p>}
       {error && <div className="banner" role="alert">{error}</div>}
     </form>
-    <DirectoryScopePanel key={`${ldap?.url || ""}|${ldap?.base_dn || ""}`} />
+    <DirectoryCachePanel key={`${ldap?.url || ""}|${ldap?.base_dn || ""}|${ldap?.email_attr || ""}|${ldap?.configured}`} />
     </>
   );
 }
@@ -730,7 +730,7 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
   if (tab === "ldap") {
     return {
       title: "Каталог",
-      lead: "LDAP или LDAPS для выбранных пользователей. Локальные пароли при этом остаются.",
+      lead: "Подключение к AD, поиск спикеров и обновление локального кэша сотрудников.",
     };
   }
   if (tab === "theme") {
@@ -759,6 +759,9 @@ const AUDIT_LABELS: Record<string, string> = {
   "user.limit": "Изменён архив",
   "ldap.scopes": "Изменены области поиска в каталоге",
   "ldap.save": "Изменён каталог",
+  "ldap.sync.request": "Запрошено обновление кэша AD",
+  "ldap.sync.error": "Ошибка обновления кэша AD",
+  "ldap.schedule": "Изменено расписание обновления AD",
   "meeting.delete": "Удалена встреча",
   "meeting.stop": "Обработка остановлена",
   "meeting.restart": "Обработка запущена заново",

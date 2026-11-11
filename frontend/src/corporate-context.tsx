@@ -1,12 +1,7 @@
 import { useEffect, useState } from "react";
-import { getCorporateContext, importCorporateDictionary, saveCorporateContext, syncCorporateDirectory, saveDirectoryPolicy, saveSpeakerSearchMode,
+import { getCorporateContext, importCorporateDictionary, saveCorporateContext,
   type CorporateContext } from "./api";
 import { formatDate } from "./format";
-import { DirectoryScopePanel } from "./directory-scope";
-
-const AD_FIELDS = [{key: "job_title", label: "Должность (title)"},
-  {key: "department", label: "Подразделение (department)"}, {key: "surname", label: "Фамилия для распознавания (sn)"}];
-
 export function CorporateContextPanel() {
   const [data, setData] = useState<CorporateContext | null>(null);
   const [query, setQuery] = useState("");
@@ -15,17 +10,6 @@ export function CorporateContextPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [message, setMessage] = useState("");
-  const [syncTime, setSyncTime] = useState("03:00");
-  const [fields, setFields] = useState(AD_FIELDS.map(field => field.key));
-  const [domains, setDomains] = useState("");
-  const [showScopes, setShowScopes] = useState(false);
-  const savedPolicy = JSON.stringify(data?.directory_policy);
-  useEffect(() => {
-    if (!savedPolicy) return;
-    const policy = JSON.parse(savedPolicy);
-    setFields(policy.fields); setDomains(policy.domains.join("\n"));
-  }, [savedPolicy]);
-  useEffect(() => { if (data?.sync_time) setSyncTime(data.sync_time); }, [data?.sync_time]);
 
   useEffect(() => {
     if (busy) return;
@@ -35,8 +19,7 @@ export function CorporateContextPanel() {
       getCorporateContext(query, controller.signal).then(next => {
         if (!controller.signal.aborted) {
           setData(next); setLoadError(null);
-          if (next.syncing) timer = window.setTimeout(refresh, 2000);
-          else if (next.sync_ad) timer = window.setTimeout(refresh, 30000);
+          timer = window.setTimeout(refresh, 30000);
         }
       }).catch(err => {
         if (!controller.signal.aborted) { setLoadError(err.message); timer = window.setTimeout(refresh, 5000); }
@@ -71,79 +54,17 @@ export function CorporateContextPanel() {
     {!data && !loadError && <p role="status">Загружаю корпоративный контекст…</p>}
     {data && <>
       <label className="context-toggle"><input type="checkbox" checked={data.enabled} disabled={busy}
-        onChange={event => void update(() => saveCorporateContext(event.target.checked, data.sync_ad), "Настройки сохранены")} />
+        onChange={event => void update(() => saveCorporateContext(event.target.checked, data.use_ad), "Настройки сохранены")} />
         Использовать корпоративный контекст при обработке новых записей</label>
       <section className="key-box">
         <h2>Сотрудники из AD</h2>
-        <fieldset className="speaker-search-mode" disabled={busy}>
-          <legend>Источник поиска спикеров</legend>
-          <label className="context-toggle"><input type="radio" name="speaker-search-mode" checked={data.search_mode === "live"}
-            onChange={() => void update(() => saveSpeakerSearchMode("live"), "Источник поиска: живой AD")} />
-            Живой AD (по умолчанию)</label>
-          <p>При вводе ФИО запрос идёт в корпоративный AD. Результаты актуальны на момент поиска; скорость зависит от AD.</p>
-          <label className="context-toggle"><input type="radio" name="speaker-search-mode" checked={data.search_mode === "cache"}
-            disabled={!data.search_cache_ready} aria-describedby="speaker-cache-status"
-            onChange={() => void update(() => saveSpeakerSearchMode("cache"), "Источник поиска: локальный кэш AD")} />
-            Локальный кэш AD</label>
-          <p>Быстрый поиск по последней успешной синхронизации, без запросов в AD при вводе имени.</p>
-          <p id="speaker-cache-status">{data.search_cache_ready
-            ? `Кэш готов к использованию. Сотрудников: ${data.people_count}.`
-            : "Для включения кэша сначала успешно синхронизируйте AD с текущими настройками."}</p>
-          <p>Выбор действует для всех пользователей со следующего поискового запроса. Синхронизация не переключает режим автоматически.
-            При ошибке поиска источник остаётся выбранным; переключить его можно здесь.</p>
-        </fieldset>
-        <p>Локальный справочник также используется для контекста распознавания независимо от режима поиска.</p>
-        <p>Сотрудников в контексте — {data.people_count}. {data.synced_at && `Обновлено ${formatDate(data.synced_at)}.`}</p>
-        {!data.directory_current && <p className="health-warn">Справочник нужно обновить. Сохраните ограничения и нажмите «Синхронизировать AD».</p>}
-        <form className="directory-policy" onSubmit={event => {
-          event.preventDefault();
-          void update(() => saveDirectoryPolicy({fields, domains: domains.split(/[\s,;]+/).filter(Boolean)}),
-            "Правила сохранены. Нажмите «Синхронизировать AD», чтобы обновить справочник.");
-        }}>
-          <fieldset disabled={busy || data.syncing}>
-            <legend>Какие поля загружать</legend>
-            <p>ФИО (displayName / cn) и email обязательны. Дополнительные поля можно отключить; остальные атрибуты AD не загружаются.</p>
-            {AD_FIELDS.map(field => <label className="context-toggle" key={field.key}>
-              <input type="checkbox" checked={fields.includes(field.key)} onChange={event => setFields(current =>
-                event.target.checked ? [...current, field.key] : current.filter(key => key !== field.key))} />{field.label}
-            </label>)}
-            <label className="field-label">Разрешённые почтовые домены
-              <textarea className="title-input" rows={2} value={domains} placeholder="company.ru, company.com"
-                onChange={event => setDomains(event.target.value)} aria-describedby="ad-domain-hint" />
-            </label>
-            <p id="ad-domain-hint">Пусто — любой почтовый домен. Перечислите через запятую или с новой строки.
-              Например, company.ru включает только адреса @company.ru, без поддоменов. Сотрудник должен также входить в выбранную OU.</p>
-            <button className="ghost" type="submit">Сохранить поля и домены</button>
-          </fieldset>
-        </form>
-        <button className="ghost" type="button" aria-expanded={showScopes} onClick={() => setShowScopes(value => !value)}>
-          {showScopes ? "Скрыть выбор OU" : "Выбрать домены AD и OU"}</button>
-        {showScopes && <DirectoryScopePanel onSaved={() => {
-          void update(() => getCorporateContext(query), "Области сохранены. Нажмите «Синхронизировать AD».");
-        }} />}
-        {data.sync_error && <p className="health-warn">{data.sync_error}</p>}
-        <label className="context-toggle"><input type="checkbox" checked={data.sync_ad} disabled={busy}
+        <label className="context-toggle"><input type="checkbox" checked={data.use_ad} disabled={busy}
           onChange={event => void update(() => saveCorporateContext(data.enabled, event.target.checked), "Настройки сохранены")} />
-          Обновлять AD автоматически раз в сутки</label>
-        <form className="context-schedule" onSubmit={event => {
-          event.preventDefault();
-          void update(() => saveCorporateContext(data.enabled, data.sync_ad, syncTime), "Время синхронизации сохранено");
-        }}>
-          <label>Время запуска <input type="time" required value={syncTime} disabled={busy}
-            onChange={event => setSyncTime(event.target.value)} aria-describedby="ad-sync-clock" /></label>
-          <button type="submit" className="ghost" disabled={busy || !syncTime || syncTime === data.sync_time}>Сохранить время</button>
-        </form>
-        <p id="ad-sync-clock">Ежедневно по московскому времени (UTC+3), независимо от времени на сервере.</p>
-        {data.sync_ad && data.next_sync_at && !data.syncing && <p>Ближайший запуск: {new Intl.DateTimeFormat("ru-RU", {
-          timeZone: "Europe/Moscow", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit",
-        }).format(new Date(data.next_sync_at))} (МСК).{data.sync_error && " Повтор после ошибки."}</p>}
-        {!data.sync_ad && <p>Автоматическая синхронизация выключена. Время сохранится для следующего включения.</p>}
-        <div className="composer-row">
-          <button type="button" className="ghost" disabled={busy || data.syncing || !data.ldap_configured}
-            onClick={() => void update(syncCorporateDirectory, "Сотрудники AD обновлены")}>
-            {data.syncing ? "Синхронизация выполняется…" : "Синхронизировать AD"}</button>
-        </div>
-        {!data.ldap_configured && <p>Настройте подключение в разделе «Каталог».</p>}
+          Использовать сотрудников AD в контексте распознавания</label>
+        <p>ФИО, должности и подразделения из последнего полного кэша помогают распознавать имена и учитывать корпоративный контекст.</p>
+        <p>Сотрудников в справочнике — {data.people_count}. {data.synced_at && `Обновлено ${formatDate(data.synced_at)}.`}</p>
+        <p>Подключение к AD, поиск спикеров, состав выгрузки и расписание обновления настраиваются на вкладке «Каталог».</p>
+        {!data.directory_current && <p className="health-warn">Справочник нужно обновить на вкладке «Каталог».</p>}
       </section>
       <section className="key-box">
         <h2>Корпоративный словарь</h2>

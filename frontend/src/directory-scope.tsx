@@ -44,13 +44,13 @@ export function DirectoryScopePanel({ onSaved }: { onSaved?: () => void } = {}) 
   async function save() {
     if (!value) return;
     setSaving(true); setError(""); setNote("");
-    try { setValue(await saveDirectoryScope(value)); setNote("Области сохранены. Обновите сотрудников кнопкой «Синхронизировать AD» в разделе «Контекст»."); onSaved?.(); }
+    try { setValue(await saveDirectoryScope(value)); setNote("Области сохранены. Обновите сотрудников кнопкой «Синхронизировать AD» ниже в разделе «Каталог»."); onSaved?.(); }
     catch (err) { setError(err instanceof Error ? err.message : "Не удалось сохранить"); }
     finally { setSaving(false); }
   }
   return <section className="directory-scopes">
     <h2>Домены и OU для синхронизации и поиска</h2>
-    <p>Выбранные области ограничивают синхронизацию контекста, подсказки спикеров и поиск людей для добавления в MoM. Настройки входа через LDAP не меняются.
+    <p>Выбранные области ограничивают выгрузку кэша, подсказки спикеров и поиск людей для добавления в MoM. Настройки входа через LDAP не меняются.
       Пользователи, уже добавленные в MoM, остаются в подсказках.</p>
     <p className="progress-hint">Подключение настраивается в разделе «Каталог». Загружается только структура доступного каталога, без списка сотрудников.
       Выбор области включает все вложенные подразделения. Если внутри есть подрядчики, выберите только нужные дочерние OU.</p>

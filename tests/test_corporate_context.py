@@ -51,9 +51,9 @@ def test_csv_excel_replace_atomically_and_reject_bad_files(db):
 
 def test_sync_preserves_complete_snapshot_on_failure_and_respects_scope_changes(db, monkeypatch):
     people = [{"name": "Анна Иванова", "email": "anna@example.com", "department": "ИТ", "job_title": "Архитектор"}]
-    monkeypatch.setattr(ldap_auth, "sync_people", lambda: people)
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda **kwargs: people)
     assert cc.sync_directory()["people_count"] == 1
-    def unavailable():
+    def unavailable(**kwargs):
         raise ldap_auth.LdapError("Каталог недоступен")
     monkeypatch.setattr(ldap_auth, "sync_people", unavailable)
     with pytest.raises(ldap_auth.LdapError):
@@ -124,7 +124,7 @@ def test_ldap_sync_pages_deduplicates_and_rejects_truncation(db, monkeypatch):
         def unbind(self):
             self.closed = True
     connection = Connection()
-    monkeypatch.setattr(ldap_auth, "_service_connection", lambda: (connection, None))
+    monkeypatch.setattr(ldap_auth, "_service_connection", lambda **kwargs: (connection, None))
     assert ldap_auth.sync_people() == [{"name": "Анна Иванова", "email": "anna@example.com",
                                        "department": "ИТ", "job_title": "Архитектор", "surname": ""}]
     assert len(connection.calls) == 2
@@ -163,13 +163,13 @@ def test_directory_lease_coordinates_workers_and_discards_expired_owner(db, monk
     with pytest.raises(ValueError, match="уже выполняется"):
         cc._claim_sync(False)
     assert cc._claim_sync(True) is None
-    cc._update(sync_until=time.time() - 1, last_attempt=0)
+    cc._update_job(first, sync_until=time.time() - 1, last_attempt=0)
     second, _ = cc._claim_sync(True)
     assert first != second
-    assert cc._update(_expected_sync_id=first, people=[{"name": "Устаревший"}]) is None
-    assert cc._update(_expected_sync_id=first, sync_until=0) is None
+    assert cc._publish_directory(first, signature, [{"name": "Устаревший"}]) is False
+    assert cc._update_job(first, sync_until=0) is False
     assert cc.snapshot()["syncing"]
-    cc._update(_expected_sync_id=second, sync_until=0, sync_id=None)
+    cc._update_job(second, sync_until=0, sync_id=None)
     # Daily sync is throttled across workers; a changed scope is immediately eligible.
     assert cc._claim_sync(True) is None
     directory_scope.save("selected", [])
@@ -179,7 +179,7 @@ def test_directory_lease_coordinates_workers_and_discards_expired_owner(db, monk
 def test_sync_calendar_time_manual_run_and_restart(db, monkeypatch):
     clock = [datetime.fromisoformat("2026-11-11T06:00:00+03:00").timestamp()]
     monkeypatch.setattr(cc.time, "time", lambda: clock[0])
-    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [])
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda **kwargs: [])
     cc.save_settings(True, True, "admin", sync_time="09:30")
     assert cc.snapshot()["next_sync_at"] == "2026-11-11T06:30:00+00:00"
     cc.sync_directory()  # Manual run does not move the configured daily time.
@@ -202,7 +202,7 @@ def test_schedule_change_midnight_disabled_mode_and_retry(db, monkeypatch):
     cc.save_settings(True, True, "admin", sync_time="00:15")
     assert cc.snapshot()["next_sync_at"] == "2026-11-11T21:15:00+00:00"
     assert cc.sync_directory(scheduled=True) == {}
-    def unavailable():
+    def unavailable(**kwargs):
         raise ldap_auth.LdapError("Каталог недоступен")
     monkeypatch.setattr(ldap_auth, "sync_people", unavailable)
     clock[0] = datetime.fromisoformat("2026-11-12T00:15:00+03:00").timestamp()
@@ -211,7 +211,7 @@ def test_schedule_change_midnight_disabled_mode_and_retry(db, monkeypatch):
     assert cc.snapshot()["next_sync_at"] == "2026-11-11T21:30:00+00:00"
     assert cc.sync_directory(scheduled=True) == {}
     clock[0] += 900
-    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [])
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda **kwargs: [])
     assert cc.sync_directory(scheduled=True)["sync_error"] is None
     cc.save_settings(True, False, "admin")
     assert cc.snapshot()["sync_time"] == "00:15"
@@ -268,7 +268,7 @@ def test_speaker_search_defaults_to_live_and_can_switch_without_rebuilding_cache
         calls.append((query, for_speakers))
         return [live]
     monkeypatch.setattr(ldap_auth, "search_people", search)
-    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [cached])
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda **kwargs: [cached])
     cc.sync_directory()
     assert cc.snapshot()["search_mode"] == "live"  # Sync never implicitly enables cache.
     assert people.suggest("Анна")["people"][0]["name"] == live["name"]
@@ -313,7 +313,7 @@ def test_speaker_search_mode_api_admin_only_and_requires_current_successful_sync
     assert client.post(route, json={"mode": "cache"}).status_code == 400
     assert cc.snapshot()["search_mode"] == "live"
     assert client.post(route, json={"mode": "other"}).status_code == 422
-    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [{"name": "Анна"}])
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda **kwargs: [{"name": "Анна"}])
     cc.sync_directory()
     response = client.post(route, json={"mode": "cache"})
     assert response.status_code == 200 and response.json()["search_cache_ready"]
@@ -355,7 +355,7 @@ def test_directory_policy_requests_only_selected_fields_and_enforces_domain_and_
         def unbind(self):
             pass
     conn = Connection()
-    monkeypatch.setattr(ldap_auth, "_service_connection", lambda: (conn, None))
+    monkeypatch.setattr(ldap_auth, "_service_connection", lambda **kwargs: (conn, None))
     assert ldap_auth.sync_people() == [{"name": "Анна Иванова", "email": "anna@example.com", "department": "ИТ"}]
     outside = Entry()
     outside.entry_dn = "CN=Anna,OU=Contractors,DC=example,DC=com"

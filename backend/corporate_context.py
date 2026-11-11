@@ -24,6 +24,7 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TERMS = 5000
 SYNC_TIMEZONE = timezone(timedelta(hours=3))
 DEFAULT_SYNC_TIME = "03:00"
+SYNC_LEASE_SECONDS = 45
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 
 
@@ -32,7 +33,7 @@ def normalize(value: str) -> str:
 
 
 def _read() -> dict:
-    return {"enabled": True, "sync_ad": True, "sync_time": DEFAULT_SYNC_TIME, "revision": 0, "terms": [], "people": [],
+    return {"enabled": True, "use_ad": True, "sync_ad": True, "sync_time": DEFAULT_SYNC_TIME, "revision": 0, "terms": [], "people": [],
             **(store.get_app_setting("corporate_context") or {})}
 
 
@@ -46,13 +47,11 @@ def _write(conn, data: dict) -> None:
                  "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", (json.dumps(secrets.token_hex(16)),))
 
 
-def _update(*, _expected_sync_id: str | None = None, **changes) -> dict | None:
+def _update(**changes) -> dict:
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT payload FROM app_settings WHERE key='corporate_context'").fetchone()
         data = json.loads(row[0]) if row else {}
-        if _expected_sync_id is not None and data.get("sync_id") != _expected_sync_id:
-            return None
         data.update(changes)
         _write(conn, data)
     return data
@@ -70,14 +69,18 @@ def directory_signature() -> str:
 
 def snapshot(query: str = "") -> dict:
     data = _read()
+    job = _sync_job(data)
     signature = directory_signature()
     matches = data.get("directory_signature") == signature
     now = time.time()
-    next_sync = _next_sync_at(data, now, signature) if data["sync_ad"] and config.ldap_configured() else None
+    next_sync = _next_sync_at({**data, **job}, now, signature) if data["sync_ad"] and config.ldap_configured() else None
+    interrupted = job.get("status") == "running" and job.get("sync_until", 0) <= now
+    progress = {**job.get("progress", {}), "status": "interrupted" if interrupted else job.get("status", "idle"),
+                "started_at": job.get("started_at"), "finished_at": job.get("finished_at")}
     needle = normalize(query)
     terms = [entry for entry in data["terms"] if needle in normalize(" ".join(
         [entry["term"], *entry["aliases"], entry["description"], entry["department"]]))]
-    return {"enabled": data["enabled"], "sync_ad": data["sync_ad"], "revision": data["revision"],
+    return {"enabled": data["enabled"], "use_ad": data["use_ad"], "sync_ad": data["sync_ad"], "revision": data["revision"],
             "sync_time": data["sync_time"], "sync_timezone": "UTC+3",
             "directory_policy": directory_scope.sync_policy(),
             "search_mode": directory_scope.speaker_search_mode(),
@@ -86,7 +89,10 @@ def snapshot(query: str = "") -> dict:
             "term_count": len(data["terms"]), "people_count": len(data["people"]) if matches else 0,
             "directory_current": matches, "ldap_configured": config.ldap_configured(),
             "synced_at": data.get("synced_at"), "imported_at": data.get("imported_at"),
-            "sync_error": data.get("sync_error"), "syncing": data.get("sync_until", 0) > time.time(),
+            "sync_error": "Обновление прервано: процесс перестал отвечать. Запустите обновление снова; предыдущий кэш сохранён."
+                          if interrupted else job.get("sync_error"),
+            "syncing": job.get("status") == "queued" or (job.get("sync_until", 0) > now),
+            "sync_progress": progress,
             "terms": terms[:100], "matched_terms": len(terms)}
 
 
@@ -130,17 +136,20 @@ def search_people(query: str, limit: int = 20) -> tuple[list[dict], str | None]:
             key=lambda person: (not normalize(person["name"]).startswith(needle), person["name"].casefold()))], None
 
 
-def save_settings(enabled: bool, sync_ad: bool, actor: str, *, sync_time: str | None = None) -> dict:
+def save_settings(enabled: bool | None, sync_ad: bool | None, actor: str, *, sync_time: str | None = None,
+                  use_ad: bool | None = None) -> dict:
     if sync_time is not None and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", sync_time):
         raise ValueError("Укажите время синхронизации в формате ЧЧ:ММ")
     data = _read()
-    changes = {"enabled": enabled, "sync_ad": sync_ad}
+    changes = {key: value for key, value in {"enabled": enabled, "sync_ad": sync_ad, "use_ad": use_ad}.items()
+               if value is not None}
     if sync_time is not None:
         changes["sync_time"] = sync_time
     if (sync_time is not None and sync_time != data["sync_time"]) or (sync_ad and not data["sync_ad"]):
         changes["schedule_updated_at"] = time.time()
     _update(**changes)
-    store.record_audit(actor, "context.settings", detail=f"enabled={enabled}, sync_ad={sync_ad}, time={sync_time or data['sync_time']} UTC+3")
+    store.record_audit(actor, "ldap.schedule" if enabled is None else "context.settings",
+                       detail=json.dumps(changes, ensure_ascii=False))
     return snapshot()
 
 
@@ -238,25 +247,91 @@ def import_dictionary(filename: str, content: bytes, actor: str) -> dict:
     return snapshot()
 
 
+def _sync_job(data: dict | None = None) -> dict:
+    saved = store.get_app_setting("ldap_sync_job")
+    if saved is not None:
+        return saved
+    # Carry scheduling/error information across upgrades; the last complete roster stays intact.
+    data = data if data is not None else _read()
+    return {key: data[key] for key in ("last_attempt", "attempt_signature", "sync_error", "sync_id", "sync_until")
+            if key in data}
+
+
+def _write_job(conn, job: dict) -> None:
+    conn.execute("INSERT INTO app_settings(key,payload) VALUES ('ldap_sync_job',?) "
+                 "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", (json.dumps(job, ensure_ascii=False),))
+
+
+def _update_job(token: str, **changes) -> bool:
+    # Progress and heartbeat writes never copy the roster or invalidate the name-search index.
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        job = _sync_job()
+        if job.get("sync_id") != token or job.get("status") != "running":
+            return False
+        job.update(changes)
+        _write_job(conn, job)
+    return True
+
+
+def request_sync(actor: str) -> dict:
+    if not config.ldap_configured():
+        raise ValueError("Сначала настройте подключение AD в разделе «Каталог»")
+    if not directory_scope.search_bases():
+        raise ValueError("Выберите и сохраните области выгрузки AD")
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        job = _sync_job()
+        if job.get("status") == "queued" or job.get("sync_until", 0) > time.time():
+            raise ValueError("Синхронизация AD уже выполняется")
+        job.update(status="queued", actor=actor, sync_id=None, sync_until=0, sync_error=None,
+                   started_at=None, finished_at=None, progress={"phase": "queued", "received": 0, "pages": 0})
+        _write_job(conn, job)
+    store.record_audit(actor, "ldap.sync.request", detail="Обновление кэша запрошено")
+    return snapshot()
+
+
 def _claim_sync(scheduled: bool) -> tuple[str, str] | None:
-    """Coordinate the web process and workers; a crashed worker releases its lease in 2 minutes."""
+    """Persistent queue plus a renewable lease shared by every web/worker process."""
     signature, now = directory_signature(), time.time()
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT payload FROM app_settings WHERE key='corporate_context'").fetchone()
-        data = json.loads(row[0]) if row else {}
-        if data.get("sync_until", 0) > now:
+        data, job = _read(), _sync_job()
+        if job.get("sync_until", 0) > now:
             if scheduled:
                 return None
             raise ValueError("Синхронизация AD уже выполняется")
-        if scheduled and (not data.get("sync_ad", True) or not config.ldap_configured()):
-            return None
-        if scheduled and now < _next_sync_at(data, now, signature):
-            return None
+        queued = job.get("status") == "queued"
+        if scheduled and not queued:
+            if not data["sync_ad"] or not config.ldap_configured():
+                return None
+            if now < _next_sync_at({**data, **job}, now, signature):
+                return None
         token = secrets.token_hex(16)
-        data.update(last_attempt=now, attempt_signature=signature, sync_id=token, sync_until=now + 120)
-        _write(conn, data)
+        job.update(last_attempt=now, attempt_signature=signature, sync_id=token,
+                   sync_until=now + SYNC_LEASE_SECONDS, status="running", sync_error=None,
+                   actor=job.get("actor", "system") if queued else "system",
+                   started_at=store.utc_now(), finished_at=None,
+                   progress={"phase": "connecting", "received": 0, "pages": 0})
+        _write_job(conn, job)
     return token, signature
+
+
+def _publish_directory(token: str, signature: str, people: list[dict]) -> bool:
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        job = _sync_job()
+        if job.get("sync_id") != token or job.get("status") != "running":
+            return False
+        if signature != directory_signature():
+            raise ValueError("Настройки AD изменились во время синхронизации. Запустите её снова")
+        data = _read()
+        data.update(people=people, directory_signature=signature, synced_at=store.utc_now(), sync_error=None)
+        _write(conn, data)
+        job.update(status="succeeded", sync_id=None, sync_until=0, finished_at=store.utc_now(), sync_error=None)
+        job["progress"] = {**job.get("progress", {}), "phase": "done", "received": len(people)}
+        _write_job(conn, job)
+    return True
 
 
 def sync_directory(actor: str = "system", *, scheduled: bool = False) -> dict:
@@ -264,29 +339,60 @@ def sync_directory(actor: str = "system", *, scheduled: bool = False) -> dict:
     if claim is None:
         return {}
     token, signature = claim
+    if scheduled:
+        actor = _sync_job().get("actor", actor)
+    done, lost = threading.Event(), threading.Event()
+
+    def heartbeat():
+        while not done.wait(5):
+            try:
+                if not _update_job(token, sync_until=time.time() + SYNC_LEASE_SECONDS):
+                    lost.set()
+                    return
+            except Exception:
+                log.exception("Не удалось обновить статус выгрузки AD")
+                lost.set()
+                return
+
+    def progress(state):
+        if lost.is_set() or not _update_job(token, progress=state, sync_until=time.time() + SYNC_LEASE_SECONDS):
+            raise ldap_auth.LdapError("Обновление кэша прервано: задача передана другому процессу")
+
+    thread = threading.Thread(target=heartbeat, name="mom-ad-heartbeat", daemon=True)
+    thread.start()
     try:
-        people = ldap_auth.sync_people()
-        if signature != directory_signature():
-            raise ValueError("Настройки AD изменились во время синхронизации. Запустите её снова")
-        if _update(_expected_sync_id=token, people=people, directory_signature=signature,
-                   synced_at=store.utc_now(), sync_error=None) is not None:
+        people = ldap_auth.sync_people(progress=progress)
+        if lost.is_set():
+            raise ldap_auth.LdapError("Обновление кэша прервано: потеряна связь с задачей")
+        if _publish_directory(token, signature, people):
             store.record_audit(actor, "context.sync", detail=f"people={len(people)}")
-    except (ldap_auth.LdapError, ValueError) as exc:
-        _update(_expected_sync_id=token, sync_error=str(exc))
+    except Exception as exc:
+        log.exception("Не удалось обновить корпоративный каталог")
+        message = str(exc) if isinstance(exc, (ldap_auth.LdapError, ValueError)) else (
+            f"Обновление кэша прервано ({type(exc).__name__}). Подробности — в журнале сервера MoM")
+        if _update_job(token, status="error", sync_id=None, sync_until=0,
+                       finished_at=store.utc_now(), sync_error=message):
+            store.record_audit(actor, "ldap.sync.error", detail=message)
         raise
     finally:
-        _update(_expected_sync_id=token, sync_id=None, sync_until=0)
+        done.set()
+        thread.join(timeout=1)
     return snapshot()
 
 
 async def run_sync(stop: asyncio.Event) -> None:
+    next_schedule_check = 0.0
     while not stop.is_set():
         try:
-            await asyncio.to_thread(sync_directory, scheduled=True)
+            queued = await asyncio.to_thread(store.get_app_setting, "ldap_sync_job")
+            if (queued or {}).get("status") == "queued" or time.monotonic() >= next_schedule_check:
+                await asyncio.to_thread(sync_directory, scheduled=True)
+                next_schedule_check = time.monotonic() + 60
         except Exception:
-            log.exception("Не удалось обновить корпоративный каталог")
+            # sync_directory records both scheduled and manual failures with their traceback.
+            next_schedule_check = time.monotonic() + 60
         try:
-            await asyncio.wait_for(stop.wait(), timeout=60)
+            await asyncio.wait_for(stop.wait(), timeout=2)
         except TimeoutError:
             pass
 
@@ -375,6 +481,6 @@ def for_meeting(meeting: dict) -> Context:
     data = _read()
     if not data["enabled"]:
         return Context([], [], data["revision"])
-    people = data["people"] if config.ldap_configured() and data.get("directory_signature") == directory_signature() else []
+    people = data["people"] if data["use_ad"] and config.ldap_configured() and data.get("directory_signature") == directory_signature() else []
     user = store.get_user(meeting["user_id"]) if meeting.get("user_id") else None
     return Context(data["terms"], people, data["revision"], (user or {}).get("email", ""))
