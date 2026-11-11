@@ -68,6 +68,7 @@ function SpeakerNameEditor({
   const [searchState, setSearchState] = useState<"idle" | "loading" | "empty" | "error">("idle");
   const [activeIndex, setActiveIndex] = useState(-1);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
+  const [searchMode, setSearchMode] = useState<"live" | "cache" | null>(null);
   const listId = useId();
   const inputId = useId();
   const activeOption = useRef<HTMLButtonElement>(null);
@@ -84,19 +85,21 @@ function SpeakerNameEditor({
   useEffect(() => {
     const query = draft.trim();
     if (!open || disabled || query.length < 2 || query === speaker.name.trim()) {
-      setPeople([]); setSearchState("idle"); setActiveIndex(-1); setDirectoryError(null);
+      setPeople([]); setSearchState("idle"); setActiveIndex(-1); setDirectoryError(null); setSearchMode(null);
       return;
     }
     const controller = new AbortController();
     let active = true;
     setPeople([]); setActiveIndex(-1);
     setSearchState("loading");
+    setSearchMode(null);
     setDirectoryError(null);
     const handle = window.setTimeout(() => {
       listPeople(query, controller.signal)
         .then((result) => {
           if (!active) return;
           setPeople(result.people); setActiveIndex(-1); setDirectoryError(result.error || null);
+          setSearchMode(result.search_mode || null);
           setSearchState(result.error ? "error" : result.people.length ? "idle" : "empty");
         })
         .catch(() => {
@@ -200,7 +203,7 @@ function SpeakerNameEditor({
             {open && searchState === "loading" && <span className="speaker-input-spinner speaker-search-spinner" aria-hidden="true" />}
           </div>
           <p className="speaker-input-hint" id={`${inputId}-hint`}>
-            {directoryEnabled ? "Введите от 2 букв ФИО. Поиск по локальному справочнику AD — выберите сотрудника из списка." : "Выберите сохранённого пользователя или введите имя вручную."}
+            {directoryEnabled ? "Введите от 2 букв ФИО и выберите сотрудника из списка AD." : "Выберите сохранённого пользователя или введите имя вручную."}
           </p>
           {open && searchState === "loading" && <div ref={searchFeedback} className="speaker-search-status" role="status">
             <span className="speaker-search-spinner" aria-hidden="true" />
@@ -208,6 +211,9 @@ function SpeakerNameEditor({
           </div>}
           {open && (people.length > 0 || searchState === "empty" || searchState === "error") && (
             <div ref={searchFeedback} className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
+              {directoryEnabled && searchMode && <div className="speaker-search-note">
+                Режим поиска: {searchMode === "live" ? "живой AD" : "локальный кэш AD"}
+              </div>}
               {searchState === "empty" && <div className="speaker-search-note" role="status">{directoryEnabled ? "В справочнике AD совпадений не найдено." : "Совпадений нет."} Уточните ФИО или сохраните имя вручную.</div>}
               {searchState === "error" && <div className="speaker-search-note" role="status">{directoryError || "Поиск недоступен. Можно сохранить имя вручную."}</div>}
               <ul id={listId} role="listbox" aria-label="Имена из каталога" style={{ listStyle: "none", padding: 0, margin: 0 }}>

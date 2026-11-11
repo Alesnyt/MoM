@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from . import config, corporate_context, ldap_auth, store
+from . import config, corporate_context, directory_scope, ldap_auth, store
 
 
 def suggest(query: str = "") -> dict:
-    """MoM users plus locally synchronized AD names; no network calls on the user path."""
+    """MoM users plus the explicitly selected directory source, with no automatic fallback."""
     needle = query.strip()
+    mode = directory_scope.speaker_search_mode()
     people: list[dict[str, str]] = []
     by_email: dict[str, dict[str, str]] = {}
     error = None
@@ -19,7 +20,14 @@ def suggest(query: str = "") -> dict:
         people.append(item)
         by_email[email.casefold()] = item
     if config.ldap_configured() and len(needle) >= 2:
-        found, error = corporate_context.search_people(needle)
+        if mode == "cache":
+            found, error = corporate_context.search_people(needle)
+        else:
+            try:
+                found = ldap_auth.search_people(needle, for_speakers=True)
+            except ldap_auth.LdapError:
+                found = []
+                error = "Поиск в AD временно недоступен. Можно выбрать сохранённого пользователя или ввести имя вручную."
         for person in found:
             email = (person.get("email") or "").strip()
             key = email.casefold()
@@ -32,7 +40,8 @@ def suggest(query: str = "") -> dict:
             people.append(item)
             if key:
                 by_email[key] = people[-1]
-    return {"people": people[:40], "ldap": config.ldap_configured(), **({"error": error} if error else {})}
+    return {"people": people[:40], "ldap": config.ldap_configured(), "search_mode": mode,
+            **({"error": error} if error else {})}
 
 
 def directory(query: str = "") -> dict:

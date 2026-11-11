@@ -20,7 +20,8 @@ def main():
              patch.object(config, "get_ldap_base_dn", return_value="DC=example,DC=com"), \
              patch.object(ldap_auth, "search_people", side_effect=AssertionError("Unexpected network lookup")):
             store.init_db()
-            cc._update(people=roster, directory_signature=cc.directory_signature())
+            cc._update(people=roster, directory_signature=cc.directory_signature(), synced_at=store.utc_now())
+            cc.save_search_mode("cache", "benchmark")
             timings = []
             start = time.perf_counter()
             assert people.suggest("фамилия49999")["people"][0]["email"] == "employee49999@example.com"

@@ -80,12 +80,25 @@ def snapshot(query: str = "") -> dict:
     return {"enabled": data["enabled"], "sync_ad": data["sync_ad"], "revision": data["revision"],
             "sync_time": data["sync_time"], "sync_timezone": "UTC+3",
             "directory_policy": directory_scope.sync_policy(),
+            "search_mode": directory_scope.speaker_search_mode(),
+            "search_cache_ready": bool(matches and data.get("synced_at") and config.ldap_configured()),
             "next_sync_at": datetime.fromtimestamp(max(now, next_sync), timezone.utc).isoformat() if next_sync is not None else None,
             "term_count": len(data["terms"]), "people_count": len(data["people"]) if matches else 0,
             "directory_current": matches, "ldap_configured": config.ldap_configured(),
             "synced_at": data.get("synced_at"), "imported_at": data.get("imported_at"),
             "sync_error": data.get("sync_error"), "syncing": data.get("sync_until", 0) > time.time(),
             "terms": terms[:100], "matched_terms": len(terms)}
+
+
+def save_search_mode(mode: str, actor: str) -> dict:
+    if mode not in {"live", "cache"}:
+        raise ValueError("Выберите живой AD или локальный кэш")
+    if mode == "cache" and not snapshot()["search_cache_ready"]:
+        raise ValueError("Сначала успешно синхронизируйте AD с текущими настройками")
+    # Separate from the context snapshot: switching never rebuilds or invalidates the cache.
+    store.set_app_setting("ldap_speaker_search", {"mode": mode})
+    store.record_audit(actor, "context.search", detail="Живой AD" if mode == "live" else "Локальный кэш AD")
+    return snapshot()
 
 
 _people_cache_lock = threading.Lock()

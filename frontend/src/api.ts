@@ -15,12 +15,14 @@ async function parseError(response: Response): Promise<string> {
 
 export type CorporateTerm = { term: string; aliases: string[]; description: string; department: string };
 export type DirectoryPolicy = { fields: string[]; domains: string[] };
+export type SpeakerSearchMode = "live" | "cache";
 export type CorporateContext = {
   enabled: boolean; sync_ad: boolean; revision: number; term_count: number; people_count: number;
   directory_current: boolean; ldap_configured: boolean; synced_at: string | null; imported_at: string | null;
   sync_error: string | null; syncing: boolean; terms: CorporateTerm[]; matched_terms: number;
   sync_time: string; sync_timezone: string; next_sync_at: string | null;
   directory_policy: DirectoryPolicy;
+  search_mode: SpeakerSearchMode; search_cache_ready: boolean;
 };
 
 export async function getCorporateContext(query: string, signal?: AbortSignal): Promise<CorporateContext> {
@@ -45,6 +47,13 @@ export async function syncCorporateDirectory(): Promise<CorporateContext> {
 export async function saveDirectoryPolicy(policy: DirectoryPolicy): Promise<CorporateContext> {
   const response = await fetch("/api/admin/context/directory", {method: "POST", credentials: "include",
     headers: {"Content-Type": "application/json"}, body: JSON.stringify(policy)});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function saveSpeakerSearchMode(mode: SpeakerSearchMode): Promise<CorporateContext> {
+  const response = await fetch("/api/admin/context/search", {method: "POST", credentials: "include",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({mode})});
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
@@ -433,11 +442,11 @@ export type Person = {
   job_title?: string;
 };
 
-export async function listPeople(query: string, signal?: AbortSignal): Promise<{people: Person[]; ldap: boolean; error?: string}> {
+export async function listPeople(query: string, signal?: AbortSignal): Promise<{people: Person[]; ldap: boolean; error?: string; search_mode?: SpeakerSearchMode}> {
   const response = await fetch(`/api/people?q=${encodeURIComponent(query)}`, { credentials: "include", signal });
   if (!response.ok) throw new Error(await parseError(response));
   const data = await response.json();
-  return {people: data.people ?? [], ldap: Boolean(data.ldap), error: data.error};
+  return {people: data.people ?? [], ldap: Boolean(data.ldap), error: data.error, search_mode: data.search_mode};
 }
 
 export async function renameSpeaker(id: string, speakerId: string, name: string, email?: string, jobTitle?: string): Promise<Meeting> {

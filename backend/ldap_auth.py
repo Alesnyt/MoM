@@ -200,7 +200,16 @@ def _search(connection, username: str) -> list[tuple[str, str]]:
     return found
 
 
-def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
+def _with_email_domains(search_filter: str, mail_attr: str, domains: list[str]) -> str:
+    if not domains:
+        return search_filter
+    from ldap3.utils.conv import escape_filter_chars
+    allowed = "(|" + "".join(f"({attr}=*@{escape_filter_chars(domain)})"
+        for domain in domains for attr in sorted({mail_attr, "mail"})) + ")"
+    return f"(&{search_filter}{allowed})"
+
+
+def search_people(query: str, limit: int = 20, *, for_speakers: bool = False) -> list[dict[str, str]]:
     text = query.strip()
     if len(text) < 2 or not config.ldap_configured():
         return []
@@ -213,7 +222,10 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
         from ldap3 import SUBTREE, DEREF_NEVER
 
         mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-        attributes = sorted({mail_attr, "mail", "cn", "displayName", "title"})
+        policy = directory_scope.sync_policy() if for_speakers else {"fields": ["job_title"], "domains": []}
+        attributes = sorted({mail_attr, "mail", "cn", "displayName"} |
+                            ({"title"} if "job_title" in policy["fields"] else set()))
+        search_filter = _with_email_domains(people_filter(text), mail_attr, policy["domains"])
         people: list[dict[str, str]] = []
         seen: set[str] = set()
         cap = max(1, min(int(limit), 30))
@@ -222,7 +234,7 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
             if time.monotonic() >= deadline:
                 raise LdapError("Поиск по выбранным областям занял слишком много времени. Сократите список областей")
             ok = connection.search(
-                search_base=base, search_filter=people_filter(text), search_scope=SUBTREE,
+                search_base=base, search_filter=search_filter, search_scope=SUBTREE,
                 dereference_aliases=DEREF_NEVER, attributes=attributes,
                 size_limit=cap, time_limit=5,
             )
@@ -231,13 +243,15 @@ def search_people(query: str, limit: int = 20) -> list[dict[str, str]]:
                 raise LdapError("Не удалось выполнить поиск в выбранной области. Проверьте DN и права служебной учётной записи")
             for entry in connection.entries:
                 mail = _entry_attr(entry, mail_attr) or _entry_attr(entry, "mail")
+                if policy["domains"] and mail.rpartition("@")[2].casefold() not in policy["domains"]:
+                    continue
                 name = _entry_attr(entry, "displayName") or _entry_attr(entry, "cn") or mail
                 key = mail.casefold() if mail else str(entry.entry_dn).casefold()
                 if not name or key in seen:
                     continue
                 seen.add(key)
                 person = {"name": name, "email": mail, "source": "ldap"}
-                if title := " ".join(_entry_attr(entry, "title").split())[:200]:
+                if "job_title" in policy["fields"] and (title := " ".join(_entry_attr(entry, "title").split())[:200]):
                     person["job_title"] = title
                 people.append(person)
                 if len(people) >= cap:
@@ -268,11 +282,7 @@ def sync_people() -> list[dict[str, str]]:
     fields, domains = policy["fields"], policy["domains"]
     attributes = sorted({mail_attr, "mail", "cn", "displayName"} |
                         {directory_scope.OPTIONAL_FIELDS[field][0] for field in fields})
-    if domains:
-        from ldap3.utils.conv import escape_filter_chars
-        domain_filter = "(|" + "".join(f"({attr}=*@{escape_filter_chars(domain)})"
-            for domain in domains for attr in sorted({mail_attr, "mail"})) + ")"
-        search_filter = f"(&{search_filter}{domain_filter})"
+    search_filter = _with_email_domains(search_filter, mail_attr, domains)
     connection = None
     people, seen = [], set()
     deadline = time.monotonic() + 60

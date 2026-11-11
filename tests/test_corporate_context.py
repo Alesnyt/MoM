@@ -226,6 +226,8 @@ def test_schedule_change_midnight_disabled_mode_and_retry(db, monkeypatch):
 
 def test_people_lookup_reports_missing_cache_without_hiding_saved_users(db, monkeypatch):
     from backend import people
+    # Previously selected cache may become unavailable after a scope change.
+    store.set_app_setting("ldap_speaker_search", {"mode": "cache"})
     monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
     def unavailable(_query):
         pytest.fail("Speaker lookup must never call LDAP")
@@ -242,7 +244,8 @@ def test_cached_directory_partial_search_survives_outage_and_refreshes(db, monke
     roster = [{"name": "Анна Семёнова", "email": "anna@example.com", "job_title": "Архитектор"},
               {"name": "Семён Петров", "email": "petr@example.com"}]
     monkeypatch.setattr(ldap_auth, "search_people", lambda *args: pytest.fail("No LDAP in speaker lookup"))
-    cc._update(people=roster, directory_signature=cc.directory_signature(), sync_error="server offline")
+    cc._update(people=roster, directory_signature=cc.directory_signature(), synced_at=store.utc_now(), sync_error="server offline")
+    cc.save_search_mode("cache", "admin")
     monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
     assert people.suggest("anna")["people"] == [dict(roster[0], source="ldap")]
     assert cc.search_people("семено АН")[0] == [roster[0]]
@@ -254,6 +257,71 @@ def test_cached_directory_partial_search_survives_outage_and_refreshes(db, monke
     directory_scope.save_sync_policy([], ["example.com"])
     assert cc.search_people("сокол")[0] == []
     assert cc.search_people("сокол")[1]
+
+
+def test_speaker_search_defaults_to_live_and_can_switch_without_rebuilding_cache(db, monkeypatch):
+    from backend import people
+    cached = {"name": "Анна из кэша", "email": "anna@example.com"}
+    live = {"name": "Анна из AD", "email": "anna@example.com"}
+    calls = []
+    def search(query, *, for_speakers=False):
+        calls.append((query, for_speakers))
+        return [live]
+    monkeypatch.setattr(ldap_auth, "search_people", search)
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [cached])
+    cc.sync_directory()
+    assert cc.snapshot()["search_mode"] == "live"  # Sync never implicitly enables cache.
+    assert people.suggest("Анна")["people"][0]["name"] == live["name"]
+    assert calls == [("Анна", True)]
+    revision = cc.snapshot()["revision"]
+    cc.save_search_mode("cache", "admin")
+    store.init_db()
+    result = people.suggest("Анна")
+    assert result["search_mode"] == "cache" and result["people"][0]["name"] == cached["name"]
+    assert len(calls) == 1 and cc.snapshot()["revision"] == revision
+    cc.save_settings(False, False, "admin")
+    assert cc.snapshot()["search_mode"] == "cache"  # Recognition and scheduling are independent.
+    cc.save_search_mode("live", "admin")
+    result = people.suggest("Анна")
+    assert result["search_mode"] == "live" and result["people"][0]["name"] == live["name"]
+    assert len(calls) == 2
+
+
+def test_live_outage_does_not_silently_switch_to_cache_or_expose_diagnostics(db, monkeypatch):
+    from backend import people
+    monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
+    cc._update(people=[{"name": "Анна", "email": "anna@example.com"}],
+               directory_signature=cc.directory_signature(), synced_at=store.utc_now())
+    def unavailable(*args, **kwargs):
+        raise ldap_auth.LdapError("Private server diagnostics")
+    monkeypatch.setattr(ldap_auth, "search_people", unavailable)
+    result = people.suggest("anna")
+    assert result["search_mode"] == "live"
+    assert result["people"] == [{"name": "anna@example.com", "email": "anna@example.com", "source": "mom"}]
+    assert "AD временно недоступен" in result["error"] and "Private" not in result["error"]
+
+
+def test_speaker_search_mode_api_admin_only_and_requires_current_successful_sync(db, monkeypatch):
+    client = TestClient(main.app)
+    route = "/api/admin/context/search"
+    assert client.post(route, json={"mode": "cache"}).status_code == 401
+    store.put_session("user", "user", user_id="u", email="user@example.com", expires=time.time() + 3600)
+    client.cookies.set(auth.COOKIE_NAME, "user")
+    assert client.post(route, json={"mode": "live"}).status_code == 401
+    store.put_session("admin", "admin", username="admin", expires=time.time() + 3600)
+    client.cookies.set(auth.COOKIE_NAME, "admin")
+    assert client.post(route, json={"mode": "cache"}).status_code == 400
+    assert cc.snapshot()["search_mode"] == "live"
+    assert client.post(route, json={"mode": "other"}).status_code == 422
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda: [{"name": "Анна"}])
+    cc.sync_directory()
+    response = client.post(route, json={"mode": "cache"})
+    assert response.status_code == 200 and response.json()["search_cache_ready"]
+    assert response.json()["search_mode"] == "cache"
+    directory_scope.save_sync_policy([], ["example.com"])
+    assert not cc.snapshot()["search_cache_ready"]
+    assert client.post(route, json={"mode": "cache"}).status_code == 400
+    assert client.post(route, json={"mode": "live"}).status_code == 200
 
 
 @pytest.mark.parametrize("domains", [["*.ru"], ["user@company.ru"], ["https://company.ru"], ["x)(mail=*)"], ["a..ru"], ["-a.ru"]])

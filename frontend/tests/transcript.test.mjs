@@ -188,3 +188,18 @@ test('a superseded AD request cannot erase newer matches or leave the spinner ru
   assert.equal(view.queryByText('Ищем сотрудника в справочнике AD…'), null);
   assert.equal(view.queryByText(/Поиск недоступен/), null);
 });
+
+test('speaker results show the source actually used for each query after the admin switches modes', async () => {
+  let mode = 'live';
+  globalThis.fetch = async () => response({ldap:true,search_mode:mode,
+    people:[{name:'Иван Петров',email:'ivan@example.com',source:'ldap'}]});
+  const view = render(React.createElement(TranscriptView, {meeting:meeting(),onUpdated() {},directoryEnabled:true}));
+  const input = view.getByRole('combobox',{name:'Найти сотрудника в AD для Спикер 1'});
+  fireEvent.change(input,{target:{value:'Иван'}});
+  assert.ok(await view.findByText('Режим поиска: живой AD'));
+  mode = 'cache';
+  fireEvent.change(input,{target:{value:'Петр'}});
+  assert.equal(view.queryByText('Режим поиска: живой AD'),null);
+  assert.ok(view.getByText('Ищем сотрудника в справочнике AD…'));
+  assert.ok(await view.findByText('Режим поиска: локальный кэш AD'));
+});

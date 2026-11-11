@@ -64,6 +64,10 @@ class DirectoryPolicyIn(BaseModel):
     domains: list[str] = Field(max_length=32)
 
 
+class SpeakerSearchIn(BaseModel):
+    mode: Literal["live", "cache"]
+
+
 class PromptsIn(BaseModel):
     protocol_prompt: str = Field(min_length=1, max_length=30000)
     name_review_prompt: str = Field(min_length=1, max_length=30000)
@@ -403,6 +407,14 @@ def save_context_directory(payload: DirectoryPolicyIn, admin: dict = Depends(req
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     store.record_audit(admin["username"], "context.directory", detail=json.dumps(policy, ensure_ascii=False))
     return corporate_context.snapshot()
+
+
+@app.post("/api/admin/context/search")
+def save_speaker_search(payload: SpeakerSearchIn, admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return corporate_context.save_search_mode(payload.mode, admin["username"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/admin/context/import")
