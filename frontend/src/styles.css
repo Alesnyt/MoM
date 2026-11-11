@@ -744,6 +744,10 @@ h1 {
   color: var(--muted);
 }
 
+.key-box > p:only-child {
+  margin-bottom: 0;
+}
+
 .key-error {
   display: block;
   margin-top: 8px;

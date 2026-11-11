@@ -21,7 +21,7 @@ export function Composer({
   queue?: { active: number; waiting: number; limit: number };
   mailReady: boolean;
   maxUploadBytes?: number;
-  onOpenSettings: () => void;
+  onOpenSettings?: () => void;
   onUpload: (file: File | null, title: string, text?: string) => Promise<void>;
   nextExpired?: string;
 }) {
@@ -94,10 +94,12 @@ export function Composer({
       {sizeError && <div className="banner" role="alert">{sizeError}</div>}
       {blocked && mode === "audio" && (
         <div className="key-box">
-          <p>{blocked}</p>
-          <button className="primary" type="button" onClick={onOpenSettings}>
-            Открыть администрирование
-          </button>
+          <p role="status">{onOpenSettings ? blocked : "Обработка записей сейчас недоступна. Попробуйте позже."}</p>
+          {onOpenSettings && (
+            <button className="primary" type="button" onClick={onOpenSettings}>
+              Открыть администрирование
+            </button>
+          )}
         </div>
       )}
 

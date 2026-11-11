@@ -17,14 +17,56 @@ const row = (id,status='review') => ({id,title:`Встреча ${id}`,filename:'
   status,status_message:status==='review'?'Проверьте спикеров':'Старая обработка',duration_seconds:60,language:'ru',
   transcript:null,segments:null,speakers:null,result:null,error:null});
 const full = id => ({...row(id),source_type:'audio',transcript:'Готовый текст',speakers:[],segments:[]});
-function mockApi(handler) {
+function mockApi(handler, {openai = {configured:true,connected:true,message:'OK'}, adminAuthenticated = false} = {}) {
   globalThis.fetch = async (url,options={}) => {
-    if(url==='/api/health')return response({ok:true,ffmpeg:true,openai:{configured:true,connected:true,message:'OK'},smtp:{configured:false}});
-    if(url==='/api/auth/status')return response({configured:true,authenticated:false});
+    if(url==='/api/health')return response({ok:true,ffmpeg:true,openai,max_upload_bytes:1024 ** 3,smtp:{configured:false}});
+    if(url==='/api/auth/status')return response({configured:true,authenticated:adminAuthenticated});
     if(url==='/api/session')return response({authenticated:true,email:'test@example.com',archive_limit:5});
     return handler(url,options);
   };
 }
+
+test('a provider outage gives regular users a plain notice and no admin controls', async () => {
+  const openai = {configured:true,connected:false,auth_rejected:true,message:'Ключ не принят'};
+  mockApi(url => {
+    assert.equal(url, '/api/meetings');
+    return response([]);
+  }, {openai});
+  const view = render(React.createElement(App));
+  const notice = await view.findByRole('status');
+  assert.equal(notice.textContent, 'Обработка записей сейчас недоступна. Попробуйте позже.');
+  assert.equal(view.queryByRole('button', {name:/админ|ключ/i}), null);
+  assert.equal(view.queryByText(/Ключ не принят/i), null);
+
+  const file = new window.File(['demo'], 'demo.wav', {type:'audio/wav'});
+  fireEvent.change(view.container.querySelector('input[type=file]'), {target:{files:[file]}});
+  assert.equal(view.getByRole('button', {name:'Обработать'}).disabled, true);
+
+  fireEvent.click(view.getByRole('button', {name:'Готовый транскрипт'}));
+  fireEvent.change(view.getByRole('textbox', {name:'Текст транскрипта'}), {target:{value:'Анна: Обсудим план.'}});
+  assert.equal(view.getByRole('button', {name:'Импортировать транскрипт'}).disabled, false);
+});
+
+test('a signed-in administrator keeps the model outage diagnostics and shortcut', async () => {
+  const openai = {configured:true,connected:false,model_unavailable:true,message:'Модель недоступна'};
+  mockApi(url => {
+    if (url === '/api/meetings') return response([]);
+    if (url === '/api/settings') return response({ok:true,ffmpeg:true,openai});
+    assert.equal(url, '/api/admin/monitoring');
+    return new Response(null, {status:503});
+  }, {openai, adminAuthenticated:true});
+  const view = render(React.createElement(App));
+  try {
+    const shortcut = await view.findByRole('button', {name:'Открыть администрирование'});
+    assert.match(view.getByRole('status').textContent, /Выбранная модель недоступна/);
+    assert.ok(view.getByRole('button', {name:'Админка'}));
+    fireEvent.click(shortcut);
+    assert.equal(window.location.pathname, '/admin');
+    assert.ok(await view.findByRole('heading', {name:'Мониторинг'}));
+  } finally {
+    window.history.replaceState({}, '', '/');
+  }
+});
 
 test('appearance switches at local time boundaries and manual selection survives a reload', async () => {
   const at = (hour, minute = 0) => new Date(2026, 10, 11, hour, minute);
