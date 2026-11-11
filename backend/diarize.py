@@ -5,6 +5,7 @@ import logging
 import threading
 import wave
 from pathlib import Path
+from types import MethodType
 from typing import Any, Callable
 
 from . import config
@@ -188,7 +189,47 @@ def _load_pipeline(pipeline_cls: Any, model: str, token: str) -> Any:
         pipeline.to(torch.device("cpu"))
     except Exception:
         log.debug("Модель спикеров остаётся на устройстве по умолчанию", exc_info=True)
+    _reuse_cpu_speaker_frames(pipeline)
     return pipeline
+
+
+def _reuse_cpu_speaker_frames(pipeline: Any) -> None:
+    model = getattr(getattr(pipeline, "_embedding", None), "model_", None)
+    if model is None:
+        return
+    try:
+        from pyannote.audio.models.embedding.wespeaker import WeSpeakerResNet34
+    except ImportError:
+        return
+    if type(model) is WeSpeakerResNet34 and model.hparams.dither == 0.0:
+        model.forward = MethodType(_forward_with_shared_frames, model)
+
+
+def _forward_with_shared_frames(model: Any, waveforms: Any, weights: Any = None) -> Any:
+    import torch
+
+    original = type(model).forward
+    if (
+        weights is None
+        or weights.ndim != 2
+        or model.training
+        or model.fbank_only
+        or waveforms.device.type != "cpu"
+        or waveforms.shape[0] < 2
+    ):
+        return original(model, waveforms, weights=weights)
+
+    # Pyannote repeats each waveform for its local speaker masks. WeSpeaker
+    # applies the mask only after the shared frame encoder.
+    changed = waveforms[1:].ne(waveforms[:-1]).flatten(1).any(dim=1)
+    if changed.all():
+        return original(model, waveforms, weights=weights)
+
+    starts = torch.ones(waveforms.shape[0], dtype=torch.bool, device=waveforms.device)
+    starts[1:] = changed
+    rows = starts.long().cumsum(dim=0) - 1
+    frames = model.forward_frames(waveforms[starts])
+    return model.forward_embedding(frames.index_select(0, rows), weights=weights)
 
 
 def _run_pipeline(pipeline: Any, source: str | dict[str, Any], wav: Path) -> Any:

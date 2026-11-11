@@ -123,3 +123,45 @@ def test_cache_disabled_loads_pipeline_for_every_recording(fake_diarization, mon
     for _ in range(2):
         diarize.diarize_turns(path, prepared=path)
     assert len(state.loads) == 2
+
+
+def test_wespeaker_shares_only_identical_waveforms_and_keeps_each_mask(monkeypatch):
+    torch = pytest.importorskip("torch")
+
+    class WeSpeakerResNet34:
+        hparams = SimpleNamespace(dither=0.0)
+        training = False
+        fbank_only = False
+
+        def __init__(self):
+            self.batch_sizes = []
+
+        def forward_frames(self, waveforms):
+            self.batch_sizes.append(len(waveforms))
+            return waveforms[:, 0] * 2
+
+        def forward_embedding(self, frames, weights=None):
+            return (frames * weights).sum(dim=1)
+
+        def forward(self, waveforms, weights=None):
+            return self.forward_embedding(self.forward_frames(waveforms), weights)
+
+    module = ModuleType("pyannote.audio.models.embedding.wespeaker")
+    module.WeSpeakerResNet34 = WeSpeakerResNet34
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    model = WeSpeakerResNet34()
+    waveforms = torch.tensor([[[1., 2.]], [[1., 2.]], [[3., 4.]], [[3., 4.]], [[1., 2.]]])
+    weights = torch.tensor([[1., 0.], [0., 1.], [1., 0.], [0., 0.], [0., 1.]])
+    baseline = model.forward(waveforms, weights)
+    diarize._reuse_cpu_speaker_frames(SimpleNamespace(_embedding=SimpleNamespace(model_=model)))
+    assert torch.equal(model.forward(waveforms, weights), baseline)
+    assert model.batch_sizes == [5, 3]
+
+    distinct = waveforms[[0, 2]]
+    assert torch.equal(model.forward(distinct, weights[:2]), torch.tensor([2., 8.]))
+    assert model.batch_sizes[-1] == 2
+
+    model.training = True
+    assert torch.equal(model.forward(waveforms, weights), baseline)
+    assert model.batch_sizes[-1] == 5
