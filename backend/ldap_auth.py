@@ -7,6 +7,7 @@ import os
 import re
 import time
 import ssl
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 from . import config, directory_scope
@@ -40,6 +41,9 @@ def people_filter(query: str) -> str:
     mail = (config.get_ldap_email_attr() or "mail").strip() or "mail"
     if not re.fullmatch(r"(?:[A-Za-z][A-Za-z0-9-]*|[0-9]+(?:\.[0-9]+)+)", mail):
         raise LdapError("Некорректное имя атрибута email")
+    if not escaped:
+        # Enumeration is a presence query, not a substring search for an empty name.
+        return "(&(objectClass=person)(!(objectClass=computer)))"
     clauses = [
         f"(cn=*{escaped}*)",
         f"(displayName=*{escaped}*)",
@@ -94,10 +98,10 @@ def test_connection(username: str = "") -> dict:
     return {"ok": True, "entries": 1, "dn": dn, "mail": mail or None}
 
 
-def _service_connection():
+def _service_connection(*, sync: bool = False):
     from ldap3 import Connection
 
-    server = _server()
+    server = _server(connect_timeout=30) if sync else _server()
     user = config.get_ldap_bind_dn()
     password = config.get_ldap_bind_password()
     connection = Connection(
@@ -106,12 +110,19 @@ def _service_connection():
         password=password or None,
         auto_bind=False,
         auto_referrals=False,
-        receive_timeout=8,
+        receive_timeout=300 if sync else 8,
     )
-    _open(connection, starttls=config.get_ldap_starttls() and not _is_ldaps())
-    if not connection.bind():
-        log.warning("Служебная учётная запись каталога не принята: %s", connection.result)
-        raise LdapError("Каталог не принял служебную учётную запись")
+    try:
+        _open(connection, starttls=config.get_ldap_starttls() and not _is_ldaps())
+        if not connection.bind():
+            log.warning("Служебная учётная запись каталога не принята: %s", connection.result)
+            raise LdapError("Каталог не принял служебную учётную запись")
+    except Exception:
+        try:
+            connection.unbind()
+        except Exception:
+            pass
+        raise
     return connection, server
 
 
@@ -267,7 +278,7 @@ def search_people(query: str, limit: int = 20, *, for_speakers: bool = False) ->
             connection.unbind()
 
 
-def sync_people() -> list[dict[str, str]]:
+def sync_people(*, progress: Callable[[dict], None] | None = None) -> list[dict[str, str]]:
     """Enumerate the configured people scopes, committing only a complete result."""
     from ldap3 import SUBTREE, DEREF_NEVER
 
@@ -275,7 +286,7 @@ def sync_people() -> list[dict[str, str]]:
         raise LdapError("Сначала настройте подключение AD в разделе «Каталог»")
     bases = directory_scope.search_bases()
     if not bases:
-        return []
+        raise LdapError("Не выбраны области выгрузки AD. Проверьте и сохраните домены и OU в разделе «Каталог»")
     search_filter = people_filter("")
     mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
     policy = directory_scope.sync_policy()
@@ -285,21 +296,32 @@ def sync_people() -> list[dict[str, str]]:
     search_filter = _with_email_domains(search_filter, mail_attr, domains)
     connection = None
     people, seen = [], set()
-    deadline = time.monotonic() + 60
+    state = {"phase": "connecting", "received": 0, "pages": 0, "scopes_done": 0,
+             "scopes_total": len(bases), "current_base": None}
+    def report(**changes):
+        state.update(changes)
+        if progress:
+            progress(dict(state))
     try:
-        connection, _server = _service_connection()
+        report()
+        connection, _server = _service_connection(sync=True)
         for base in bases:
             base_key = directory_scope.dn_key(base)
             cookie, cookies = None, set()
             while True:
-                if time.monotonic() >= deadline:
-                    raise LdapError("Синхронизация AD превысила минуту. Сузьте области поиска")
+                report(phase="reading", current_base=base)
                 connection.search(search_base=base, search_filter=search_filter, search_scope=SUBTREE,
-                    dereference_aliases=DEREF_NEVER, attributes=attributes, time_limit=8,
+                    dereference_aliases=DEREF_NEVER, attributes=attributes, time_limit=0,
                     paged_size=500, paged_cookie=cookie, paged_criticality=True)
                 result = connection.result or {}
                 if result.get("description") != "success":
-                    raise LdapError("AD вернул неполный результат. Проверьте области поиска и права доступа")
+                    code = result.get("result", "?")
+                    description = str(result.get("description") or "unknown")[:100]
+                    raise LdapError(f"AD не завершил выгрузку: {description} (код {code}). "
+                                    "Проверьте права чтения, выбранную OU и ограничения на сервере AD")
+                if any(item.get("type") == "searchResRef" for item in (getattr(connection, "response", None) or [])):
+                    raise LdapError("AD перенаправил часть выгрузки на другой сервер. Выберите OU, доступные "
+                                    "на текущем сервере, или проверьте подключение; неполный кэш не сохранён")
                 for entry in connection.entries:
                     dn = directory_scope.dn_key(str(entry.entry_dn))
                     if len(dn) < len(base_key) or dn[-len(base_key):] != base_key:
@@ -318,12 +340,12 @@ def sync_people() -> list[dict[str, str]]:
                             attribute, length = directory_scope.OPTIONAL_FIELDS[field]
                             person[field] = " ".join(_entry_attr(entry, attribute).split())[:length]
                         people.append(person)
-                    if len(people) > 50000:
-                        raise LdapError("Выбрано больше 50 000 сотрудников. Сузьте области поиска")
                 control = (result.get("controls") or {}).get("1.2.840.113556.1.4.319")
                 if not control:
                     raise LdapError("AD не подтвердил постраничную выгрузку сотрудников")
-                cookie = control.get("value", {}).get("cookie")
+                cookie = bytes(control.get("value", {}).get("cookie") or b"")
+                report(received=len(people), pages=state["pages"] + 1,
+                       scopes_done=state["scopes_done"] + (0 if cookie else 1))
                 if not cookie:
                     break
                 if cookie in cookies:
@@ -333,7 +355,10 @@ def sync_people() -> list[dict[str, str]]:
     except LdapError:
         raise
     except Exception as exc:
-        raise LdapError("Не удалось синхронизировать сотрудников AD") from exc
+        log.exception("Выгрузка AD: этап=%s, страниц=%s, сотрудников=%s",
+                      state["phase"], state["pages"], state["received"])
+        raise LdapError(f"Выгрузка AD прервана ({type(exc).__name__}). "
+                        "Подробности — в журнале сервера MoM; предыдущий кэш сохранён") from exc
     finally:
         if connection is not None:
             try:
@@ -420,12 +445,12 @@ def _entry_attr(entry: object, name: str) -> str:
     return str(raw or "").strip()
 
 
-def _server():
+def _server(*, connect_timeout: int = 8):
     from ldap3 import Server, Tls
 
     host, port, use_ssl = _target()
     tls = Tls(validate=ssl.CERT_REQUIRED if config.get_ldap_tls_verify() else ssl.CERT_NONE)
-    return Server(host, port=port, use_ssl=use_ssl, tls=tls, connect_timeout=8, get_info=None)
+    return Server(host, port=port, use_ssl=use_ssl, tls=tls, connect_timeout=connect_timeout, get_info=None)
 
 
 def _open(connection, *, starttls: bool) -> None:

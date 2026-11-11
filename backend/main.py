@@ -55,7 +55,13 @@ class SettingsIn(BaseModel):
 
 class ContextSettingsIn(BaseModel):
     enabled: bool
-    sync_ad: bool
+    use_ad: bool | None = None
+    sync_ad: bool | None = None  # Backwards compatibility for already-open admin tabs.
+    sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+class DirectorySettingsIn(BaseModel):
+    sync_ad: bool | None = None
     sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
@@ -388,17 +394,30 @@ def get_context(q: str = Query(default="", max_length=200), _admin: dict = Depen
 
 @app.post("/api/admin/context/settings")
 def save_context(payload: ContextSettingsIn, admin: dict = Depends(require_admin)) -> dict:
-    return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"], sync_time=payload.sync_time)
+    return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"],
+                                           sync_time=payload.sync_time, use_ad=payload.use_ad)
 
 
-@app.post("/api/admin/context/sync")
+@app.get("/api/admin/directory/cache")
+def get_directory(_admin: dict = Depends(require_admin)) -> dict:
+    return corporate_context.snapshot()
+
+
+@app.post("/api/admin/directory/settings")
+def save_directory_settings(payload: DirectorySettingsIn, admin: dict = Depends(require_admin)) -> dict:
+    return corporate_context.save_settings(None, payload.sync_ad, admin["username"], sync_time=payload.sync_time)
+
+
+@app.post("/api/admin/directory/sync", status_code=202)
+@app.post("/api/admin/context/sync", status_code=202)
 def sync_context(admin: dict = Depends(require_admin)) -> dict:
     try:
-        return corporate_context.sync_directory(admin["username"])
+        return corporate_context.request_sync(admin["username"])
     except (ldap_auth.LdapError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/admin/directory/policy")
 @app.post("/api/admin/context/directory")
 def save_context_directory(payload: DirectoryPolicyIn, admin: dict = Depends(require_admin)) -> dict:
     try:
@@ -409,6 +428,7 @@ def save_context_directory(payload: DirectoryPolicyIn, admin: dict = Depends(req
     return corporate_context.snapshot()
 
 
+@app.post("/api/admin/directory/search")
 @app.post("/api/admin/context/search")
 def save_speaker_search(payload: SpeakerSearchIn, admin: dict = Depends(require_admin)) -> dict:
     try:
