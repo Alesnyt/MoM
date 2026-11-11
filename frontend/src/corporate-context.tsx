@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getCorporateContext, importCorporateDictionary, saveCorporateContext, syncCorporateDirectory, saveDirectoryPolicy,
+import { getCorporateContext, importCorporateDictionary, saveCorporateContext, syncCorporateDirectory, saveDirectoryPolicy, saveSpeakerSearchMode,
   type CorporateContext } from "./api";
 import { formatDate } from "./format";
 import { DirectoryScopePanel } from "./directory-scope";
@@ -75,7 +75,24 @@ export function CorporateContextPanel() {
         Использовать корпоративный контекст при обработке новых записей</label>
       <section className="key-box">
         <h2>Сотрудники из AD</h2>
-        <p>Локальный справочник для быстрого поиска спикеров и контекста распознавания. Во время ввода имени запросов в AD нет.</p>
+        <fieldset className="speaker-search-mode" disabled={busy}>
+          <legend>Источник поиска спикеров</legend>
+          <label className="context-toggle"><input type="radio" name="speaker-search-mode" checked={data.search_mode === "live"}
+            onChange={() => void update(() => saveSpeakerSearchMode("live"), "Источник поиска: живой AD")} />
+            Живой AD (по умолчанию)</label>
+          <p>При вводе ФИО запрос идёт в корпоративный AD. Результаты актуальны на момент поиска; скорость зависит от AD.</p>
+          <label className="context-toggle"><input type="radio" name="speaker-search-mode" checked={data.search_mode === "cache"}
+            disabled={!data.search_cache_ready} aria-describedby="speaker-cache-status"
+            onChange={() => void update(() => saveSpeakerSearchMode("cache"), "Источник поиска: локальный кэш AD")} />
+            Локальный кэш AD</label>
+          <p>Быстрый поиск по последней успешной синхронизации, без запросов в AD при вводе имени.</p>
+          <p id="speaker-cache-status">{data.search_cache_ready
+            ? `Кэш готов к использованию. Сотрудников: ${data.people_count}.`
+            : "Для включения кэша сначала успешно синхронизируйте AD с текущими настройками."}</p>
+          <p>Выбор действует для всех пользователей со следующего поискового запроса. Синхронизация не переключает режим автоматически.
+            При ошибке поиска источник остаётся выбранным; переключить его можно здесь.</p>
+        </fieldset>
+        <p>Локальный справочник также используется для контекста распознавания независимо от режима поиска.</p>
         <p>Сотрудников в контексте — {data.people_count}. {data.synced_at && `Обновлено ${formatDate(data.synced_at)}.`}</p>
         {!data.directory_current && <p className="health-warn">Справочник нужно обновить. Сохраните ограничения и нажмите «Синхронизировать AD».</p>}
         <form className="directory-policy" onSubmit={event => {

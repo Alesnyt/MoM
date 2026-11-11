@@ -644,6 +644,8 @@ button {
 .audit-table tr:last-child td { border-bottom: 0; }
 .directory-policy { margin: 20px 0; }
 .directory-policy fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+.speaker-search-mode { border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 16px 0; }
+.speaker-search-mode .context-toggle { font-weight: 600; }
 .directory-policy textarea { max-width: 720px; width: 100%; }
 
 .eyebrow {

@@ -5,6 +5,11 @@ from . import config, store
 OPTIONAL_FIELDS = {"job_title": ("title", 200), "department": ("department", 120), "surname": ("sn", 120)}
 
 
+def speaker_search_mode() -> str:
+    saved = store.get_app_setting("ldap_speaker_search") or {}
+    return "cache" if saved.get("mode") == "cache" else "live"
+
+
 def sync_policy() -> dict:
     return store.get_app_setting("ldap_sync_policy") or {"fields": list(OPTIONAL_FIELDS), "domains": []}
 

@@ -12,6 +12,7 @@ const {CorporateContextPanel} = loadSource('corporate-context.tsx');
 const originalFetch = globalThis.fetch;
 afterEach(() => {cleanup(); globalThis.fetch = originalFetch;});
 const initial = {enabled:true,sync_ad:true,revision:1,term_count:1,people_count:20,directory_current:true,
+  search_mode:'live',search_cache_ready:false,
   directory_policy:{fields:['job_title','department','surname'],domains:[]},sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
   ldap_configured:true,synced_at:null,imported_at:null,sync_error:null,syncing:false,matched_terms:1,
   terms:[{term:'TrueConf',aliases:['труконф'],description:'Видеоконференции',department:''}]};
@@ -103,4 +104,38 @@ test('directory field and domain choices survive refreshes and are applied befor
   await waitFor(() => assert.equal(syncs, 1));
   await view.findByText(/Сотрудников в контексте — 12/);
   assert.equal(jobTitle.checked, false);
+});
+
+test('live is default; successful sync unlocks cache but only an explicit choice changes the mode', async () => {
+  let current = {...initial}, writes = [];
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/admin/context/sync') current = {...current,search_cache_ready:true,synced_at:'2026-11-11T15:00:00Z'};
+    if (url === '/api/admin/context/search') {
+      const {mode} = JSON.parse(options.body); writes.push(mode); current = {...current,search_mode:mode};
+    }
+    return Response.json(current);
+  };
+  const view = render(React.createElement(CorporateContextPanel));
+  const live = await view.findByRole('radio', {name:'Живой AD (по умолчанию)'});
+  const cache = view.getByRole('radio', {name:'Локальный кэш AD'});
+  assert.equal(live.checked,true); assert.equal(cache.disabled,true);
+  fireEvent.click(view.getByRole('button',{name:'Синхронизировать AD'}));
+  await waitFor(() => assert.equal(cache.disabled,false));
+  assert.equal(live.checked,true); assert.deepEqual(writes,[]);
+  fireEvent.click(cache);
+  await waitFor(() => assert.equal(cache.checked,true));
+  await waitFor(() => assert.equal(live.disabled,false));
+  fireEvent.click(live);
+  await waitFor(() => assert.equal(live.checked,true));
+  assert.deepEqual(writes,['cache','live']);
+});
+
+test('failed mode change keeps the previous selection and shows the error', async () => {
+  globalThis.fetch = async (url) => url === '/api/admin/context/search'
+    ? Response.json({detail:'Сначала успешно синхронизируйте AD с текущими настройками'},{status:400})
+    : Response.json({...initial,search_cache_ready:true});
+  const view = render(React.createElement(CorporateContextPanel));
+  fireEvent.click(await view.findByRole('radio',{name:'Локальный кэш AD'}));
+  assert.match((await view.findByRole('alert')).textContent,/Сначала успешно синхронизируйте AD/);
+  assert.equal(view.getByRole('radio',{name:'Живой AD (по умолчанию)'}).checked,true);
 });
