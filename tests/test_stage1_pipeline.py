@@ -29,7 +29,6 @@ def recording_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setattr(config, "MIN_FREE_BYTES", 0)
     monkeypatch.setattr(config, "get_api_key", lambda: "unit-test-key")
     monkeypatch.setattr(pipeline, "make_client", lambda key: object())
-    monkeypatch.setattr(pipeline, "notify_meeting_done", lambda meeting: None)
     store.init_db()
     user = store.create_user("stability@example.com", auth.hash_password("secret-pass"))
     return user["id"]

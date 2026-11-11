@@ -105,7 +105,6 @@ def test_review_persistence_rename_reassign_and_protocol(client, monkeypatch):
     assert client.post(f"/api/meetings/{mid}/protocol").json()["status"] == "queued"
     monkeypatch.setattr(config, "get_api_key", lambda: "fake")
     monkeypatch.setattr(pipeline, "make_client", lambda key: object())
-    monkeypatch.setattr(pipeline, "notify_meeting_done", lambda meeting: None)
 
     async def analyze(client, transcript, *args):
         assert "Анна Петрова: Сделаю завтра" in transcript
@@ -246,10 +245,14 @@ def test_chunked_body_guard_does_not_trust_content_length(monkeypatch):
 def test_archive_limit_only_prunes_owners_completed_items(client):
     old = create(client)
     with store.connect() as conn:
-        # Same-second imports must never prune the newly returned meeting.
         conn.execute("UPDATE users SET archive_limit = 1 WHERE email = 'owner@example.com'")
     latest = create(client, "Анна: Новая встреча")
-    assert [m["id"] for m in client.get("/api/meetings").json()] == [latest["id"]]
+    assert [m["id"] for m in client.get("/api/meetings").json()] == [latest["id"], old["id"]]
+    store.update_meeting(old["id"], status="done")
+    middle = create(client)
+    store.update_meeting(middle["id"], status="error")
+    main.retention.trim_archive(old["user_id"])
+    assert [m["id"] for m in client.get("/api/meetings").json()] == [middle["id"], latest["id"]]
     assert store.get_meeting(old["id"]) is None
 
 

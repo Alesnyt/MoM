@@ -162,10 +162,10 @@ def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]])
     return {"speakers": speakers, "segments": assigned, "note": None}
 
 
-def render_transcript(document: dict[str, Any]) -> str:
+def render_transcript(document: dict[str, Any], *, numbered: bool = False) -> str:
     names = {item["id"]: item["name"] for item in document.get("speakers") or []}
     lines: list[str] = []
-    for segment in document.get("segments") or []:
+    for index, segment in enumerate(document.get("segments") or [], start=1):
         text = (segment.get("text") or "").strip()
         if not text:
             continue
@@ -173,6 +173,10 @@ def render_transcript(document: dict[str, Any]) -> str:
         minutes, seconds = divmod(int(start), 60)
         name = names.get(segment.get("speaker"), "Спикер")
         prefix = "" if segment.get("start") is None else f"[{minutes:02d}:{seconds:02d}] "
+        if numbered:
+            prefix = f"[реплика {index}] {prefix}"
+            text = " ".join(text.splitlines())
+            name = " ".join(name.splitlines())
         lines.append(f"{prefix}{name}: {text}")
     return "\n".join(lines)
 

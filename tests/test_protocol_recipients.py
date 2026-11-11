@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import time
 
 import pytest
@@ -72,6 +74,11 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
 
     monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", analyze)
     asyncio.run(pipeline.process_meeting(mid))
+    assert sent == []
+    assert store.get_meeting(mid)["mail_pending"]
+    store.init_db()
+    while mail.deliver_pending():
+        pass
     assert [item[0] for item in sent] == ["owner@example.com", "anna@example.com"]
     assert all("Готовый протокол" in item[2] for item in sent)
     assert store.get_meeting(mid)["status"] == "done"
@@ -142,6 +149,23 @@ def test_same_name_can_be_linked_to_catalog_email(delivery):
     assert response.json()["speakers"][0] == {"id": "S1", "name": "Анна", "email": "a@example.com"}
 
 
+def test_simultaneous_speaker_edits_keep_both_updates(delivery):
+    _, meeting, _ = delivery
+    actor = {"user_id": meeting["user_id"], "email": "owner@example.com"}
+    start = Barrier(2, timeout=5)
+
+    def rename(speaker, name):
+        start.wait()
+        return main.rename_meeting_speaker(meeting["id"], speaker, main.SpeakerNameIn(name=name), actor)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(rename, "S1", "Алёна")
+        second = executor.submit(rename, "S2", "Борис Петров")
+        assert first.result()["status"] == second.result()["status"] == "review"
+    speakers = store.get_meeting(meeting["id"])["speakers"]
+    assert {speaker["name"] for speaker in speakers} == {"Алёна", "Борис Петров", "Вера"}
+
+
 def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch):
     _, meeting, sent = delivery
     document = {"speakers": [
@@ -159,7 +183,9 @@ def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch
             raise RuntimeError("SMTP refused")
 
     monkeypatch.setattr(mail, "send_mail", send)
-    mail.notify_meeting_done(store.get_meeting(meeting["id"]))
+    mail.complete_protocol(store.get_meeting(meeting["id"]), result={"summary": "Текст"})
+    while mail.deliver_pending():
+        pass
     assert sent == ["owner@example.com", "b@example.com", "g@example.com"]
     assert "2 из 3" in store.get_meeting(meeting["id"])["status_message"]
     assert [row["action"] for row in store.list_audit()].count("email.fail") == 1
@@ -167,7 +193,50 @@ def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch
 
 def test_review_or_disabled_smtp_never_sends(delivery, monkeypatch):
     _, meeting, sent = delivery
-    mail.notify_meeting_done(meeting)
+    assert not mail.deliver_pending()
     monkeypatch.setattr(config, "smtp_configured", lambda: False)
-    mail.notify_meeting_done({**meeting, "status": "done"})
+    mail.complete_protocol(meeting, result={"summary": "Текст"})
+    assert not store.get_meeting(meeting["id"])["mail_pending"]
+    assert not mail.deliver_pending()
+    assert sent == []
+
+
+def test_delivery_retries_only_the_recipient_with_a_temporary_failure(delivery, monkeypatch):
+    client, meeting, _ = delivery
+    mid = meeting["id"]
+    response = client.post(f"/api/meetings/{mid}/protocol", json={"recipients": [
+        {"speaker_id": "S1", "email": "speaker@example.com"},
+    ]})
+    assert response.status_code == 200
+    mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
+    calls = []
+
+    def send(to, _subject, _body):
+        calls.append(to)
+        if to == "speaker@example.com" and calls.count(to) == 1:
+            raise mail.TemporaryMailError("try later")
+
+    monkeypatch.setattr(mail, "send_mail", send)
+    assert mail.deliver_pending()
+    assert mail.deliver_pending()
+    assert not mail.deliver_pending()
+    assert store.get_meeting(mid)["mail_pending"]
+    with store.connect() as conn:
+        conn.execute("UPDATE protocol_mail SET due_at = 0 WHERE state = 'pending'")
+    store.init_db()
+    assert mail.deliver_pending()
+    assert not mail.deliver_pending()
+    assert calls == ["owner@example.com", "speaker@example.com", "speaker@example.com"]
+    assert not store.get_meeting(mid)["mail_pending"]
+
+
+def test_interrupted_smtp_attempt_is_not_sent_again(delivery):
+    _, meeting, sent = delivery
+    mid = meeting["id"]
+    mail.complete_protocol(meeting, result={"summary": "Готово"})
+    with store.connect() as conn:
+        conn.execute("UPDATE protocol_mail SET state = 'sending', due_at = 0 WHERE meeting_id = ?", (mid,))
+    assert not mail.deliver_pending()
+    assert not store.get_meeting(mid)["mail_pending"]
+    assert "SMTP не подтвердил отправку" in store.get_meeting(mid)["status_message"]
     assert sent == []

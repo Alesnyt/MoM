@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,6 +76,22 @@ def test_snapshot_roundtrip_and_rejects_data_dir(db: Path) -> None:
     manifest = json.loads((folder / "manifest.json").read_text())
     assert "hf" in manifest["omits"]
     assert backup.main(["--check", str(folder)]) == 0
+
+    restored = backup.restore_snapshot(folder, config.ROOT / "restored")
+    assert backup.verify_snapshot(restored)["checksums"]
+    assert (restored / "uploads" / "meet1.webm").read_bytes() == b"audio"
+    with sqlite3.connect(restored / "mom.db") as conn:
+        assert conn.execute("SELECT title FROM meetings WHERE id = 'meet1'").fetchone() == ("Планёрка",)
+    with pytest.raises(backup.BackupError, match="пустой каталог"):
+        backup.restore_snapshot(folder, restored)
+
+    source = folder / "uploads" / "meet1.webm"
+    source.unlink()
+    assert "Нет оригинала встречи meet1" in backup.verify_snapshot(folder)["file_errors"]
+    source.write_bytes(b"different audio")
+    assert not backup.verify_snapshot(folder)["ok"]
+    source.write_bytes(b"audio")
+    assert backup.verify_snapshot(folder)["ok"]
 
     with pytest.raises(backup.BackupError, match="внутрь data"):
         backup.create_snapshot(config.DATA_DIR / "nested")

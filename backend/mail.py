@@ -5,15 +5,22 @@ import logging
 import smtplib
 import subprocess
 import sys
+import time
 from email.header import Header
 from email.message import EmailMessage
 from email.utils import formatdate
 from pathlib import Path
 
-from . import config
+from . import config, retention, store
 from .speakers import SpeakerError, clean_speaker_email
 
 log = logging.getLogger("mom.mail")
+RETRY_DELAYS = (30, 120, 600)
+CLAIM_SECONDS = 300
+
+
+class TemporaryMailError(RuntimeError):
+    pass
 
 
 def email_subject(meeting: dict) -> str:
@@ -147,32 +154,44 @@ def send_mail(to: str, subject: str, body: str) -> None:
     port = config.get_smtp_port()
     user = config.get_smtp_user()
     password = config.get_smtp_password()
-    if port == 465:
-        client: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=20)
-    else:
-        client = smtplib.SMTP(host, port, timeout=20)
-        if config.get_smtp_starttls():
-            client.ehlo()
-            client.starttls()
-            client.ehlo()
+    client: smtplib.SMTP | None = None
     try:
-        if user:
-            client.login(user, password)
-        client.send_message(message)
-    finally:
         try:
-            client.quit()
-        except Exception:
-            client.close()
+            if port == 465:
+                client = smtplib.SMTP_SSL(host, port, timeout=20)
+            else:
+                client = smtplib.SMTP(host, port, timeout=20)
+                if config.get_smtp_starttls():
+                    client.ehlo()
+                    client.starttls()
+                    client.ehlo()
+            if user:
+                client.login(user, password)
+        except (OSError, smtplib.SMTPServerDisconnected) as exc:
+            if isinstance(exc, smtplib.SMTPResponseException) and exc.smtp_code >= 500:
+                raise
+            raise TemporaryMailError("Не удалось открыть соединение SMTP") from exc
+        try:
+            client.send_message(message)
+        except smtplib.SMTPRecipientsRefused as exc:
+            if any(400 <= code < 500 for code, _ in exc.recipients.values()):
+                raise TemporaryMailError("SMTP временно отклонил получателя") from exc
+            raise
+        except smtplib.SMTPResponseException as exc:
+            if 400 <= exc.smtp_code < 500:
+                raise TemporaryMailError("SMTP временно отклонил письмо") from exc
+            raise
+    finally:
+        if client is not None:
+            try:
+                client.quit()
+            except Exception:
+                client.close()
 
 
-def notify_meeting_done(meeting: dict) -> None:
-    if meeting.get("status") != "done":
-        return
+def _protocol_messages(meeting: dict) -> list[tuple[str, str, str]]:
     if not config.smtp_configured():
-        return
-    from . import store
-
+        return []
     user_id = meeting.get("user_id")
     user = store.get_user(user_id) if user_id else None
     candidates = [(user or {}).get("email") or ""]
@@ -191,9 +210,6 @@ def notify_meeting_done(meeting: dict) -> None:
             continue
         if normalized not in recipients:
             recipients.append(normalized)
-    if not recipients:
-        log.warning("Некому отправить письмо по встрече %s", meeting.get("id"))
-        return
     extra = ""
     public = config.get_public_base_url()
     if public:
@@ -203,22 +219,111 @@ def notify_meeting_done(meeting: dict) -> None:
         + email_body(meeting)
         + extra
     )
-    failed = 0
-    for to in recipients:
-        try:
-            # Separate messages keep recipient addresses private from one another.
-            send_mail(to, email_subject(meeting), body)
-        except Exception as exc:  # noqa: BLE001 — mail failure must not fail the protocol
-            failed += 1
-            log.warning("Не отправилось письмо: %s", exc)
-            store.record_audit(to, "email.fail", meeting.get("id") or "", "SMTP не принял письмо")
-        else:
-            store.record_audit(to, "email.send", meeting.get("id") or "", "автоматически")
-    if failed:
-        message = (
-            f"Готово. Отправлено писем: {len(recipients) - failed} из {len(recipients)}. "
-            "Не все письма отправились — проверьте SMTP в админке"
+    subject = email_subject(meeting)
+    return [(to, subject, body) for to in recipients]
+
+
+def complete_protocol(meeting: dict, **fields) -> None:
+    meeting_id = meeting["id"]
+    user_id = meeting.get("user_id")
+    messages = _protocol_messages({**meeting, **fields})
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store.update_meeting(
+            meeting_id, connection=conn, **fields, status="done", error=None, progress=100,
+            status_message="Готово, письма в очереди" if messages else "Готово",
         )
-    else:
+        conn.execute("DELETE FROM protocol_mail WHERE meeting_id = ?", (meeting_id,))
+        conn.executemany(
+            "INSERT INTO protocol_mail (meeting_id, recipient, subject, body) VALUES (?, ?, ?, ?)",
+            [(meeting_id, *message) for message in messages],
+        )
+        removed = store.prune_user_meetings(user_id, connection=conn) if user_id else []
+    retention.remove_pruned(removed)
+
+
+def _delivery_status(conn, meeting_id: str) -> bool:
+    counts = dict(conn.execute(
+        "SELECT state, COUNT(*) FROM protocol_mail WHERE meeting_id = ? GROUP BY state", (meeting_id,),
+    ))
+    total = sum(counts.values())
+    sent = counts.get("sent", 0)
+    pending = bool(counts.get("pending") or counts.get("sending"))
+    if sent == total:
         message = "Готово, протокол отправлен на почту"
-    store.update_meeting(meeting["id"], status_message=message)
+    else:
+        message = f"Готово. Отправлено писем: {sent} из {total}."
+        if pending:
+            message += " Остальные письма в очереди."
+        if counts.get("failed"):
+            message += " Есть ошибки доставки."
+        if counts.get("unknown"):
+            message += " Для некоторых писем SMTP не подтвердил отправку."
+    conn.execute("UPDATE meetings SET status_message = ? WHERE id = ? AND status = 'done'", (message, meeting_id))
+    return pending
+
+
+def deliver_pending() -> bool:
+    if not config.smtp_configured():
+        return False
+    now = time.time()
+    removed = []
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        uncertain = conn.execute(
+            """UPDATE protocol_mail SET state = 'unknown', subject = '', body = ''
+               WHERE state = 'sending' AND due_at <= ? RETURNING meeting_id""",
+            (now,),
+        ).fetchall()
+        for meeting_id in {entry["meeting_id"] for entry in uncertain}:
+            if not _delivery_status(conn, meeting_id):
+                owner = conn.execute("SELECT user_id FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+                if owner and owner["user_id"]:
+                    removed.extend(store.prune_user_meetings(owner["user_id"], connection=conn))
+        row = conn.execute(
+            """SELECT mail.*, meetings.user_id FROM protocol_mail AS mail
+               JOIN meetings ON meetings.id = mail.meeting_id AND meetings.status = 'done'
+               WHERE mail.state = 'pending' AND mail.due_at <= ? ORDER BY mail.due_at, mail.id LIMIT 1""", (now,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE protocol_mail SET state = 'sending', attempts = attempts + 1, due_at = ? WHERE id = ?",
+                (now + CLAIM_SECONDS, row["id"]),
+            )
+    retention.remove_pruned(removed)
+    if not row:
+        return False
+    state = "sent"
+    due_at = 0
+    try:
+        send_mail(row["recipient"], row["subject"], row["body"])
+    except TemporaryMailError:
+        state = "failed"
+        if row["attempts"] < len(RETRY_DELAYS):
+            state = "pending"
+            due_at = time.time() + RETRY_DELAYS[row["attempts"]]
+    except (smtplib.SMTPResponseException, smtplib.SMTPRecipientsRefused):
+        state = "failed"
+    except (OSError, smtplib.SMTPServerDisconnected):
+        state = "unknown"
+    except Exception:
+        state = "failed"
+        log.exception("Не удалось отправить протокол встречи %s", row["meeting_id"])
+
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        keep_message = state == "pending"
+        result = conn.execute(
+            "UPDATE protocol_mail SET state = ?, due_at = ?, subject = ?, body = ? WHERE id = ? AND state = 'sending'",
+            (state, due_at, row["subject"] if keep_message else "", row["body"] if keep_message else "", row["id"]),
+        )
+        removed = []
+        if result.rowcount:
+            if not _delivery_status(conn, row["meeting_id"]) and row["user_id"]:
+                removed = store.prune_user_meetings(row["user_id"], connection=conn)
+    if result.rowcount:
+        detail = {"sent": "автоматически", "pending": "временный отказ, будет повтор",
+                  "failed": "SMTP не принял письмо", "unknown": "результат отправки неизвестен"}[state]
+        store.record_audit(row["recipient"], "email.send" if state == "sent" else "email.fail", row["meeting_id"], detail)
+    retention.remove_pruned(removed)
+    return True

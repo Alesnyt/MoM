@@ -40,6 +40,12 @@ export function MeetingPane({
   const [mailNote, setMailNote] = useState<string | null>(null);
   const wordContent = useRef<HTMLElement>(null);
   const [downloading, setDownloading] = useState(false);
+  const [focusSegment, setFocusSegment] = useState<number | undefined>();
+
+  function openSource(turn: number) {
+    setFocusSegment(turn - 1);
+    onTab("transcript");
+  }
 
   async function download(format: "docx" | "md") {
     setMailNote(null);
@@ -176,8 +182,10 @@ export function MeetingPane({
       )}
       {result && meeting.status === "done" && (
         <>
+          {meeting.status_message && meeting.status_message !== "Готово" &&
+            <p className="progress-hint" role="status">{meeting.status_message}</p>}
           {(meeting.speakers || []).some((speaker) => speaker.send_protocol) && <p className="progress-hint">
-            {meeting.status_message}. Дополнительные получатели: {(meeting.speakers || [])
+            Дополнительные получатели: {(meeting.speakers || [])
               .filter((speaker) => speaker.send_protocol && speaker.email)
               .map((speaker) => `${speaker.name} (${speaker.email})`).join(", ")}.
           </p>}
@@ -193,13 +201,13 @@ export function MeetingPane({
             <TabButton id="mom" tab={tab} onTab={onTab} label="Протокол" />
             <TabButton id="transcript" tab={tab} onTab={onTab} label="Транскрипт" />
           </nav>
-          {tab === "overview" && <Overview result={result} />}
-          {tab === "actions" && <Actions result={result} />}
+          {tab === "overview" && <Overview result={result} onSource={openSource} />}
+          {tab === "actions" && <Actions result={result} onSource={openSource} />}
           {tab === "mom" && <>
             <button className="ghost word-copy" type="button" onClick={() => void copyWord()}>Копировать для Word</button>
             <Minutes meeting={meeting} result={result} contentRef={wordContent} />
           </>}
-          {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
+          {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} focusSegment={focusSegment} />}
         </>
       )}
     </section>
@@ -380,37 +388,49 @@ function fallbackProgress(status: MeetingStatus): number {
   return 0;
 }
 
-function Overview({ result }: { result: MeetingResult }) {
+function Overview({ result, onSource }: { result: MeetingResult; onSource: (turn: number) => void }) {
   return (
     <div className="overview">
       {result.participants.length > 0 && (
         <p className="people">Участники: {result.participants.join(", ")}</p>
       )}
-      <SummarySections result={result} heading="h2" />
+      <SummarySections result={result} heading="h2" onSource={onSource} />
     </div>
   );
 }
 
-function SummarySections({ result, heading: Heading }: { result: MeetingResult; heading: "h2" | "h3" }) {
+function SourceButtons({ turns, onSource }: { turns?: number[]; onSource?: (turn: number) => void }) {
+  if (!onSource || !Array.isArray(turns) || !turns.length) return null;
+  return <span className="source-links">{turns.filter((turn) => Number.isInteger(turn) && turn > 0).slice(0, 3).map((turn) => (
+    <button key={turn} type="button" className="ghost" onClick={() => onSource(turn)}>Реплика {turn}</button>
+  ))}</span>;
+}
+
+function SummarySections({ result, heading: Heading, onSource }: {
+  result: MeetingResult; heading: "h2" | "h3"; onSource?: (turn: number) => void;
+}) {
   const paragraphs = result.summary.split(/\r?\n/).map((para) => para.trim()).filter(Boolean);
+  const sources = Array.isArray(result.decision_sources) ? result.decision_sources : [];
   return <>
     <section className="summary">
       <Heading>Саммари</Heading>
       {paragraphs.length ? paragraphs.map((para, index) => <p key={index}>{para}</p>) : <p>Саммари отсутствует.</p>}
     </section>
     {([
-      ["Принятые решения", result.decisions],
-      ["Контекст и открытые вопросы", result.key_points],
-    ] as const).map(([label, entries]) => entries.length > 0 && (
+      ["Принятые решения", result.decisions, true],
+      ["Контекст и открытые вопросы", result.key_points, false],
+    ] as const).map(([label, entries, isDecision]) => entries.length > 0 && (
       <section className="summary-points" key={label}>
         <Heading>{label}</Heading>
-        <ul>{entries.map((item, index) => <li key={index}>{item}</li>)}</ul>
+        <ul>{entries.map((item, index) => <li key={index}>{item}
+          {isDecision && <SourceButtons turns={sources.find((source) => source?.decision === item)?.turns} onSource={onSource} />}
+        </li>)}</ul>
       </section>
     ))}
   </>;
 }
 
-function Actions({ result }: { result: MeetingResult }) {
+function Actions({ result, onSource }: { result: MeetingResult; onSource: (turn: number) => void }) {
   if (result.action_items.length === 0) {
     return <p className="empty-note">В записи не нашлось явных поручений.</p>;
   }
@@ -424,6 +444,7 @@ function Actions({ result }: { result: MeetingResult }) {
             <div><dt>Срок</dt><dd>{item.due || "Не указан"}</dd></div>
             <div><dt>Приоритет</dt><dd className={`prio ${item.priority}`}>{priorityLabel(item.priority)}</dd></div>
           </dl>
+          <SourceButtons turns={item.source_turns} onSource={onSource} />
         </li>
       ))}
     </ol>

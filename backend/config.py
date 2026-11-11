@@ -50,6 +50,7 @@ PORT = _int_env("PORT", 8000)
 MAX_UPLOAD_BYTES = max(8 * 1024 * 1024, _int_env("MAX_UPLOAD_MB", 2048) * 1024 * 1024)
 MIN_FREE_BYTES = max(0, _int_env("MIN_FREE_MB", 2048)) * 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = max(5, _int_env("VERIFY_TIMEOUT_SECONDS", 25))
+PROTOCOL_CONTEXT_TOKENS = max(4096, _int_env("PROTOCOL_CONTEXT_TOKENS", 98_304))
 MAX_JOBS_LIMIT = 8
 MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, _int_env("MAX_JOBS", 1)))
 # Explicit proxy addresses only; never trust arbitrary forwarded headers.

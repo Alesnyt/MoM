@@ -32,12 +32,16 @@ test('admin opens on the live monitoring tab and polling stops when leaving', as
       ] },
       resources: { cpu_percent: 145, rss_bytes: 1024 ** 3, process_count: 2 },
       disk: { ok: true, free_bytes: 1024 ** 3, total_bytes: 10 * 1024 ** 3, recordings_bytes: 0, min_free_bytes: 0 },
+      performance: { stages: { protocol: { samples: 4, median_seconds: 2, p95_seconds: 7 } }, finished: 4, errors: 1 },
     });
   };
   const view = render(React.createElement(App));
   assert.ok(await view.findByRole('heading', { name: 'Мониторинг' }));
   assert.ok(await view.findByText('1 из 4'));
   assert.ok(view.getByText('145%'));
+  const performance = view.getByRole('table', { name: 'Скорость и ошибки' });
+  assert.ok(within(performance).getByText('7 с'));
+  assert.ok(view.getByText(/1 из 4 \(25%\)/));
   const jobs = view.getByRole('table', { name: 'Активные задачи' });
   assert.ok(within(jobs).getByText('Расшифровка'));
   assert.equal(within(jobs).getByRole('progressbar', { name: 'Прогресс задачи abcd0123' }).value, 67);

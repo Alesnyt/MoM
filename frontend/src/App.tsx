@@ -29,7 +29,7 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
   const previous = new Map(prev.map((item) => [item.id, item]));
   return rows.map((row) => {
     const old = previous.get(row.id);
-    if (!old) return row;
+    if (!old || old.status !== row.status) return row;
     if (row.result == null && old.result) {
       return {
         ...row,
@@ -58,9 +58,11 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
 export default function App() {
   const [meetings, setMeetingRows] = useState<Meeting[]>([]);
   const dataVersion = useRef(0);
-  // User edits invalidate reads that started before the edit was saved.
-  const setMeetings = useCallback((update: SetStateAction<Meeting[]>) => {
+  const meetingVersions = useRef(new Map<string, number>());
+  const setMeetings = useCallback((update: SetStateAction<Meeting[]>, meetingId?: string) => {
     dataVersion.current += 1;
+    if (meetingId) meetingVersions.current.set(meetingId, dataVersion.current);
+    else meetingVersions.current.clear();
     setMeetingRows(update);
   }, []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -141,7 +143,7 @@ export default function App() {
   }, [health?.theme]);
 
   useEffect(() => {
-    if (!composing && !selectedId && meetings.length > 0) {
+    if (!composing && !meetings.some((item) => item.id === selectedId) && meetings.length > 0) {
       setSelectedId(meetings[0].id);
     }
   }, [composing, meetings, selectedId]);
@@ -150,8 +152,12 @@ export default function App() {
   const userReady = Boolean(user?.authenticated);
   const showComposer = composing || meetings.length === 0;
   const liveQueue = queueFromMeetings(meetings, health?.queue?.limit || 1);
+  const archived = meetings.filter(({ status }) => status === "done" || status === "error");
+  const archiveLimit = user?.archive_limit || 5;
+  const nextExpired = archived.length >= archiveLimit ? archived.at(-1)?.title : undefined;
   const processingKey = meetings
-    .filter((item) => item.status !== "done" && item.status !== "error" && item.status !== "review")
+    .filter((item) => (item.status === "done" && item.mail_pending)
+      || (item.status !== "done" && item.status !== "error" && item.status !== "review"))
     .map((item) => item.id)
     .join(",");
 
@@ -176,15 +182,15 @@ export default function App() {
   useEffect(() => {
     if (!detailKey || !selectedId) return;
     const controller = new AbortController();
-    const version = dataVersion.current;
+    const version = meetingVersions.current.get(selectedId);
     setDetailFailure(null);
     void getMeeting(selectedId, controller.signal)
       .then((full) => {
-        if (controller.signal.aborted || version !== dataVersion.current) return;
+        if (controller.signal.aborted || version !== meetingVersions.current.get(selectedId)) return;
         setMeetingRows((rows) => rows.map((row) => (row.id === full.id ? full : row)));
       })
       .catch((err: unknown) => {
-        if (!controller.signal.aborted && version === dataVersion.current) {
+        if (!controller.signal.aborted && version === meetingVersions.current.get(selectedId)) {
           setDetailFailure({ key: detailKey,
             message: err instanceof Error ? err.message : "Не удалось загрузить транскрипт" });
         }
@@ -206,7 +212,7 @@ export default function App() {
       const created = text !== undefined
         ? await createTranscript(file, text, title)
         : await createMeeting(file!, title);
-      setMeetings((rows) => [created, ...rows.filter((row) => row.id !== created.id)].slice(0, user?.archive_limit || 5));
+      setMeetings((rows) => [created, ...rows.filter((row) => row.id !== created.id)], created.id);
       setSelectedId(created.id);
       setTab("overview");
       setComposing(false);
@@ -223,7 +229,7 @@ export default function App() {
     setError(null);
     try {
       const updated = await retryMeeting(id);
-      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)));
+      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
       setSelectedId(id);
       goApp();
       setComposing(false);
@@ -236,7 +242,7 @@ export default function App() {
     setError(null);
     try {
       const updated = await stopMeeting(id);
-      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)));
+      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось остановить обработку");
     }
@@ -247,7 +253,7 @@ export default function App() {
     setError(null);
     try {
       const updated = await restartMeeting(id);
-      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)));
+      setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось запустить обработку заново");
     }
@@ -326,7 +332,7 @@ export default function App() {
             <p className="rail-label">Войдите, чтобы видеть архив</p>
           )}
           <div className="rail-label">
-            Архив{userReady && user?.archive_limit ? ` · ${meetings.length}/${user.archive_limit}` : ""}
+            Архив{userReady && user?.archive_limit ? ` · ${archived.length}/${archiveLimit}` : ""}
           </div>
           <ul className="meeting-list">
             {meetings.map((item) => (
@@ -429,6 +435,7 @@ export default function App() {
                           configured: next.openai.configured,
                           connected: next.openai.connected,
                           auth_rejected: next.openai.auth_rejected,
+                          rate_limited: next.openai.rate_limited,
                           model_unavailable: next.openai.model_unavailable,
                           message: next.openai.message,
                           checked_at: next.openai.checked_at,
@@ -457,11 +464,13 @@ export default function App() {
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
               maxUploadBytes={health?.max_upload_bytes}
+              nextExpired={nextExpired}
               onOpenSettings={goAdmin}
               onUpload={onUpload}
             />
           ) : selected ? (
             <MeetingPane
+              key={selected.id}
               meeting={selected}
               tab={tab}
               mailEnabled={Boolean(health?.smtp?.configured)}
@@ -471,7 +480,7 @@ export default function App() {
               onRestart={() => void onRestart(selected.id)}
               onDelete={() => onDelete(selected.id)}
               onUpdated={(next) => {
-                setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)));
+                setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)), next.id);
               }}
             />
           ) : (
@@ -481,6 +490,7 @@ export default function App() {
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
               maxUploadBytes={health?.max_upload_bytes}
+              nextExpired={nextExpired}
               onOpenSettings={goAdmin}
               onUpload={onUpload}
             />

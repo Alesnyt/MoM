@@ -1403,6 +1403,23 @@ select.title-input {
   margin: 4px 0 0;
 }
 
+.source-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+  margin-inline-start: .45rem;
+}
+
+.source-links button {
+  padding: .15rem .45rem;
+  font-size: .8rem;
+}
+
+.turn--focused {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
 @media (max-width: 1100px) {
   .speaker-review-grid {
     grid-template-columns: minmax(0, 1fr);

@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import { getMonitoring } from "./api";
-import { formatBytes } from "./format";
+import { formatBytes, formatClock } from "./format";
 import { stepLabel } from "./meeting";
 import { startPolling } from "./poll";
 import type { MonitoringSnapshot } from "./types";
 
 const REFRESH_MS = 5000;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
+const stageLabels = {
+  queue_wait: "Ожидание в очереди", audio_prepare: "Подготовка аудио", asr: "Распознавание речи",
+  asr_cloud: "Облачное распознавание", diarization: "Разделение спикеров",
+  name_review: "Проверка имён", protocol: "Сборка протокола",
+};
 
 function Metric({ label, value, detail }: { label: string; value: string | number; detail: string }) {
   return (
@@ -51,7 +56,7 @@ export function MonitoringPanel() {
   );
 }
 
-function MonitoringStats({ snapshot: { queue, resources, disk } }: { snapshot: MonitoringSnapshot }) {
+function MonitoringStats({ snapshot: { queue, resources, disk, performance } }: { snapshot: MonitoringSnapshot }) {
   const cpuDetail = resources.rss_bytes === null ? "Показатель недоступен"
     : resources.cpu_percent === null ? "Измеряю нагрузку…" : "100% соответствует одному ядру";
   return (
@@ -60,10 +65,26 @@ function MonitoringStats({ snapshot: { queue, resources, disk } }: { snapshot: M
         <h2 id="monitor-queue">Обработка встреч</h2>
         <dl className="monitor-metrics">
           <Metric label="В работе" value={`${queue.active} из ${queue.limit}`} detail="Занято слотов обработки" />
-          <Metric label="В очереди" value={queue.waiting} detail="Ждут запуска" />
+          <Metric label="В очереди" value={queue.waiting} detail={queue.oldest_wait_seconds == null
+            ? "Ждут запуска" : `Самая долгая заявка · ${formatClock(queue.oldest_wait_seconds)}`} />
           <Metric label="На разметке" value={queue.review} detail="Ждут подтверждения спикеров" />
         </dl>
       </section>
+      {performance && <section aria-labelledby="monitor-performance">
+        <h2 id="monitor-performance">Скорость и ошибки</h2>
+        <p className="monitor-empty">Ошибки за последние 24 часа — {performance.errors} из {performance.finished}
+          {performance.finished ? ` (${number.format(100 * performance.errors / performance.finished)}%)` : ""}. После перезапуска статистика собирается заново.</p>
+        <table className="monitor-jobs" aria-labelledby="monitor-performance">
+          <thead><tr><th scope="col">Этап</th><th scope="col">Медиана</th><th scope="col">95% укладываются в</th><th scope="col">Замеров</th></tr></thead>
+          <tbody>{Object.entries(stageLabels).map(([name, label]) => {
+            const stage = performance.stages[name];
+            return <tr key={name}><th scope="row">{label}</th>
+              <td>{stage ? `${number.format(stage.median_seconds)} с` : "—"}</td>
+              <td>{stage ? `${number.format(stage.p95_seconds)} с` : "—"}</td>
+              <td>{stage?.samples ?? 0}</td></tr>;
+          })}</tbody>
+        </table>
+      </section>}
       <section aria-labelledby="monitor-resources">
         <h2 id="monitor-resources">Ресурсы</h2>
         <dl className="monitor-metrics">

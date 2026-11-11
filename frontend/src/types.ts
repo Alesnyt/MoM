@@ -25,6 +25,7 @@ export type ActionItem = {
   assignee: string | null;
   due: string | null;
   priority: "high" | "medium" | "low";
+  source_turns?: number[];
 };
 
 export type AgendaItem = {
@@ -41,6 +42,7 @@ export type MeetingResult = {
   summary: string;
   key_points: string[];
   decisions: string[];
+  decision_sources?: { decision: string; turns: number[] }[];
   action_items: ActionItem[];
   mom: {
     agenda: AgendaItem[];
@@ -91,6 +93,7 @@ export type Meeting = {
   error: string | null;
   progress?: number;
   queue_ahead?: number;
+  mail_pending?: boolean;
 };
 
 export type OpenAIStatus = {
@@ -98,6 +101,7 @@ export type OpenAIStatus = {
   connected: boolean;
   hint: string | null;
   auth_rejected?: boolean;
+  rate_limited?: boolean;
   model_unavailable?: boolean;
   denied_models?: string[];
   message: string;
@@ -119,10 +123,16 @@ export type MonitoringSnapshot = {
   sampled_at: string;
   queue: QueueStatus & {
     review: number;
+    oldest_wait_seconds?: number | null;
     jobs: { id: string; status: "extracting" | "transcribing" | "analyzing"; progress: number }[];
   };
   resources: { cpu_percent: number | null; rss_bytes: number | null; process_count: number | null };
   disk: Required<DiskStatus>;
+  performance?: {
+    stages: Record<string, { samples: number; median_seconds: number; p95_seconds: number }>;
+    finished: number;
+    errors: number;
+  };
 };
 
 export type SmtpStatus = {
