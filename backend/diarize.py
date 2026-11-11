@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
+import wave
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,6 +13,9 @@ from .speakers import assign_speakers, expand_coarse_segments, render_transcript
 from .performance import configure_torch_threads, stage_timer
 
 log = logging.getLogger("mom.diarize")
+_pipeline_lock = threading.Lock()
+_cached_pipeline: Any = None
+_cached_key: tuple[str, str] | None = None
 
 
 class DiarizeUnavailable(RuntimeError):
@@ -84,10 +89,10 @@ def _unavailable_reason() -> str | None:
 
 
 def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dict[str, Any]]:
+    global _cached_pipeline, _cached_key
     token = config.get_hf_token()
     if not token:
         raise DiarizeUnavailable("Нет HF_TOKEN — все реплики собраны в одного спикера")
-    configure_torch_threads()
     try:
         from pyannote.audio import Pipeline
     except ImportError as exc:
@@ -95,19 +100,68 @@ def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dic
             "Модель спикеров не установлена. Выполните: pip install -r requirements-diarize.txt"
         ) from exc
     wav = prepared or audio_path.with_name(f"{audio_path.stem}.diarize.wav")
-    pipeline = None
-    try:
-        if prepared is None:
-            extract_wav(audio_path, wav)
-        with stage_timer("diarization_model_load"):
-            pipeline = _load_pipeline(Pipeline, token)
-        output = _run_pipeline(pipeline, wav)
-        return _read_turns(output)
-    finally:
-        if prepared is None:
-            wav.unlink(missing_ok=True)
-        del pipeline
+    with _pipeline_lock:
+        configure_torch_threads()
+        cache = config.DIARIZE_CACHE_MODEL
+        key = (config.DIARIZE_MODEL, token)
+        if not cache or key != _cached_key:
+            _drop_cached_pipeline()
+        pipeline = _cached_pipeline
+        try:
+            if prepared is None:
+                extract_wav(audio_path, wav)
+            if pipeline is None:
+                with stage_timer("diarization_model_load"):
+                    pipeline = _load_pipeline(Pipeline, *key)
+                if cache:
+                    _cached_pipeline, _cached_key = pipeline, key
+            source = _audio_input(wav)
+            with stage_timer("diarization_inference"):
+                return _read_turns(_run_pipeline(pipeline, source, wav))
+        except Exception:
+            # A failed inference may have left state in the pipeline.
+            pipeline = None
+            _drop_cached_pipeline()
+            raise
+        finally:
+            if prepared is None:
+                wav.unlink(missing_ok=True)
+            if not cache:
+                pipeline = None
+                gc.collect()
+
+
+def unload() -> None:
+    with _pipeline_lock:
+        _drop_cached_pipeline()
+
+
+def _drop_cached_pipeline() -> None:
+    global _cached_pipeline, _cached_key
+    if _cached_pipeline is not None:
+        _cached_pipeline, _cached_key = None, None
         gc.collect()
+        log.info("Модель спикеров выгружена")
+
+
+def _audio_input(wav: Path) -> str | dict[str, Any]:
+    path = str(wav)
+    limit = config.DIARIZE_PRELOAD_MAX_BYTES
+    if not limit:
+        return path
+    try:
+        with wave.open(path, "rb") as reader:
+            # Audio() normalizes PCM to float32. Bound the tensor, not the on-disk file.
+            size = reader.getnframes() * reader.getnchannels() * 4
+        if size <= limit:
+            from pyannote.audio import Audio
+
+            with stage_timer("diarization_audio_load"):
+                waveform, rate = Audio()(path)
+            return {"waveform": waveform, "sample_rate": rate, "uri": wav.stem}
+    except (OSError, EOFError, wave.Error, ImportError, RuntimeError, ValueError, MemoryError):
+        log.debug("Не удалось прочитать WAV в память, использую файл", exc_info=True)
+    return path
 
 
 def _unload_asr() -> None:
@@ -121,8 +175,7 @@ def _unload_asr() -> None:
     gc.collect()
 
 
-def _load_pipeline(pipeline_cls: Any, token: str) -> Any:
-    model = config.DIARIZE_MODEL
+def _load_pipeline(pipeline_cls: Any, model: str, token: str) -> Any:
     try:
         pipeline = pipeline_cls.from_pretrained(model, token=token)
     except TypeError:
@@ -138,12 +191,21 @@ def _load_pipeline(pipeline_cls: Any, token: str) -> Any:
     return pipeline
 
 
-def _run_pipeline(pipeline: Any, wav: Path) -> Any:
+def _run_pipeline(pipeline: Any, source: str | dict[str, Any], wav: Path) -> Any:
     limit = int(config.DIARIZE_MAX_SPEAKERS)
+
+    def run(audio: str | dict[str, Any]) -> Any:
+        try:
+            return pipeline(audio, min_speakers=1, max_speakers=limit)
+        except TypeError:
+            return pipeline(audio)
+
     try:
-        return pipeline(str(wav), min_speakers=1, max_speakers=limit)
+        return run(source)
     except TypeError:
-        return pipeline(str(wav))
+        if isinstance(source, str):
+            raise
+        return run(str(wav))
 
 
 def _read_turns(output: Any) -> list[dict[str, Any]]:
