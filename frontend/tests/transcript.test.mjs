@@ -116,7 +116,8 @@ test('5000 turns use bounded pages; search and reassignment retain original segm
   fireEvent.change(view.getByRole('combobox', {name:'Кто говорит эту реплику'}), {target:{value:'S2'}});
   await waitFor(() => assert.deepEqual(assigned, {speaker_id:'S2', segment_indexes:[4500]}));
   await waitFor(() => assert.equal(view.getByRole('combobox', {name:'Кто говорит эту реплику'}).disabled, false));
-  assert.equal(view.getByRole('combobox', {name:'Кто говорит эту реплику'}).value, 'S2');
+  assert.equal(view.container.querySelector('.turn .speaker-name').textContent, 'Спикер 2');
+  assert.equal(view.getByRole('combobox', {name:'Кто говорит эту реплику'}).value, '');
   fireEvent.change(view.getByRole('searchbox'), {target:{value:'несуществующая фраза'}});
   assert.equal(view.getByRole('status').textContent, 'Реплик не найдено');
   fireEvent.change(view.getByRole('searchbox'), {target:{value:''}});

@@ -4,11 +4,12 @@ import type { Meeting, ProtocolRecipient, Speaker } from "./types";
 type Choice = { identity: string; selected: boolean; email: string };
 const identity = (speaker: Speaker) => JSON.stringify([speaker.name, speaker.email || ""]);
 
-export function ProtocolRecipients({ meeting, mailEnabled, disabled, busy, onSubmit }: {
+export function ProtocolRecipients({ meeting, mailEnabled, disabled, busy, submitLabel, onSubmit }: {
   meeting: Meeting;
   mailEnabled: boolean;
   disabled: boolean;
   busy: boolean;
+  submitLabel: string;
   onSubmit: (recipients: ProtocolRecipient[]) => Promise<void>;
 }) {
   const [choices, setChoices] = useState<Record<string, Choice>>({});
@@ -35,33 +36,33 @@ export function ProtocolRecipients({ meeting, mailEnabled, disabled, busy, onSub
         speaker_id: speaker.id, email: choice.email.trim(),
       })));
     }}>
-      <fieldset className="protocol-recipients" disabled={disabled || !mailEnabled}>
-        <legend>Кому ещё отправить протокол</legend>
-        <p className="progress-hint">{mailEnabled
-          ? "Вам письмо придёт автоматически. Отметьте дополнительных получателей: им протокол отправится после сборки. Выбор сохраняется при нажатии «Собрать протокол»."
-          : "Отправка писем пока не настроена. Администратор может включить её в настройках SMTP. Протокол можно собрать без рассылки."}</p>
-        <div className="recipient-list">
-          {rows.map(({ speaker, choice }) => (
-            <div className="recipient-row" key={speaker.id}>
-              <label className="recipient-select">
-                <input type="checkbox" checked={choice.selected && mailEnabled}
-                  onChange={(event) => change(speaker, choice, { selected: event.target.checked })} />
-                <span>{speaker.name}</span>
-              </label>
-              <input className="title-input" type="email" maxLength={254}
-                aria-label={`Email для ${speaker.name}`} placeholder="Email получателя"
-                value={choice.email} required={choice.selected && mailEnabled}
-                disabled={disabled || !mailEnabled || !choice.selected}
-                onChange={(event) => change(speaker, choice, { email: event.target.value })} />
-            </div>
-          ))}
-        </div>
-        {!speakers.length && <p className="progress-hint">Получателей можно выбрать после разметки спикеров.</p>}
-      </fieldset>
-      {invalidEmail && <p className="progress-hint" role="status">Укажите email каждого выбранного спикера.</p>}
       <button className="primary" type="submit" disabled={disabled || invalidEmail}>
-        {busy ? "Ставлю в очередь…" : "Собрать протокол"}
+        {busy ? "Ставлю в очередь…" : submitLabel}
       </button>
+      {mailEnabled && speakers.length > 0 && (
+        <details className="protocol-recipients">
+          <summary>Дополнительные получатели{selected.length ? ` · ${selected.length}` : ""}</summary>
+          <fieldset disabled={disabled} aria-label="Дополнительные получатели протокола">
+            <p>Вам письмо придёт автоматически. Здесь можно добавить других получателей.</p>
+            <div className="recipient-list">
+              {rows.map(({ speaker, choice }) => (
+                <div className="recipient-row" key={speaker.id}>
+                  <label className="recipient-select">
+                    <input type="checkbox" checked={choice.selected}
+                      onChange={(event) => change(speaker, choice, { selected: event.target.checked })} />
+                    <span>{speaker.name}</span>
+                  </label>
+                  <input className="title-input" type="email" maxLength={254}
+                    aria-label={`Email для ${speaker.name}`} placeholder="Email получателя"
+                    value={choice.email} required={choice.selected} disabled={!choice.selected}
+                    onChange={(event) => change(speaker, choice, { email: event.target.value })} />
+                </div>
+              ))}
+            </div>
+          </fieldset>
+        </details>
+      )}
+      {invalidEmail && <p className="progress-hint" role="status">Укажите email каждого выбранного спикера.</p>}
     </form>
   );
 }
