@@ -1424,30 +1424,33 @@ select.title-input {
   overflow-wrap: anywhere;
 }
 
-.speaker-card > strong {
+.speaker-card--selected {
+  background: var(--accent-dim);
+}
+
+.speaker-filter-button {
   display: block;
+  width: 100%;
   margin-bottom: 8px;
+  border: 0;
+  border-radius: 4px;
+  padding: 3px 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 700;
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+
+.speaker-card > .speaker-hint {
+  margin: 8px 0 0;
 }
 
 .speaker-card .speaker-edit {
   width: 100%;
   min-width: 0;
-}
-
-.speaker-example {
-  margin: 12px 0 0;
-  font-size: 14px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.speaker-example time {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.speaker-example p {
-  margin: 4px 0 0;
 }
 
 .source-links {
@@ -1594,6 +1597,17 @@ select.title-input {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+}
+
+.transcript-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-dim);
+  overflow-wrap: anywhere;
 }
 
 .transcript-pages {

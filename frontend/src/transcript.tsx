@@ -241,23 +241,19 @@ export function TranscriptView({
   const speakers = meeting.speakers || [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [speakerFilter, setSpeakerFilter] = useState<string | null>(null);
+  const [page, setPage] = useState<number | null>(null);
   const speakersHeadingId = useId();
   const transcriptHeadingId = useId();
+  const turnsId = useId();
 
   useEffect(() => {
     setError(null);
+    setSpeakerFilter(null);
+    setPage(null);
   }, [meeting.id]);
 
   const turns = useMemo(() => turnsOf(meeting.segments || []), [meeting.segments]);
-  const examples = useMemo(() => {
-    const grouped = new Map<string, Turn[]>();
-    for (const turn of turns) {
-      const samples = grouped.get(turn.speaker) || [];
-      if (samples.length < 2) samples.push(turn);
-      grouped.set(turn.speaker, samples);
-    }
-    return grouped;
-  }, [turns]);
 
   if (!segments.length) {
     return (
@@ -275,6 +271,11 @@ export function TranscriptView({
 
   const namedSpeakers = speakers.filter((item) => item.id !== "unknown" && item.name !== "Неясно");
   const hasUnclear = namedSpeakers.length !== speakers.length;
+
+  function filterBySpeaker(speakerId: string | null) {
+    setSpeakerFilter(speakerId === speakerFilter ? null : speakerId);
+    setPage(0);
+  }
 
   async function saveName(speakerId: string, name: string, email?: string, jobTitle?: string) {
     setBusy(true);
@@ -321,14 +322,18 @@ export function TranscriptView({
       </details>}
       <div className="speaker-review-grid">
         <section className="speaker-panel" aria-labelledby={speakersHeadingId}>
-          <h2 id={speakersHeadingId}>Спикеры и примеры фраз</h2>
+          <h2 id={speakersHeadingId}>Назначение спикеров</h2>
           {namedSpeakers.length > 0
-            ? <p className="speaker-hint">Введите имя или выберите его из каталога.</p>
+            ? <p className="speaker-hint">Нажмите на спикера, чтобы увидеть его реплики.</p>
             : <p className="speaker-hint">Назначьте спикеров в транскрипте.</p>}
           <div className="speaker-roster">
             {namedSpeakers.map((speaker) => (
-              <div className="speaker-card" key={speaker.id} style={{ borderLeftColor: speakerColor(speaker.id) }}>
-                <strong>{/^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : speaker.name}</strong>
+              <div className={`speaker-card${speakerFilter === speaker.id ? " speaker-card--selected" : ""}`}
+                key={speaker.id} style={{ borderLeftColor: speakerColor(speaker.id) }}>
+                <button className="speaker-filter-button" type="button" aria-pressed={speakerFilter === speaker.id}
+                  aria-controls={turnsId} onClick={() => filterBySpeaker(speaker.id)}>
+                  {/^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : speaker.name}
+                </button>
                 <SpeakerNameEditor
                   speaker={speaker}
                   taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
@@ -336,12 +341,6 @@ export function TranscriptView({
                   onRename={saveName}
                 />
                 {speaker.job_title && <p className="speaker-hint">{speaker.job_title}</p>}
-                {(examples.get(speaker.id) || []).map((turn) => (
-                  <blockquote className="speaker-example" key={turn.indexes[0]}>
-                    {turn.start !== null && <time>{formatClock(turn.start)}</time>}
-                    <p>{turn.text.length > 200 ? `${turn.text.slice(0, 200)}…` : turn.text}</p>
-                  </blockquote>
-                ))}
               </div>
             ))}
           </div>
@@ -350,7 +349,9 @@ export function TranscriptView({
           <h2 id={transcriptHeadingId}>Транскрипт по спикерам</h2>
           {hasUnclear && <p className="speaker-hint">Уточняйте спикера у каждой реплики с пометкой «Неясно».</p>}
           <TranscriptTurns key={meeting.id} turns={turns} segments={segments} speakers={speakers}
-            disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} focusSegment={focusSegment} />
+            speakerFilter={speakerFilter} onClearFilter={() => filterBySpeaker(null)} page={page} onPageChange={setPage}
+            disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} turnsId={turnsId}
+            focusSegment={focusSegment} />
         </section>
       </div>
     </div>
@@ -359,32 +360,41 @@ export function TranscriptView({
 
 const TURNS_PER_PAGE = 50;
 
-function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingId, focusSegment }: {
+function TranscriptTurns({
+  turns, segments, speakers, speakerFilter, onClearFilter, page, onPageChange,
+  disabled, onMove, headingId, turnsId, focusSegment,
+}: {
   turns: Turn[];
   segments: TranscriptSegment[];
   speakers: Speaker[];
+  speakerFilter: string | null;
+  onClearFilter: () => void;
+  page: number | null;
+  onPageChange: (page: number) => void;
   disabled: boolean;
   onMove: (indexes: number[], speakerId: string) => Promise<void>;
   headingId: string;
+  turnsId: string;
   focusSegment?: number;
 }) {
   const [query, setQuery] = useState("");
-  const [page, setPage] = useState(() => focusSegment === undefined ? 0
-    : Math.max(0, Math.floor(turns.findIndex((turn) => turn.indexes.includes(focusSegment)) / TURNS_PER_PAGE)));
   const listRef = useRef<HTMLDivElement>(null);
   const focusedTurn = useRef<HTMLElement>(null);
   const names = useMemo(() => new Map(speakers.map((item) => [item.id, item.name])), [speakers]);
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    return needle ? turns.filter((turn) =>
-      `${names.get(turn.speaker) || turn.speaker} ${turn.text}`.toLocaleLowerCase().includes(needle)) : turns;
-  }, [turns, names, query]);
+    if (!speakerFilter && !needle) return turns;
+    return turns.filter((turn) => (speakerFilter === null || turn.speaker === speakerFilter) && (!needle ||
+      `${names.get(turn.speaker) || turn.speaker} ${turn.text}`.toLocaleLowerCase().includes(needle)));
+  }, [turns, names, query, speakerFilter]);
+  const requestedPage = page ?? (focusSegment === undefined ? 0
+    : Math.max(0, Math.floor(filtered.findIndex((turn) => turn.indexes.includes(focusSegment)) / TURNS_PER_PAGE)));
   const lastPage = Math.max(0, Math.ceil(filtered.length / TURNS_PER_PAGE) - 1);
-  const currentPage = Math.min(page, lastPage);
+  const currentPage = Math.min(requestedPage, lastPage);
   const start = currentPage * TURNS_PER_PAGE;
   const visibleTurns = filtered.slice(start, start + TURNS_PER_PAGE);
 
-  useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0; }, [currentPage, query]);
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0; }, [currentPage, query, speakerFilter]);
   useEffect(() => {
     focusedTurn.current?.focus({ preventScroll: true });
     focusedTurn.current?.scrollIntoView?.({ block: "nearest" });
@@ -392,22 +402,29 @@ function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingI
 
   return <>
     <div className="transcript-controls">
-      <label>Поиск по всем репликам
+      {speakerFilter !== null && <div className="transcript-filter">
+        <strong>{names.get(speakerFilter) || speakerFilter}</strong>
+        <button type="button" className="ghost" onClick={() => {
+          listRef.current?.focus({ preventScroll: true });
+          onClearFilter();
+        }}>Все спикеры</button>
+      </div>}
+      <label>Поиск по репликам
         <input type="search" className="title-input" value={query}
           placeholder="Фраза или имя спикера"
-          onChange={(event) => { setQuery(event.target.value); setPage(0); }} />
+          onChange={(event) => { setQuery(event.target.value); onPageChange(0); }} />
       </label>
       <nav className="transcript-pages" aria-label="Страницы транскрипта">
         <button type="button" className="ghost" disabled={currentPage === 0}
-          onClick={() => setPage(currentPage - 1)}>Предыдущие реплики</button>
+          onClick={() => onPageChange(currentPage - 1)}>Предыдущие реплики</button>
         <span role="status">{filtered.length
           ? `Реплики ${start + 1}–${start + visibleTurns.length} из ${filtered.length}`
           : "Реплик не найдено"}</span>
         <button type="button" className="ghost" disabled={currentPage === lastPage}
-          onClick={() => setPage(currentPage + 1)}>Следующие реплики</button>
+          onClick={() => onPageChange(currentPage + 1)}>Следующие реплики</button>
       </nav>
     </div>
-    <div ref={listRef} className="turns" role="region" aria-labelledby={headingId} tabIndex={0}>
+    <div ref={listRef} id={turnsId} className="turns" role="region" aria-labelledby={headingId} tabIndex={0}>
       {visibleTurns.map((turn) => {
         const name = names.get(turn.speaker) || turn.speaker;
         const focused = focusSegment !== undefined && turn.indexes.includes(focusSegment);
