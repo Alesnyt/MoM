@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import errno
 import logging
 import sqlite3
@@ -56,6 +57,11 @@ class ContextSettingsIn(BaseModel):
     enabled: bool
     sync_ad: bool
     sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+class DirectoryPolicyIn(BaseModel):
+    fields: list[str] = Field(max_length=3)
+    domains: list[str] = Field(max_length=32)
 
 
 class PromptsIn(BaseModel):
@@ -387,6 +393,16 @@ def sync_context(admin: dict = Depends(require_admin)) -> dict:
         return corporate_context.sync_directory(admin["username"])
     except (ldap_auth.LdapError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/context/directory")
+def save_context_directory(payload: DirectoryPolicyIn, admin: dict = Depends(require_admin)) -> dict:
+    try:
+        policy = directory_scope.save_sync_policy(payload.fields, payload.domains)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.record_audit(admin["username"], "context.directory", detail=json.dumps(policy, ensure_ascii=False))
+    return corporate_context.snapshot()
 
 
 @app.post("/api/admin/context/import")

@@ -55,3 +55,9 @@ Whisper reads the original float WAV files. GigaAM receives mono 16 kHz PCM16 co
 Tests cover atomic CSV/XLSX replacement, invalid files, ambiguous aliases, disabled context, employee selection, LDAP pagination and partial failure, directory scope changes, cross-process sync ownership, authenticated admin endpoints, context propagation from recognition to protocol, and bounded LLM input. The admin interface and substring search were also checked in a local browser. Actual production AD and protocol quality on the deployed LLM were not benchmarked locally.
 
 The first real Whisper run exposed an existing dependency incompatibility: PyAV 19 removed `metadata_errors`, still passed by faster-whisper 1.2.1. `av>=11,<19` now prevents that runtime failure; model/decoder settings remain unchanged.
+
+## Локальный поиск спикеров в AD-кэше
+
+`python benchmarks/directory_lookup.py` создаёт изолированную временную SQLite-базу с 50 000 вымышленными сотрудниками, вызывает реальный поиск подсказок и запрещает сетевые LDAP-запросы. Проверяются широкие и частичные запросы по имени/email и отсутствие совпадений.
+
+Локальный CPU-прогон на Mac 11.11.2026 (100 запросов): первое обращение с построением индекса — 162,58 мс, медиана последующих — 25,00 мс, p95 — 73,81 мс; LDAP-запросов — 0. Это время серверного поиска, без задержки ввода 250 мс и сети браузера. Корпоративный AD в замере не участвовал.

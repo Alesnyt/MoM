@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
-import { getCorporateContext, importCorporateDictionary, saveCorporateContext, syncCorporateDirectory,
+import { getCorporateContext, importCorporateDictionary, saveCorporateContext, syncCorporateDirectory, saveDirectoryPolicy,
   type CorporateContext } from "./api";
 import { formatDate } from "./format";
+import { DirectoryScopePanel } from "./directory-scope";
+
+const AD_FIELDS = [{key: "job_title", label: "Должность (title)"},
+  {key: "department", label: "Подразделение (department)"}, {key: "surname", label: "Фамилия для распознавания (sn)"}];
 
 export function CorporateContextPanel() {
   const [data, setData] = useState<CorporateContext | null>(null);
@@ -12,6 +16,15 @@ export function CorporateContextPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [message, setMessage] = useState("");
   const [syncTime, setSyncTime] = useState("03:00");
+  const [fields, setFields] = useState(AD_FIELDS.map(field => field.key));
+  const [domains, setDomains] = useState("");
+  const [showScopes, setShowScopes] = useState(false);
+  const savedPolicy = JSON.stringify(data?.directory_policy);
+  useEffect(() => {
+    if (!savedPolicy) return;
+    const policy = JSON.parse(savedPolicy);
+    setFields(policy.fields); setDomains(policy.domains.join("\n"));
+  }, [savedPolicy]);
   useEffect(() => { if (data?.sync_time) setSyncTime(data.sync_time); }, [data?.sync_time]);
 
   useEffect(() => {
@@ -62,9 +75,35 @@ export function CorporateContextPanel() {
         Использовать корпоративный контекст при обработке новых записей</label>
       <section className="key-box">
         <h2>Сотрудники из AD</h2>
-        <p>Имена, должности и подразделения из областей, выбранных в разделе «Каталог».</p>
+        <p>Локальный справочник для быстрого поиска спикеров и контекста распознавания. Во время ввода имени запросов в AD нет.</p>
         <p>Сотрудников в контексте — {data.people_count}. {data.synced_at && `Обновлено ${formatDate(data.synced_at)}.`}</p>
-        {!data.directory_current && data.synced_at && <p>Области AD изменились. Выполните синхронизацию для нового состава сотрудников.</p>}
+        {!data.directory_current && <p className="health-warn">Справочник нужно обновить. Сохраните ограничения и нажмите «Синхронизировать AD».</p>}
+        <form className="directory-policy" onSubmit={event => {
+          event.preventDefault();
+          void update(() => saveDirectoryPolicy({fields, domains: domains.split(/[\s,;]+/).filter(Boolean)}),
+            "Правила сохранены. Нажмите «Синхронизировать AD», чтобы обновить справочник.");
+        }}>
+          <fieldset disabled={busy || data.syncing}>
+            <legend>Какие поля загружать</legend>
+            <p>ФИО (displayName / cn) и email обязательны. Дополнительные поля можно отключить; остальные атрибуты AD не загружаются.</p>
+            {AD_FIELDS.map(field => <label className="context-toggle" key={field.key}>
+              <input type="checkbox" checked={fields.includes(field.key)} onChange={event => setFields(current =>
+                event.target.checked ? [...current, field.key] : current.filter(key => key !== field.key))} />{field.label}
+            </label>)}
+            <label className="field-label">Разрешённые почтовые домены
+              <textarea className="title-input" rows={2} value={domains} placeholder="company.ru, company.com"
+                onChange={event => setDomains(event.target.value)} aria-describedby="ad-domain-hint" />
+            </label>
+            <p id="ad-domain-hint">Пусто — любой почтовый домен. Перечислите через запятую или с новой строки.
+              Например, company.ru включает только адреса @company.ru, без поддоменов. Сотрудник должен также входить в выбранную OU.</p>
+            <button className="ghost" type="submit">Сохранить поля и домены</button>
+          </fieldset>
+        </form>
+        <button className="ghost" type="button" aria-expanded={showScopes} onClick={() => setShowScopes(value => !value)}>
+          {showScopes ? "Скрыть выбор OU" : "Выбрать домены AD и OU"}</button>
+        {showScopes && <DirectoryScopePanel onSaved={() => {
+          void update(() => getCorporateContext(query), "Области сохранены. Нажмите «Синхронизировать AD».");
+        }} />}
         {data.sync_error && <p className="health-warn">{data.sync_error}</p>}
         <label className="context-toggle"><input type="checkbox" checked={data.sync_ad} disabled={busy}
           onChange={event => void update(() => saveCorporateContext(data.enabled, event.target.checked), "Настройки сохранены")} />

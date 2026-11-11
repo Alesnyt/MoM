@@ -12,7 +12,7 @@ const {CorporateContextPanel} = loadSource('corporate-context.tsx');
 const originalFetch = globalThis.fetch;
 afterEach(() => {cleanup(); globalThis.fetch = originalFetch;});
 const initial = {enabled:true,sync_ad:true,revision:1,term_count:1,people_count:20,directory_current:true,
-  sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
+  directory_policy:{fields:['job_title','department','surname'],domains:[]},sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
   ldap_configured:true,synced_at:null,imported_at:null,sync_error:null,syncing:false,matched_terms:1,
   terms:[{term:'TrueConf',aliases:['труконф'],description:'Видеоконференции',department:''}]};
 
@@ -76,4 +76,31 @@ test('admin can disable context and trigger directory synchronization', async ()
   fireEvent.click(view.getByRole('button', {name:'Синхронизировать AD'}));
   await waitFor(() => assert.ok(synced));
   assert.ok(await view.findByText(/Сотрудников в контексте — 25/));
+});
+
+test('directory field and domain choices survive refreshes and are applied before a sync', async () => {
+  let current = {...initial}, saved, syncs = 0;
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/admin/context/directory') {
+      saved = JSON.parse(options.body);
+      current = {...current, directory_policy:saved, directory_current:false,people_count:0};
+    } else if (url === '/api/admin/context/sync') {
+      syncs++; assert.deepEqual(saved.fields, ['department','surname']);
+      current = {...current,directory_current:true,people_count:12};
+    }
+    return Response.json(current);
+  };
+  const view = render(React.createElement(CorporateContextPanel));
+  const jobTitle = await view.findByRole('checkbox', {name:'Должность (title)'});
+  assert.equal(jobTitle.checked, true);
+  fireEvent.click(jobTitle);
+  fireEvent.change(view.getByLabelText('Разрешённые почтовые домены'), {target:{value:'example.com; other.ru\ncompany.ru'}});
+  fireEvent.submit(view.getByRole('button', {name:'Сохранить поля и домены'}).closest('form'));
+  await waitFor(() => assert.deepEqual(saved.domains, ['example.com','other.ru','company.ru']));
+  assert.ok(await view.findByText(/Справочник нужно обновить/));
+  await waitFor(() => assert.equal(view.getByRole('button', {name:'Синхронизировать AD'}).disabled, false));
+  fireEvent.click(view.getByRole('button', {name:'Синхронизировать AD'}));
+  await waitFor(() => assert.equal(syncs, 1));
+  await view.findByText(/Сотрудников в контексте — 12/);
+  assert.equal(jobTitle.checked, false);
 });
