@@ -36,11 +36,8 @@ export function MeetingPane({
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
   const result = isProtocolResult(meeting.result) ? meeting.result : null;
+  const wide = meeting.status === "review" || (meeting.status === "done" && (tab === "transcript" || !result));
   const [mailNote, setMailNote] = useState<string | null>(null);
-  const [marking, setMarking] = useState(false);
-  const [protocolBusy, setProtocolBusy] = useState(false);
-  const [speakerBusy, setSpeakerBusy] = useState(false);
-  const [protocolError, setProtocolError] = useState<string | null>(null);
   const wordContent = useRef<HTMLElement>(null);
   const [downloading, setDownloading] = useState(false);
 
@@ -96,25 +93,8 @@ export function MeetingPane({
     }
   }
 
-  async function buildProtocol(recipients: ProtocolRecipient[]) {
-    setProtocolError(null);
-    setProtocolBusy(true);
-    try {
-      onUpdated(await startProtocol(meeting.id, recipients));
-    } catch (err) {
-      setProtocolError(err instanceof Error ? err.message : "Не удалось собрать протокол");
-    } finally {
-      setProtocolBusy(false);
-    }
-  }
-
-  const automaticNames = (meeting.speakers || []).some((speaker) => {
-    const name = speaker.name.trim();
-    return name === "Неясно" || name.startsWith("Спикер ");
-  });
-
   return (
-    <section className="pane">
+    <section className={wide ? "pane pane--transcript" : "pane"}>
       <header className="pane-head">
         <div>
           <p className="eyebrow">
@@ -177,28 +157,7 @@ export function MeetingPane({
         <ProcessCard meeting={meeting} mailEnabled={mailEnabled} onStop={onStop} onRestart={onRestart} />
       )}
       {meeting.status === "review" && (
-        <div className="review-choice">
-          <strong>Расшифровка готова</strong>
-          <p>
-            {marking
-              ? "Поправьте имена и чужие реплики, затем соберите протокол."
-              : "Можно разметить спикеров или сразу собрать протокол по текущим именам."}
-            {automaticNames ? " Сейчас в записи есть автоматические имена." : ""}
-          </p>
-          {protocolError && <div className="banner" role="alert">{protocolError}</div>}
-          <div className="composer-row">
-            {!marking && meeting.source_type !== "text" && (
-              <button className="primary" type="button" disabled={protocolBusy} onClick={() => setMarking(true)}>
-                Разметить спикеров
-              </button>
-            )}
-          </div>
-          {(marking || meeting.source_type === "text") && <TranscriptView meeting={meeting} onUpdated={onUpdated}
-            disabled={protocolBusy} onBusyChange={setSpeakerBusy} />}
-          <p className="progress-hint">Если проверка имён включена администратором, перед протоколом LLM сопоставит упоминания с именами спикеров. Неоднозначные имена останутся без изменений.</p>
-          <ProtocolRecipients key={meeting.id} meeting={meeting} mailEnabled={mailEnabled}
-            disabled={protocolBusy || speakerBusy} busy={protocolBusy} onSubmit={buildProtocol} />
-        </div>
+        <SpeakerReview key={meeting.id} meeting={meeting} mailEnabled={mailEnabled} onUpdated={onUpdated} />
       )}
       {meeting.status === "error" && (
         <div className="error-card">
@@ -222,7 +181,7 @@ export function MeetingPane({
               .filter((speaker) => speaker.send_protocol && speaker.email)
               .map((speaker) => `${speaker.name} (${speaker.email})`).join(", ")}.
           </p>}
-          {meeting.name_review && <p className="progress-hint">{meeting.name_review.message} Подробности — во вкладке «Транскрипт».</p>}
+          {meeting.name_review && (tab !== "transcript" || !meeting.segments?.length) && <p className="progress-hint">{meeting.name_review.message} Подробности — во вкладке «Транскрипт».</p>}
           <nav className="tabs">
             <TabButton id="overview" tab={tab} onTab={onTab} label="Саммари" />
             <TabButton
@@ -243,6 +202,47 @@ export function MeetingPane({
           {tab === "transcript" && <TranscriptView meeting={meeting} onUpdated={onUpdated} />}
         </>
       )}
+    </section>
+  );
+}
+
+function SpeakerReview({ meeting, mailEnabled, onUpdated }: {
+  meeting: Meeting;
+  mailEnabled: boolean;
+  onUpdated: (meeting: Meeting) => void;
+}) {
+  const [edited, setEdited] = useState(false);
+  const [protocolBusy, setProtocolBusy] = useState(false);
+  const [speakerBusy, setSpeakerBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function buildProtocol(recipients: ProtocolRecipient[]) {
+    setError(null);
+    setProtocolBusy(true);
+    try {
+      onUpdated(await startProtocol(meeting.id, recipients));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось собрать протокол");
+    } finally {
+      setProtocolBusy(false);
+    }
+  }
+
+  return (
+    <section className="review-stage" aria-label="Проверка спикеров">
+      <div className="review-intro">
+        <h2>Расшифровка готова</h2>
+        <p>При необходимости уточните имена и распределение реплик.</p>
+        <ProtocolRecipients meeting={meeting} mailEnabled={mailEnabled}
+          disabled={protocolBusy || speakerBusy || (mailEnabled && meeting.speakers == null)} busy={protocolBusy}
+          submitLabel={edited ? "Собрать протокол" : "Пропустить и собрать протокол"} onSubmit={buildProtocol} />
+        {error && <div className="banner" role="alert">{error}</div>}
+      </div>
+      <TranscriptView meeting={meeting} disabled={protocolBusy} onBusyChange={setSpeakerBusy}
+        onUpdated={(next) => {
+          setEdited(true);
+          onUpdated(next);
+        }} />
     </section>
   );
 }
@@ -311,12 +311,12 @@ function ProcessCard({
   }, [meeting.id]);
   const elapsed = Math.max(0, Math.floor((now - started.current.at) / 1000));
   const waiting = meeting.status === "analyzing" || elapsed >= 4;
-  const hint = queued && meeting.source_type === "text"
+  const hint = queued && (meeting.source_type === "text" || meeting.transcript?.trim())
     ? "Транскрипт сохранён. Когда освободится слот, начнётся сборка протокола."
     : queued
     ? mailEnabled
-      ? "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка, готовый протокол придёт на почту."
-      : "Сервер обрабатывает встречи в очереди. Когда дойдёт ваша — начнётся расшифровка. Результат появится в MoM."
+      ? "Обработка начнётся, когда освободится слот. Готовый протокол придёт на почту."
+      : "Обработка начнётся, когда освободится слот. Результат появится в MoM."
     : meeting.status === "analyzing"
       ? protocolHint(meeting.status_message)
       : meeting.status === "transcribing"

@@ -34,12 +34,40 @@ test('review details load once while another job continues polling', async () =>
   });
   const view=render(React.createElement(App));
   await waitFor(()=>assert.equal(detailCalls,1));
-  fireEvent.click(view.getByRole('button',{name:'Разметить спикеров'}));
   assert.ok(view.getByText('Загружаю транскрипт…'));
   await waitFor(()=>assert.ok(polls>=2),{timeout:4000});
   assert.equal(detailCalls,1);
   await act(async()=>finishDetail(response(full('A'))));
   assert.ok(view.getByText('Готовый текст'));
+});
+
+test('recognition opens speaker editing and the skip button queues the protocol', async () => {
+  let polls = 0;
+  let submitted;
+  const finished = {
+    ...full('A'),
+    speakers: [{ id: 'S1', name: 'Спикер 1' }],
+    segments: [{ start: 26, end: 30, speaker: 'S1', text: 'Проверим план запуска.' }],
+  };
+  mockApi((url, options) => {
+    if (url === '/api/meetings') return response([row('A', ++polls === 1 ? 'transcribing' : 'review')]);
+    if (url === '/api/meetings/A') return response(finished);
+    if (url === '/api/meetings/A/protocol') {
+      submitted = JSON.parse(options.body);
+      return response({ ...finished, status: 'queued', status_message: 'Протокол поставлен в очередь' });
+    }
+    throw new Error(`Unexpected ${url}`);
+  });
+  const view = render(React.createElement(App));
+  const transcript = await view.findByRole('heading', { name: 'Транскрипт по спикерам' }, { timeout: 4000 });
+  assert.ok(view.getByRole('combobox', { name: 'Имя спикера Спикер 1' }));
+  assert.equal(view.queryByRole('button', { name: 'Разметить спикеров' }), null);
+  const skip = view.getByRole('button', { name: 'Пропустить и собрать протокол' });
+  assert.ok(skip.compareDocumentPosition(transcript) & Node.DOCUMENT_POSITION_FOLLOWING);
+  fireEvent.click(skip);
+  await waitFor(() => assert.deepEqual(submitted, { recipients: [] }));
+  assert.equal(view.queryByRole('region', { name: 'Проверка спикеров' }), null);
+  assert.ok(view.getByText('Транскрипт сохранён. Когда освободится слот, начнётся сборка протокола.'));
 });
 
 test('late status poll cannot undo a successful restart with the same processing id', async () => {
@@ -94,7 +122,6 @@ test('failed detail load offers an explicit retry and clears the error after suc
   });
   const view=render(React.createElement(App));
   await waitFor(()=>assert.ok(view.getByText('Временный сбой загрузки')));
-  fireEvent.click(view.getByRole('button',{name:'Разметить спикеров'}));
   fireEvent.click(view.getByRole('button',{name:'Повторить загрузку'}));
   await waitFor(()=>assert.ok(view.getByText('Готовый текст')));
   assert.equal(calls,2);

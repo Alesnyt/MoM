@@ -797,6 +797,8 @@ select.title-input {
   max-width: 920px;
 }
 
+.pane--transcript { max-width: none; }
+
 .pane-head {
   display: flex;
   justify-content: space-between;
@@ -827,18 +829,26 @@ select.title-input {
   margin-bottom: 24px;
 }
 
-.review-choice {
+.review-intro {
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 20px 22px;
-  margin-bottom: 24px;
+  background: var(--card);
+  padding: 18px 20px;
+  margin-bottom: 20px;
 }
 
-.review-choice p {
-  margin: 8px 0 0;
+.review-intro h2 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.review-intro p {
+  margin: 5px 0 0;
   color: var(--muted);
   line-height: 1.45;
 }
+
+.review-intro .banner { margin: 12px 0 0; }
 
 .process ol {
   display: flex;
@@ -1333,22 +1343,28 @@ select.title-input {
 
 .speaker-review-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
-  gap: 24px;
+  grid-template-columns: clamp(17rem, 26%, 23rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
 }
 
 .speaker-panel {
   min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 16px;
 }
 
 .speaker-panel h2 {
-  margin: 0 0 16px;
-  font-size: 16px;
+  margin: 0 0 12px;
+  font-size: 18px;
 }
 
 .speaker-panel .speaker-roster {
-  max-height: 70vh;
+  max-height: 65vh;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .speaker-card {
@@ -1356,6 +1372,7 @@ select.title-input {
   border-left-width: 3px;
   border-radius: 8px;
   padding: 12px;
+  background: var(--stage);
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -1372,7 +1389,8 @@ select.title-input {
 
 .speaker-example {
   margin: 12px 0 0;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
@@ -1381,8 +1399,7 @@ select.title-input {
   font-variant-numeric: tabular-nums;
 }
 
-.speaker-example p,
-.review-choice .speaker-example p {
+.speaker-example p {
   margin: 4px 0 0;
 }
 
@@ -1398,20 +1415,23 @@ select.title-input {
 
 .protocol-delivery {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-  margin-top: 16px;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 8px 12px;
+  margin-top: 12px;
 }
 
 .protocol-recipients {
-  width: 100%;
+  flex: 1 1 240px;
   min-width: 0;
-  box-sizing: border-box;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 12px;
+  padding: 10px 12px;
 }
+
+.protocol-recipients summary { cursor: pointer; }
+.protocol-recipients fieldset { border: 0; padding: 8px 0 0; margin: 0; min-width: 0; }
+.protocol-delivery > p { flex-basis: 100%; }
 
 .recipient-list {
   display: flex;
@@ -1450,7 +1470,7 @@ select.title-input {
 }
 
 .speaker-rename .speaker-edit {
-  flex: 1 1 180px;
+  flex: 1 1 100%;
   min-width: 0;
 }
 
@@ -1489,9 +1509,10 @@ select.title-input {
 .turns {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  max-height: 70vh;
+  gap: 8px;
+  max-height: 65vh;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .transcript-controls {
@@ -1521,13 +1542,17 @@ select.title-input {
 
 .turn {
   border-left: 3px solid var(--accent);
-  padding: 0 0 0 12px;
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: var(--stage);
   overflow-wrap: anywhere;
 }
 
-.turn > p,
-.review-choice .turn > p {
+.turn > p {
   color: var(--text);
+  max-width: 95ch;
+  margin: 7px 0 0;
+  font-size: 16px;
   white-space: pre-wrap;
   line-height: 1.55;
 }
@@ -1552,6 +1577,8 @@ select.title-input {
   min-width: 0;
 }
 
+.speaker-move { margin-left: auto; }
+
 .speaker-name {
   background: transparent;
   border: 0;
@@ -1566,7 +1593,7 @@ select.title-input {
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 4px 8px;
+  padding: 7px 8px;
 }
 
 .speaker-edit {
@@ -1575,14 +1602,16 @@ select.title-input {
 
 .speaker-hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 14px;
+  margin: 0 0 12px;
 }
 
-.turn-head form {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+.speaker-markup > .speaker-hint { margin: 0; }
+
+@media (max-width: 640px) {
+  .review-intro, .speaker-panel { padding: 12px; }
+  .speaker-move { margin-left: 0; }
+  .turns { max-height: none; overflow: visible; scrollbar-gutter: auto; }
 }
 
 .sr-only {

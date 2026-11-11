@@ -184,11 +184,11 @@ function SpeakerNameEditor({
         >
           Сохранить
         </button>
-        {defaultName && (
+        {defaultName && (speaker.name !== defaultName || draft !== defaultName) && (
           <button
             className="ghost"
             type="button"
-            disabled={disabled || (speaker.name === defaultName && draft === defaultName)}
+            disabled={disabled}
             title={`Вернуть имя «${defaultName}»`}
             aria-label={`Сбросить имя ${speaker.name} на ${defaultName}`}
             onMouseDown={(event) => event.preventDefault()}
@@ -261,7 +261,10 @@ export function TranscriptView({
         {meeting.diarization_note && <p className="progress-hint">{meeting.diarization_note}</p>}
         {meeting.transcript == null
           ? <p className="progress-hint" role="status">Загружаю транскрипт…</p>
-          : <pre className="transcript">{meeting.transcript || "Транскрипт пуст"}</pre>}
+          : <section aria-labelledby={transcriptHeadingId}>
+            <h2 id={transcriptHeadingId}>Транскрипт</h2>
+            <pre className="transcript">{meeting.transcript || "Транскрипт пуст"}</pre>
+          </section>}
       </>
     );
   }
@@ -300,12 +303,7 @@ export function TranscriptView({
 
   return (
     <div className="speaker-markup">
-      <p className="progress-hint">
-        Имя можно выбрать из каталога или вписать своё. Оно встанет на все реплики этого спикера и появится в списке выбора.
-        {" «Сбросить имя» вернёт обозначение «Спикер 1», «Спикер 2» и т. д."}
-        {hasUnclear ? " «Неясно» — это не один человек: такие реплики назначайте по одной в транскрипте." : ""}
-        {meeting.diarization_note ? ` ${meeting.diarization_note}` : ""}
-      </p>
+      {meeting.diarization_note && <p className="speaker-hint">{meeting.diarization_note}</p>}
       {error && <div className="banner" role="alert">{error}</div>}
       {meeting.name_review && <details className="name-review">
         <summary>{meeting.name_review.message}</summary>
@@ -320,6 +318,9 @@ export function TranscriptView({
       <div className="speaker-review-grid">
         <section className="speaker-panel" aria-labelledby={speakersHeadingId}>
           <h2 id={speakersHeadingId}>Спикеры и примеры фраз</h2>
+          {namedSpeakers.length > 0
+            ? <p className="speaker-hint">Введите имя или выберите его из каталога.</p>
+            : <p className="speaker-hint">Назначьте спикеров в транскрипте.</p>}
           <div className="speaker-roster">
             {namedSpeakers.map((speaker) => (
               <div className="speaker-card" key={speaker.id} style={{ borderLeftColor: speakerColor(speaker.id) }}>
@@ -342,6 +343,7 @@ export function TranscriptView({
         </section>
         <section className="speaker-panel" aria-labelledby={transcriptHeadingId}>
           <h2 id={transcriptHeadingId}>Транскрипт по спикерам</h2>
+          {hasUnclear && <p className="speaker-hint">Уточняйте спикера у каждой реплики с пометкой «Неясно».</p>}
           <TranscriptTurns key={meeting.id} turns={turns} segments={segments} speakers={speakers}
             disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} />
         </section>
@@ -404,15 +406,16 @@ function TranscriptTurns({ turns, segments, speakers, disabled, onMove, headingI
               <label className="speaker-move">
                 <span className="sr-only">Кто говорит эту реплику</span>
                 <select
-                  value={turn.speaker}
+                  value=""
                   disabled={disabled}
                   aria-label="Кто говорит эту реплику"
                   onChange={(event) => {
                     const next = event.target.value;
-                    if (next !== turn.speaker) void onMove(turn.indexes, next);
+                    if (next) void onMove(turn.indexes, next);
                   }}
                 >
-                  {speakers.map((item) => (
+                  <option value="" disabled>Сменить спикера</option>
+                  {speakers.filter((item) => item.id !== turn.speaker).map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.name}
                     </option>
