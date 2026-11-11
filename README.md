@@ -184,9 +184,11 @@ mom.example.com {
 | `SMTP_FROM` | Адрес отправителя |
 | `SMTP_STARTTLS` | `1` по умолчанию; для порта 465 не нужен |
 | `PUBLIC_BASE_URL` | Необязательная ссылка на MoM в письме, например `https://mom.company.ru` |
-| `ASR_IDLE_UNLOAD_SECONDS` | Через сколько секунд простоя очереди выгрузить Whisper/GigaAM из RAM, по умолчанию `300` |
+| `ASR_IDLE_UNLOAD_SECONDS` | Через сколько секунд простоя очереди выгрузить Whisper, GigaAM и pyannote из RAM, по умолчанию `300` |
 | `HF_TOKEN` | Токен Hugging Face для разметки спикеров (pyannote). Без него все реплики — один спикер |
 | `DIARIZE_MAX_SPEAKERS` | Верхняя граница числа спикеров, по умолчанию `8` |
+| `DIARIZE_PRELOAD_MAX_MB` | Лимит декодированного WAV в RAM для pyannote, по умолчанию `256` МиБ. Более крупные записи читаются с диска. `0` всегда читает с диска |
+| `DIARIZE_CACHE_MODEL` | `1` сохраняет загруженную pyannote между встречами до простоя очереди. `0` выгружает модель после каждой записи |
 | `LDAP_ENABLED` | `1`, чтобы выбранные пользователи входили паролем из каталога |
 | `LDAP_URL` | `ldaps://ldap.example.com:636` или `ldap://ldap.example.com:389` |
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | Служебная учётная запись для поиска |

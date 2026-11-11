@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 
-from . import config, gigaam_asr, local_asr, mail, retention, store
+from . import config, diarize, gigaam_asr, local_asr, mail, retention, store
 from . import control
 from .logctx import meeting_scope
 from .performance import record_outcome
@@ -26,6 +26,7 @@ def _unload_idle_asr() -> None:
         return
     local_asr.unload()
     gigaam_asr.unload()
+    diarize.unload()
     log.info("Локальный ASR выгружен после простоя очереди")
 
 
