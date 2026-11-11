@@ -163,6 +163,7 @@ export default function App() {
   }, [composing, meetings, selectedId]);
 
   const openai = health?.openai;
+  const adminReady = auth?.authenticated === true;
   const userReady = Boolean(user?.authenticated);
   const showComposer = composing || meetings.length === 0;
   const liveQueue = queueFromMeetings(meetings, health?.queue?.limit || 1);
@@ -328,14 +329,16 @@ export default function App() {
             <option value="dark">Тёмная</option>
           </select>
         </label>
-        <button type="button" className={`top-key ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
-          {health ? connectionLabel(openai) : "Проверяю ключ"}
-        </button>
+        {adminReady && (
+          <button type="button" className={`top-key ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
+            {health ? connectionLabel(openai) : "Проверяю ключ"}
+          </button>
+        )}
         {screen === "admin" ? (
           <button className="ghost" type="button" onClick={goApp}>
             К встречам
           </button>
-        ) : (
+        ) : adminReady && (
           <button className="ghost admin-link" type="button" onClick={goAdmin}>
             Админка
           </button>
@@ -407,13 +410,15 @@ export default function App() {
               Выйти из профиля
             </button>
           )}
-          <button type="button" className={`conn ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
-            <span className="conn-dot" />
-            <span>
-              <strong>{health ? connectionLabel(openai) : "Проверяю ключ"}</strong>
-              {health && <small>{connectionDetail(openai)}</small>}
-            </span>
-          </button>
+          {adminReady && (
+            <button type="button" className={`conn ${health ? connectionClass(openai) : ""}`} onClick={goAdmin}>
+              <span className="conn-dot" />
+              <span>
+                <strong>{health ? connectionLabel(openai) : "Проверяю ключ"}</strong>
+                {health && <small>{connectionDetail(openai)}</small>}
+              </span>
+            </button>
+          )}
           {health && !health.ffmpeg && <p className="health-warn">Не найден ffmpeg.</p>}
           {health?.disk && !health.disk.ok && (
             <p className="health-warn">Мало места на диске. Новые записи не принимаются, пока не освободится место.</p>
@@ -491,7 +496,7 @@ export default function App() {
               mailReady={Boolean(health?.smtp?.configured)}
               maxUploadBytes={health?.max_upload_bytes}
               nextExpired={nextExpired}
-              onOpenSettings={goAdmin}
+              onOpenSettings={adminReady ? goAdmin : undefined}
               onUpload={onUpload}
             />
           ) : selected ? (
@@ -517,7 +522,7 @@ export default function App() {
               mailReady={Boolean(health?.smtp?.configured)}
               maxUploadBytes={health?.max_upload_bytes}
               nextExpired={nextExpired}
-              onOpenSettings={goAdmin}
+              onOpenSettings={adminReady ? goAdmin : undefined}
               onUpload={onUpload}
             />
           )}
