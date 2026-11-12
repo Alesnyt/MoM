@@ -156,6 +156,9 @@ def init_db() -> None:
             payload TEXT NOT NULL
         )""")
 
+        from .glossary import init_schema
+        init_schema(conn)
+
 
 
 def get_app_setting(key: str) -> dict | None:

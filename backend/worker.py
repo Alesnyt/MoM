@@ -5,7 +5,7 @@ import logging
 import time
 
 from . import config, diarize, gigaam_asr, local_asr, mail, retention, store
-from . import control, corporate_context
+from . import control, corporate_context, glossary
 from .logctx import meeting_scope
 from .performance import record_outcome
 from .pipeline import process_meeting
@@ -37,6 +37,7 @@ async def run_worker(stop: asyncio.Event) -> None:
     idle_since: float | None = None
     delivery = asyncio.create_task(_run_delivery(stop), name="mom-mail")
     directory_sync = asyncio.create_task(corporate_context.run_sync(stop), name="mom-context")
+    glossary_imports = asyncio.create_task(glossary.run_imports(stop), name="mom-glossary")
     try:
         while not stop.is_set():
             running = {task for task in running if not task.done()}
@@ -75,7 +76,8 @@ async def run_worker(stop: asyncio.Event) -> None:
     finally:
         delivery.cancel()
         directory_sync.cancel()
-        await asyncio.gather(delivery, directory_sync, return_exceptions=True)
+        glossary_imports.cancel()
+        await asyncio.gather(delivery, directory_sync, glossary_imports, return_exceptions=True)
         for task in running:
             task.cancel()
         if running:

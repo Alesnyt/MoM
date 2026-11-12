@@ -1,0 +1,63 @@
+{
+  "device": "cpu",
+  "threads": 4,
+  "terms": 100000,
+  "samples": 2,
+  "repeats": 2,
+  "exact_transcript_match": true,
+  "median_total_seconds": {
+    "quiet": 4.665999875491252,
+    "import": 4.699594771496777
+  },
+  "difference_percent": 0.7199935041144467,
+  "runs": [
+    {
+      "repeat": 0,
+      "mode": "quiet",
+      "sample": 0,
+      "seconds": 1.8686276249936782
+    },
+    {
+      "repeat": 0,
+      "mode": "quiet",
+      "sample": 1,
+      "seconds": 2.7432282919908175
+    },
+    {
+      "repeat": 0,
+      "mode": "import",
+      "sample": 0,
+      "seconds": 1.9233451250038343
+    },
+    {
+      "repeat": 0,
+      "mode": "import",
+      "sample": 1,
+      "seconds": 2.764704166998854
+    },
+    {
+      "repeat": 1,
+      "mode": "import",
+      "sample": 0,
+      "seconds": 1.9024196669925004
+    },
+    {
+      "repeat": 1,
+      "mode": "import",
+      "sample": 1,
+      "seconds": 2.8087205839983653
+    },
+    {
+      "repeat": 1,
+      "mode": "quiet",
+      "sample": 0,
+      "seconds": 1.9168673749954905
+    },
+    {
+      "repeat": 1,
+      "mode": "quiet",
+      "sample": 1,
+      "seconds": 2.803276459002518
+    }
+  ]
+}

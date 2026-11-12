@@ -18,22 +18,24 @@ const initial = {enabled:true,use_ad:true,sync_ad:true,revision:1,term_count:1,p
   ldap_configured:true,synced_at:null,imported_at:null,sync_error:null,syncing:false,matched_terms:1,
   terms:[{term:'TrueConf',aliases:['труконф'],description:'Видеоконференции',department:''}]};
 
-test('dictionary import errors remain visible and leave the previous dictionary usable', async () => {
-  let imports = 0, reads = 0;
-  globalThis.fetch = async (url, options) => {
-    if (String(url).startsWith('/api/admin/context?q=')) {reads++; return Response.json(initial);}
-    assert.equal(url, '/api/admin/context/import');
-    assert.equal(options.body.get('file').name, 'terms.csv');
-    imports++;
-    return Response.json({detail:'Нужен столбец «Термин»'}, {status:400});
+const vocabulary = {glossaries:[], jobs:[],term_count:1,active_term_count:1,matched_terms:1,revision:1,
+  terms:initial.terms.map(e=>({...e,id:1,glossary_name:'Корпоративный',enabled:true,replacements:[]}))};
+
+test('dictionary preview errors remain visible and leave previous terms usable', async () => {
+  let previews=0;
+  globalThis.fetch=async (url,options)=> {
+    if(String(url).startsWith('/api/admin/context?q='))return Response.json(initial);
+    if(String(url).startsWith('/api/admin/glossaries?'))return Response.json(vocabulary);
+    assert.equal(url,'/api/admin/glossaries/preview');
+    assert.equal(options.body.get('file').name,'terms.csv');previews++;
+    return Response.json({detail:'Не удалось прочитать CSV'},{status:400});
   };
-  const view = render(React.createElement(CorporateContextPanel));
+  const view=render(React.createElement(CorporateContextPanel));
   await view.findByText('TrueConf');
-  fireEvent.change(view.getByLabelText('Файл словаря'), {target:{files:[new window.File(['bad'], 'terms.csv')]}});
-  fireEvent.submit(view.getByRole('button', {name:'Загрузить словарь'}).closest('form'));
-  await waitFor(() => assert.equal(imports, 1));
-  await waitFor(() => assert.ok(reads > 1));
-  assert.equal(view.getByRole('alert').textContent, 'Нужен столбец «Термин»');
+  fireEvent.change(view.getByLabelText('Файл глоссария'),{target:{files:[new window.File(['bad'],'terms.csv')]}});
+  fireEvent.click(view.getByRole('button',{name:'Проверить файл'}));
+  await waitFor(()=>assert.equal(previews,1));
+  assert.equal((await view.findByRole('alert')).textContent,'Не удалось прочитать CSV');
   assert.ok(view.getByText('TrueConf'));
 });
 
@@ -67,7 +69,8 @@ test('context controls consumption only; toggling AD does not change cache or se
   globalThis.fetch = async (url, options) => {
     if (url === '/api/admin/context/settings') {
       const body = JSON.parse(options.body); writes.push(body); current = {...current, ...body};
-    } else assert.ok(String(url).startsWith('/api/admin/context?q='));
+    } else if(String(url).startsWith('/api/admin/glossaries?')) return Response.json(vocabulary);
+    else assert.ok(String(url).startsWith('/api/admin/context?q='));
     return Response.json(current);
   };
   const view = render(React.createElement(CorporateContextPanel));
