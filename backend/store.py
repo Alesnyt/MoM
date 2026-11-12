@@ -158,6 +158,8 @@ def init_db() -> None:
 
         from .glossary import init_schema
         init_schema(conn)
+        from .term_discovery import init_schema as init_discovery
+        init_discovery(conn)
 
 
 

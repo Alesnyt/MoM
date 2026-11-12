@@ -517,6 +517,9 @@ class Context:
         selected = self.select(text)
         replacements = {}
         for entry in selected:
+            if (entry.get('glossary_id') == 'discovered-terms' and entry['department']
+                    and normalize(entry['department']) != self.department):
+                continue
             for alias in entry.get("replacements", entry["aliases"]):
                 if len(self.alias_targets[normalize(alias)]) == 1 and normalize(alias) != normalize(entry["term"]):
                     replacements[alias.casefold()] = entry["term"]

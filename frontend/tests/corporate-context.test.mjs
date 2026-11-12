@@ -18,12 +18,14 @@ const initial = {enabled:true,use_ad:true,sync_ad:true,revision:1,term_count:1,p
   ldap_configured:true,synced_at:null,imported_at:null,sync_error:null,syncing:false,matched_terms:1,
   terms:[{term:'TrueConf',aliases:['труконф'],description:'Видеоконференции',department:''}]};
 
+const discovery = {job:{enabled:true,run_time:'03:30',max_batches:100,next_run_at:'2026-11-13T00:30:00Z',status:'idle',batches:0,found:0,pending_meetings:0},counts:{},proposals:[],total:0};
 const vocabulary = {glossaries:[], jobs:[],term_count:1,active_term_count:1,matched_terms:1,revision:1,
   terms:initial.terms.map(e=>({...e,id:1,glossary_name:'Корпоративный',enabled:true,replacements:[]}))};
 
 test('dictionary preview errors remain visible and leave previous terms usable', async () => {
   let previews=0;
   globalThis.fetch=async (url,options)=> {
+    if(String(url).startsWith('/api/admin/term-discovery?'))return Response.json(discovery);
     if(String(url).startsWith('/api/admin/context?q='))return Response.json(initial);
     if(String(url).startsWith('/api/admin/glossaries?'))return Response.json(vocabulary);
     assert.equal(url,'/api/admin/glossaries/preview');
@@ -69,7 +71,8 @@ test('context controls consumption only; toggling AD does not change cache or se
   globalThis.fetch = async (url, options) => {
     if (url === '/api/admin/context/settings') {
       const body = JSON.parse(options.body); writes.push(body); current = {...current, ...body};
-    } else if(String(url).startsWith('/api/admin/glossaries?')) return Response.json(vocabulary);
+    } else if(String(url).startsWith('/api/admin/term-discovery?')) return Response.json(discovery);
+    else if(String(url).startsWith('/api/admin/glossaries?')) return Response.json(vocabulary);
     else assert.ok(String(url).startsWith('/api/admin/context?q='));
     return Response.json(current);
   };

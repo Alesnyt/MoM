@@ -1,0 +1,14 @@
+{
+  "meetings": 100,
+  "turns": 12000,
+  "model": "deterministic stub, no inference",
+  "first_scan_seconds": 11.687,
+  "cpu_seconds": 5.588,
+  "model_batches": 200,
+  "second_scan_seconds": 0.026,
+  "second_scan_model_calls": 0,
+  "snapshot_median_ms": 4.93,
+  "snapshot_p95_ms": 6.31,
+  "approval_ms": 6.59,
+  "peak_rss_mb": 32.6
+}
