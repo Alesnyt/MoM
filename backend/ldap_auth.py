@@ -19,6 +19,38 @@ class LdapError(RuntimeError):
     pass
 
 
+def _connection_error(exc: Exception) -> str:
+    from ldap3.core.exceptions import (LDAPCertificateError, LDAPCommunicationError, LDAPResponseTimeoutError,
+        LDAPSocketReceiveError, LDAPSSLConfigurationError, LDAPSSLNotSupportedError, LDAPStartTLSError)
+
+    chain, seen = [], set()
+    cause = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        chain.append(cause)
+        cause = cause.__cause__ or cause.__context__
+    if any(isinstance(error, (ssl.SSLError, LDAPCertificateError, LDAPSSLConfigurationError,
+                              LDAPSSLNotSupportedError, LDAPStartTLSError)) for error in chain):
+        return "Не удалось установить защищённое соединение с AD. Проверьте сертификат и настройки TLS"
+    if any(isinstance(error, (TimeoutError, LDAPResponseTimeoutError)) for error in chain):
+        return "AD не ответил за время ожидания. Проверьте доступность сервера и сетевое соединение"
+    if isinstance(exc, LDAPSocketReceiveError):
+        return "Ответ AD не получен: истекло время ожидания или соединение прервано. Проверьте журнал сервера MoM"
+    if isinstance(exc, (OSError, LDAPCommunicationError)):
+        return "Не удалось связаться с AD. Проверьте адрес, порт и доступность сервера из MoM"
+    # Never copy exception messages into the browser: they can contain private
+    # server diagnostics. The chained exception remains available in server logs.
+    return f"Не удалось выполнить запрос к AD ({type(exc).__name__}). Подробности — в журнале сервера MoM"
+
+
+def _close_connection(connection) -> None:
+    if connection is not None:
+        try:
+            connection.unbind()
+        except Exception:
+            log.warning("Не удалось закрыть соединение AD", exc_info=True)
+
+
 def escape_filter(value: str) -> str:
     escaped = []
     for char in value:
@@ -83,13 +115,19 @@ def authenticate(username: str, password: str) -> bool:
 def test_connection(username: str = "") -> dict:
     if not config.get_ldap_url() or not config.get_ldap_base_dn():
         raise LdapError("Укажите адрес каталога и базу поиска")
-    connection, _server = _service_connection()
+    connection = None
     try:
+        connection, _server = _service_connection()
         if not username.strip():
             return {"ok": True, "entries": None}
         found = _search(connection, username.strip())
+    except LdapError:
+        raise
+    except Exception as exc:
+        log.exception("Проверка подключения или чтения AD не удалась")
+        raise LdapError(_connection_error(exc)) from exc
     finally:
-        connection.unbind()
+        _close_connection(connection)
     if len(found) == 0:
         raise LdapError("Пользователь в каталоге не найден")
     if len(found) > 1:
@@ -357,14 +395,9 @@ def sync_people(*, progress: Callable[[dict], None] | None = None) -> list[dict[
     except Exception as exc:
         log.exception("Выгрузка AD: этап=%s, страниц=%s, сотрудников=%s",
                       state["phase"], state["pages"], state["received"])
-        raise LdapError(f"Выгрузка AD прервана ({type(exc).__name__}). "
-                        "Подробности — в журнале сервера MoM; предыдущий кэш сохранён") from exc
+        raise LdapError(f"{_connection_error(exc)}. Предыдущий кэш сохранён") from exc
     finally:
-        if connection is not None:
-            try:
-                connection.unbind()
-            except Exception:
-                log.warning("Не удалось закрыть соединение синхронизации AD")
+        _close_connection(connection)
 
 
 def browse_scopes(base_dn: str = "", cursor: str = "") -> dict:

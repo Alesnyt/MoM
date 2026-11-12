@@ -385,6 +385,7 @@ def is_qwen() -> bool:
 
 
 _env_lock = threading.Lock()
+_ldap_settings_lock = threading.Lock()
 
 
 def _upsert_env(values: dict[str, str]) -> None:
@@ -694,36 +695,19 @@ def set_ldap(
     tls_verify: bool,
     email_attr: str,
 ) -> None:
-    global LDAP_ENABLED, LDAP_URL, LDAP_BIND_DN, LDAP_BIND_PASSWORD
-    global LDAP_BASE_DN, LDAP_USER_FILTER, LDAP_STARTTLS, LDAP_TLS_VERIFY, LDAP_EMAIL_ATTR
-    LDAP_ENABLED = bool(enabled)
-    LDAP_URL = url.strip()
-    LDAP_BIND_DN = bind_dn.strip()
-    LDAP_BASE_DN = base_dn.strip()
-    LDAP_USER_FILTER = user_filter.strip() or "(mail={username})"
-    LDAP_STARTTLS = bool(starttls)
-    LDAP_TLS_VERIFY = bool(tls_verify)
-    LDAP_EMAIL_ATTR = email_attr.strip() or "mail"
-    os.environ["LDAP_ENABLED"] = "1" if LDAP_ENABLED else "0"
-    os.environ["LDAP_URL"] = LDAP_URL
-    os.environ["LDAP_BIND_DN"] = LDAP_BIND_DN
-    os.environ["LDAP_BASE_DN"] = LDAP_BASE_DN
-    os.environ["LDAP_USER_FILTER"] = LDAP_USER_FILTER
-    os.environ["LDAP_STARTTLS"] = "1" if LDAP_STARTTLS else "0"
-    os.environ["LDAP_TLS_VERIFY"] = "1" if LDAP_TLS_VERIFY else "0"
-    os.environ["LDAP_EMAIL_ATTR"] = LDAP_EMAIL_ATTR
-    payload = {
-        "LDAP_ENABLED": "1" if LDAP_ENABLED else "0",
-        "LDAP_URL": LDAP_URL,
-        "LDAP_BIND_DN": LDAP_BIND_DN,
-        "LDAP_BASE_DN": LDAP_BASE_DN,
-        "LDAP_USER_FILTER": LDAP_USER_FILTER,
-        "LDAP_STARTTLS": "1" if LDAP_STARTTLS else "0",
-        "LDAP_TLS_VERIFY": "1" if LDAP_TLS_VERIFY else "0",
-        "LDAP_EMAIL_ATTR": LDAP_EMAIL_ATTR,
+    # Stage the whole change. A failed persistence attempt must not switch the
+    # running connection or invalidate the last usable directory snapshot.
+    runtime = {
+        "LDAP_ENABLED": bool(enabled), "LDAP_URL": url.strip(), "LDAP_BIND_DN": bind_dn.strip(),
+        "LDAP_BASE_DN": base_dn.strip(), "LDAP_USER_FILTER": user_filter.strip() or "(mail={username})",
+        "LDAP_STARTTLS": bool(starttls), "LDAP_TLS_VERIFY": bool(tls_verify),
+        "LDAP_EMAIL_ATTR": email_attr.strip() or "mail",
     }
     if bind_password:
-        LDAP_BIND_PASSWORD = bind_password
-        os.environ["LDAP_BIND_PASSWORD"] = LDAP_BIND_PASSWORD
-        payload["LDAP_BIND_PASSWORD"] = LDAP_BIND_PASSWORD
-    _upsert_env(payload)
+        runtime["LDAP_BIND_PASSWORD"] = bind_password
+    payload = {key: ("1" if value else "0") if isinstance(value, bool) else value
+               for key, value in runtime.items()}
+    with _ldap_settings_lock:
+        _upsert_env(payload)
+        globals().update(runtime)
+        os.environ.update(payload)

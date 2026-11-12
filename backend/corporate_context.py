@@ -160,7 +160,12 @@ def _next_sync_at(data: dict, now: float, signature: str) -> float:
         return data.get("sync_until", now)
     last = data.get("last_attempt", 0) if data.get("attempt_signature") == signature else 0
     if data.get("sync_error") and last >= changed and last:
-        return last + 900
+        failed_at = data.get("failed_at")
+        if failed_at is None and data.get("finished_at"):
+            # Existing jobs from before failed_at was introduced already retain
+            # their completion timestamp. Do not restart them early on upgrade.
+            failed_at = datetime.fromisoformat(data["finished_at"]).timestamp()
+        return max(last, failed_at or last) + 900
     hour, minute = map(int, data.get("sync_time", DEFAULT_SYNC_TIME).split(":"))
     target = datetime.fromtimestamp(now, SYNC_TIMEZONE).replace(hour=hour, minute=minute, second=0, microsecond=0)
     # A newly selected time starts at its next occurrence, including across midnight.
@@ -285,7 +290,8 @@ def request_sync(actor: str) -> dict:
         if job.get("status") == "queued" or job.get("sync_until", 0) > time.time():
             raise ValueError("Синхронизация AD уже выполняется")
         job.update(status="queued", actor=actor, sync_id=None, sync_until=0, sync_error=None,
-                   started_at=None, finished_at=None, progress={"phase": "queued", "received": 0, "pages": 0})
+                   started_at=None, finished_at=None, failed_at=None,
+                   progress={"phase": "queued", "received": 0, "pages": 0})
         _write_job(conn, job)
     store.record_audit(actor, "ldap.sync.request", detail="Обновление кэша запрошено")
     return snapshot()
@@ -311,7 +317,7 @@ def _claim_sync(scheduled: bool) -> tuple[str, str] | None:
         job.update(last_attempt=now, attempt_signature=signature, sync_id=token,
                    sync_until=now + SYNC_LEASE_SECONDS, status="running", sync_error=None,
                    actor=job.get("actor", "system") if queued else "system",
-                   started_at=store.utc_now(), finished_at=None,
+                   started_at=store.utc_now(), finished_at=None, failed_at=None,
                    progress={"phase": "connecting", "received": 0, "pages": 0})
         _write_job(conn, job)
     return token, signature
@@ -328,7 +334,7 @@ def _publish_directory(token: str, signature: str, people: list[dict]) -> bool:
         data = _read()
         data.update(people=people, directory_signature=signature, synced_at=store.utc_now(), sync_error=None)
         _write(conn, data)
-        job.update(status="succeeded", sync_id=None, sync_until=0, finished_at=store.utc_now(), sync_error=None)
+        job.update(status="succeeded", sync_id=None, sync_until=0, finished_at=store.utc_now(), sync_error=None, failed_at=None)
         job["progress"] = {**job.get("progress", {}), "phase": "done", "received": len(people)}
         _write_job(conn, job)
     return True
@@ -339,8 +345,6 @@ def sync_directory(actor: str = "system", *, scheduled: bool = False) -> dict:
     if claim is None:
         return {}
     token, signature = claim
-    if scheduled:
-        actor = _sync_job().get("actor", actor)
     done, lost = threading.Event(), threading.Event()
 
     def heartbeat():
@@ -359,8 +363,10 @@ def sync_directory(actor: str = "system", *, scheduled: bool = False) -> dict:
             raise ldap_auth.LdapError("Обновление кэша прервано: задача передана другому процессу")
 
     thread = threading.Thread(target=heartbeat, name="mom-ad-heartbeat", daemon=True)
-    thread.start()
     try:
+        if scheduled:
+            actor = _sync_job().get("actor", actor)
+        thread.start()
         people = ldap_auth.sync_people(progress=progress)
         if lost.is_set():
             raise ldap_auth.LdapError("Обновление кэша прервано: потеряна связь с задачей")
@@ -371,25 +377,60 @@ def sync_directory(actor: str = "system", *, scheduled: bool = False) -> dict:
         message = str(exc) if isinstance(exc, (ldap_auth.LdapError, ValueError)) else (
             f"Обновление кэша прервано ({type(exc).__name__}). Подробности — в журнале сервера MoM")
         if _update_job(token, status="error", sync_id=None, sync_until=0,
-                       finished_at=store.utc_now(), sync_error=message):
+                       finished_at=store.utc_now(), failed_at=time.time(), sync_error=message):
             store.record_audit(actor, "ldap.sync.error", detail=message)
         raise
     finally:
         done.set()
-        thread.join(timeout=1)
+        if thread.ident is not None:
+            thread.join(timeout=1)
     return snapshot()
+
+
+def _record_scheduler_failure(observed: dict | None, exc: Exception) -> None:
+    """Best-effort status for failures before a worker could claim the job.
+
+    Never overwrite a job claimed/completed by another worker in the meantime.
+    If the database cannot be written, the caller's server log remains the
+    authoritative diagnostic; reporting an error must not kill the scheduler.
+    """
+    try:
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = store.get_app_setting("ldap_sync_job")
+            if current != observed:
+                return
+            job, now = _sync_job(), time.time()
+            if job.get("sync_until", 0) > now:
+                return
+            message = (f"Не удалось запустить обновление AD ({type(exc).__name__}). "
+                       "Проверьте журнал сервера MoM и доступность базы данных. Можно повторить запуск вручную")
+            actor = job.get("actor", "system") if job.get("status") == "queued" else "system"
+            job.update(status="error", sync_id=None, sync_until=0, sync_error=message,
+                       actor=actor, started_at=None, last_attempt=now, failed_at=now, finished_at=store.utc_now(),
+                       progress={"phase": "starting", "received": 0, "pages": 0},
+                       attempt_signature=directory_signature())
+            _write_job(conn, job)
+        store.record_audit(job.get("actor", "system"), "ldap.sync.error", detail=message)
+    except Exception:
+        log.exception("Не удалось сохранить причину сбоя запуска AD; проверьте доступ к базе данных")
 
 
 async def run_sync(stop: asyncio.Event) -> None:
     next_schedule_check = 0.0
+    retry_after = 0.0
     while not stop.is_set():
+        observed = None
         try:
-            queued = await asyncio.to_thread(store.get_app_setting, "ldap_sync_job")
-            if (queued or {}).get("status") == "queued" or time.monotonic() >= next_schedule_check:
-                await asyncio.to_thread(sync_directory, scheduled=True)
-                next_schedule_check = time.monotonic() + 60
-        except Exception:
-            # sync_directory records both scheduled and manual failures with their traceback.
+            if time.monotonic() >= retry_after:
+                observed = await asyncio.to_thread(store.get_app_setting, "ldap_sync_job")
+                if (observed or {}).get("status") == "queued" or time.monotonic() >= next_schedule_check:
+                    await asyncio.to_thread(sync_directory, scheduled=True)
+                    next_schedule_check = time.monotonic() + 60
+        except Exception as exc:
+            log.exception("Сбой фонового обновления AD")
+            await asyncio.to_thread(_record_scheduler_failure, observed, exc)
+            retry_after = time.monotonic() + 60
             next_schedule_check = time.monotonic() + 60
         try:
             await asyncio.wait_for(stop.wait(), timeout=2)
