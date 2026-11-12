@@ -212,7 +212,7 @@ def test_changed_policy_or_lost_lease_cannot_publish_stale_snapshot(db):
     assert cc._read()["people"] == [{"name": "Right"}]
 
 @pytest.mark.parametrize('failure,match', [('paging', 'постраничную'), ('repeat', 'повторил страницу'),
-    ('referral', 'другой сервер'), ('socket', 'TimeoutError')])
+    ('referral', 'другой сервер'), ('socket', 'не ответил')])
 def test_incomplete_bulk_responses_are_not_published(db, monkeypatch, failure, match):
     cc._update(people=[{"name":"Previous"}], directory_signature=cc.directory_signature(), synced_at=store.utc_now())
     class Fake:

@@ -1,4 +1,6 @@
 """Search-only LDAP allowlist; authentication continues to use its own base/filter."""
+import re
+
 from . import config, store
 
 # Only attributes used by speaker assignment or corporate context are eligible.
@@ -15,8 +17,6 @@ def sync_policy() -> dict:
 
 
 def save_sync_policy(fields: list[str], domains: list[str]) -> dict:
-    import re
-
     if len(fields) > len(OPTIONAL_FIELDS) or any(field not in OPTIONAL_FIELDS for field in fields):
         raise ValueError("Выберите поля из списка: должность, подразделение, фамилия")
     if len(domains) > 32:
@@ -38,13 +38,44 @@ def save_sync_policy(fields: list[str], domains: list[str]) -> dict:
     return policy
 
 
+def _preserve_escaped_spaces(value: str) -> str:
+    # ldap3's strip=True removes escaped trailing spaces too. Hex escapes survive
+    # trimming, including when a DN is pasted with padding around its components.
+    return re.sub(r"\\(?:[0-9a-fA-F]{2}|.)", lambda match: r"\20" if match[0] == "\\ " else match[0], value)
+
+
+def _dn_value(value: str) -> str:
+    raw = bytearray()
+    index = 0
+    while index < len(value):
+        if value[index] == "\\":
+            index += 1
+            pair = value[index:index + 2]
+            if len(pair) == 2 and all(char in "0123456789abcdefABCDEF" for char in pair):
+                raw.append(int(pair, 16))
+                index += 2
+                continue
+        raw.extend(value[index].encode("utf-8"))
+        index += 1
+    return raw.decode("utf-8").casefold()
+
+
 def dn_key(value: str) -> tuple:
     from ldap3.utils.dn import parse_dn
 
     if not value or len(value) > 2000 or any(c in value for c in "\r\n\x00"):
         raise ValueError("Укажите корректный DN области поиска")
     try:
-        return tuple((attr.casefold(), part.casefold(), sep) for attr, part, sep in parse_dn(value, strip=True))
+        # RDN order defines the hierarchy; attributes inside a multi-valued RDN
+        # are unordered. Decode escapes only after parsing so an escaped comma
+        # can never turn into a subtree boundary.
+        rdns, attributes = [], []
+        for attr, part, sep in parse_dn(_preserve_escaped_spaces(value), strip=True):
+            attributes.append((attr.casefold(), _dn_value(part)))
+            if sep != "+":
+                rdns.append(tuple(sorted(attributes)))
+                attributes = []
+        return tuple(rdns)
     except Exception as exc:
         raise ValueError("Некорректный DN области поиска") from exc
 
@@ -52,7 +83,7 @@ def dn_key(value: str) -> tuple:
 def normalize_bases(values: list[str]) -> list[str]:
     result, seen = [], set()
     for value in values:
-        dn = value.strip()
+        dn = _preserve_escaped_spaces(value).strip()
         key = dn_key(dn)
         if key not in seen:
             result.append(dn)

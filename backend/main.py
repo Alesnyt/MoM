@@ -832,17 +832,17 @@ def save_smtp(payload: SmtpIn, _admin: dict = Depends(require_admin)) -> dict:
 @app.post("/api/settings/ldap")
 def save_ldap(payload: LdapIn, _admin: dict = Depends(require_admin)) -> dict:
     _check_ldap_settings(payload)
-    config.set_ldap(
-        enabled=payload.enabled,
-        url=payload.url,
-        bind_dn=payload.bind_dn,
-        bind_password=payload.bind_password,
-        base_dn=payload.base_dn,
-        user_filter=payload.user_filter,
-        starttls=payload.starttls,
-        tls_verify=payload.tls_verify,
-        email_attr=payload.email_attr,
-    )
+    try:
+        config.set_ldap(
+            enabled=payload.enabled, url=payload.url, bind_dn=payload.bind_dn,
+            bind_password=payload.bind_password, base_dn=payload.base_dn,
+            user_filter=payload.user_filter, starttls=payload.starttls,
+            tls_verify=payload.tls_verify, email_attr=payload.email_attr,
+        )
+    except OSError as exc:
+        log.exception("Не удалось сохранить настройки AD")
+        raise HTTPException(status_code=503, detail="Не удалось записать настройки AD. "
+                            "Работающее подключение не изменено. Проверьте права на файл настроек и свободное место") from exc
     state = "включён" if payload.enabled else "выключен"
     bits = [state, payload.url.strip()]
     base = payload.base_dn.strip()
