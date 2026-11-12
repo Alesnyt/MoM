@@ -81,7 +81,7 @@ test('context controls consumption only; toggling AD does not change cache or se
   assert.equal(view.queryByRole('button', {name:'Синхронизировать AD'}), null);
   assert.equal(view.queryByRole('radio', {name:'Локальный кэш AD'}), null);
   assert.equal(view.queryByLabelText('Время запуска'), null);
-  assert.ok(view.getByText('TrueConf'));
+  assert.ok(await view.findByText('TrueConf'));
 });
 
 test('directory field and domain choices survive refreshes and are applied before a sync', async () => {
