@@ -27,7 +27,8 @@ class TranscriptBodyLimit:
 
     async def __call__(self, scope, receive, send):
         limits = {"/api/meetings/transcript": (MAX_REQUEST_BYTES, "Транскрипт больше 1 МБ"),
-                  "/api/admin/context/import": (2 * 1024 * 1024 + 65536, "Словарь больше 2 МБ")}
+                  "/api/admin/context/import": (2 * 1024 * 1024 + 65536, "Словарь больше 2 МБ"),
+                  "/api/admin/glossaries/preview": (25 * 1024 * 1024 + 65536, "Глоссарий больше 25 МБ")}
         limit = limits.get(scope.get("path", "").rstrip("/"))
         if scope["type"] != "http" or scope.get("method") != "POST" or limit is None:
             return await self.app(scope, receive, send)

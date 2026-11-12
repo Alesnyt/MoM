@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import csv
 import hashlib
 import heapq
@@ -17,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zipfile import BadZipFile, ZipFile
 
-from . import config, directory_scope, ldap_auth, store
+from . import config, directory_scope, glossary, ldap_auth, store
 
 log = logging.getLogger("mom.context")
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -77,23 +78,21 @@ def snapshot(query: str = "") -> dict:
     interrupted = job.get("status") == "running" and job.get("sync_until", 0) <= now
     progress = {**job.get("progress", {}), "status": "interrupted" if interrupted else job.get("status", "idle"),
                 "started_at": job.get("started_at"), "finished_at": job.get("finished_at")}
-    needle = normalize(query)
-    terms = [entry for entry in data["terms"] if needle in normalize(" ".join(
-        [entry["term"], *entry["aliases"], entry["description"], entry["department"]]))]
-    return {"enabled": data["enabled"], "use_ad": data["use_ad"], "sync_ad": data["sync_ad"], "revision": data["revision"],
+    vocabulary = glossary.catalog(query)
+    return {"enabled": data["enabled"], "use_ad": data["use_ad"], "sync_ad": data["sync_ad"], "revision": data["revision"] + vocabulary["revision"],
             "sync_time": data["sync_time"], "sync_timezone": "UTC+3",
             "directory_policy": directory_scope.sync_policy(),
             "search_mode": directory_scope.speaker_search_mode(),
             "search_cache_ready": bool(matches and data.get("synced_at") and config.ldap_configured()),
             "next_sync_at": datetime.fromtimestamp(max(now, next_sync), timezone.utc).isoformat() if next_sync is not None else None,
-            "term_count": len(data["terms"]), "people_count": len(data["people"]) if matches else 0,
+            "term_count": vocabulary["term_count"], "people_count": len(data["people"]) if matches else 0,
             "directory_current": matches, "ldap_configured": config.ldap_configured(),
             "synced_at": data.get("synced_at"), "imported_at": data.get("imported_at"),
             "sync_error": "Обновление прервано: процесс перестал отвечать. Запустите обновление снова; предыдущий кэш сохранён."
                           if interrupted else job.get("sync_error"),
             "syncing": job.get("status") == "queued" or (job.get("sync_until", 0) > now),
             "sync_progress": progress,
-            "terms": terms[:100], "matched_terms": len(terms)}
+            "terms": vocabulary["terms"], "matched_terms": vocabulary["matched_terms"]}
 
 
 def save_search_mode(mode: str, actor: str) -> dict:
@@ -247,8 +246,7 @@ def _parse_rows(rows) -> list[dict]:
 
 def import_dictionary(filename: str, content: bytes, actor: str) -> dict:
     entries = parse_dictionary(filename, content)
-    _update(terms=entries, imported_at=store.utc_now())
-    store.record_audit(actor, "context.import", detail=f"terms={len(entries)}")
+    glossary.import_legacy(entries, actor)
     return snapshot()
 
 
@@ -439,28 +437,35 @@ async def run_sync(stop: asyncio.Event) -> None:
 
 
 class Context:
-    def __init__(self, terms: list[dict], people: list[dict], revision: int, email: str = ""):
+    def __init__(self, terms: list[dict], people: list[dict], revision: int, email: str = "", *, owned: bool = False):
         self.revision = revision
-        self.entries = [dict(entry, source="dictionary") for entry in terms]
-        self.entries.extend({"term": person["name"], "aliases": [], "source": "ad",
+        self.entries = terms if owned else [dict(entry) for entry in terms]
+        for entry in self.entries:
+            entry.update(source="dictionary", description=entry.get("description", ""))
+        self.definition_loader = None
+        self.entries = self.entries + [{"term": person["name"], "aliases": [], "source": "ad",
                              "description": person.get("job_title", ""), "department": person.get("department", "")}
-                            for person in people)
+                            for person in people]
         self.department = next((normalize(p.get("department", "")) for p in people
-                                if p.get("email", "").casefold() == email.casefold()), "")
-        self.index: dict[str, set[int]] = defaultdict(set)
-        self.base_scores = {}
+                                if email and p.get("email", "").casefold() == email.casefold()), "")
+        self.index: dict[str, list[int]] = defaultdict(list)
         self.alias_targets: dict[str, set[str]] = defaultdict(set)
+        correction_phrases = {normalize(alias) for entry in terms for alias in entry.get("replacements", entry["aliases"])}
         for index, entry in enumerate(self.entries):
-            for phrase in [entry["term"], *entry["aliases"]]:
-                self.index[normalize(phrase)].add(index)
-                if entry["source"] == "dictionary":
-                    self.alias_targets[normalize(phrase)].add(entry["term"])
-            if entry["source"] == "dictionary":
-                department = normalize(entry["department"])
-                if department and department == self.department:
-                    self.base_scores[index] = 2
-                elif not department:
-                    self.base_scores[index] = 1
+            for phrase in [entry["term"], *entry["aliases"], *entry.get("replacements", [])]:
+                normalized = normalize(phrase)
+                if normalized == phrase: normalized = phrase
+                self.index[normalized].append(index)
+                if entry["source"] == "dictionary" and normalized in correction_phrases:
+                    self.alias_targets[normalized].add(entry["term"])
+        self.departments = {p.get("email", "").casefold(): normalize(p.get("department", "")) for p in people if p.get("email")}
+        groups = defaultdict(list)
+        for index, entry in enumerate(terms):
+            department = normalize(entry["department"])
+            if department or entry.get("glossary_id", "legacy") == "legacy":
+                groups[department].append(index)
+        self.defaults = {key: heapq.nsmallest(30, values, key=lambda i: self.entries[i]["term"])
+                         for key, values in groups.items()}
         # A surname only selects context when it identifies exactly one directory entry.
         surnames: dict[str, list[int]] = defaultdict(list)
         for index, person in enumerate(people, len(terms)):
@@ -469,20 +474,31 @@ class Context:
                 surnames[surname].append(index)
         for surname, indices in surnames.items():
             if len(indices) == 1:
-                self.index[surname].add(indices[0])
+                self.index[surname].append(indices[0])
         self.lengths = sorted({len(phrase.split()) for phrase in self.index if len(phrase.split()) <= 12})
 
     def select(self, text: str = "", limit: int = 30) -> list[dict]:
         words = normalize(text).split()
-        scores = dict(self.base_scores)
+        candidates = set(self.defaults.get("", [])) | set(self.defaults.get(self.department, []))
         matches = set()
         for length in self.lengths:
             for start in range(len(words) - length + 1):
                 matches.update(self.index.get(" ".join(words[start:start + length]), ()))
-        for index in matches:
-            scores[index] = scores.get(index, 0) + 10
-        ranked = heapq.nsmallest(limit, scores, key=lambda index: (-scores[index], self.entries[index]["term"]))
-        return [self.entries[index] for index in ranked]
+        candidates.update(matches)
+        def rank(index):
+            entry = self.entries[index]
+            department = normalize(entry["department"])
+            score = (10 if index in matches else 0) + (2 if department and department == self.department else 1 if not department and entry["source"] == "dictionary" else 0)
+            return -score, entry["term"], index
+        ranked = heapq.nsmallest(min(limit, 30), candidates, key=rank)
+        result = [dict(self.entries[index]) for index in ranked]
+        definitions = self.definition_loader([e["entry_id"] for e in result if "entry_id" in e]) if self.definition_loader else {}
+        budget = 12000
+        for entry in result:
+            description = definitions.get(entry.get("entry_id"), entry["description"])
+            entry["description"] = description[:min(1500, budget)]
+            budget -= len(entry["description"])
+        return result
 
     def hotwords(self, text: str = "") -> str:
         selected = self.select(text)
@@ -501,7 +517,7 @@ class Context:
         selected = self.select(text)
         replacements = {}
         for entry in selected:
-            for alias in entry["aliases"]:
+            for alias in entry.get("replacements", entry["aliases"]):
                 if len(self.alias_targets[normalize(alias)]) == 1 and normalize(alias) != normalize(entry["term"]):
                     replacements[alias.casefold()] = entry["term"]
         segments = [dict(segment) for segment in document.get("segments", [])]
@@ -518,10 +534,22 @@ class Context:
                 "corporate_context": {"revision": self.revision, "entries": selected}}
 
 
+_context_cache_lock = threading.Lock()
+_context_cache = None
+
+
 def for_meeting(meeting: dict) -> Context:
-    data = _read()
-    if not data["enabled"]:
-        return Context([], [], data["revision"])
-    people = data["people"] if data["use_ad"] and config.ldap_configured() and data.get("directory_signature") == directory_signature() else []
+    global _context_cache
+    key = (str(store.DB_PATH), store.get_app_setting("corporate_context_version"), glossary.revision(), directory_signature())
+    with _context_cache_lock:
+        if _context_cache is None or _context_cache[0] != key:
+            data = _read()
+            version, terms = glossary.compact_entries() if data["enabled"] else (key[2], [])
+            people = data["people"] if data["enabled"] and data["use_ad"] and config.ldap_configured() and data.get("directory_signature") == key[3] else []
+            base = Context(terms if data["enabled"] else [], people, data["revision"] + version, owned=True)
+            base.definition_loader = glossary.definitions
+            _context_cache = (key, base)
+        context = copy.copy(_context_cache[1])
     user = store.get_user(meeting["user_id"]) if meeting.get("user_id") else None
-    return Context(data["terms"], people, data["revision"], (user or {}).get("email", ""))
+    context.department = context.departments.get((user or {}).get("email", "").casefold(), "")
+    return context

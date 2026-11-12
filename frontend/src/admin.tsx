@@ -700,7 +700,7 @@ function LdapPanel({ health, onChange }: { health: Health | null; onChange: (hea
 }
 
 function adminHeading(tab: AdminTab): { title: string; lead: string } {
-  if (tab === "context") return { title: "Корпоративный контекст", lead: "Общий словарь и сотрудники AD для автоматического подбора подсказок к записям." };
+  if (tab === "context") return { title: "Корпоративный контекст", lead: "Корпоративные глоссарии и сотрудники AD для автоматического подбора подсказок к записям." };
   if (tab === "monitoring") return { title: "Мониторинг", lead: "Текущая обработка встреч и нагрузка на MoM." };
   if (tab === "prompts") return { title: "Промпты и проверка имён", lead: "Инструкции, которые получает LLM при обработке встреч." };
   if (tab === "llm") {

@@ -1796,3 +1796,28 @@ select.title-input {
 .directory-sync-status { margin-block: 1rem; }
 .directory-sync-status progress { width: 100%; height: .65rem; accent-color: var(--accent); }
 .directory-sync-status p { margin-block: .5rem; }
+
+.glossary-heading { display:flex; justify-content:space-between; align-items:start; gap:16px; }
+.glossary-heading h2 { margin-top:0; }
+.glossary-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; margin:20px 0; }
+.glossary-card { border:1px solid var(--line); border-radius:10px; padding:16px; background:var(--stage); }
+.glossary-card p { margin:8px 0; }
+.glossary-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:14px; margin:16px 0; }
+.glossary-fields label { display:grid; gap:7px; align-content:start; }
+.glossary-fields input,.glossary-fields select { min-width:0; width:100%; box-sizing:border-box; font:inherit; color:var(--text); background:var(--stage); border:1px solid var(--line); border-radius:6px; padding:10px; }
+.glossary-import { border-top:1px solid var(--line); border-bottom:1px solid var(--line); margin:20px 0; padding:12px 0 24px; }
+.glossary-note { color:var(--muted); }
+.glossary-import details { margin:16px 0; }
+.glossary-job { border-left:3px solid var(--line); padding:10px 14px; margin:10px 0; }
+.glossary-job progress { display:block; width:100%; max-width:380px; margin:8px 0; accent-color:var(--accent); }
+.glossary-panel small { display:block; color:var(--muted); margin-top:6px; }
+.glossary-panel td { vertical-align:top; }
+.glossary-pages { align-items:center; margin-top:16px; }
+.glossary-searching { animation:glossary-pulse 1.2s ease-in-out infinite; }
+@keyframes glossary-pulse { 50% { opacity:.45; } }
+@media(prefers-reduced-motion:reduce) { .glossary-searching { animation:none; } }
+@media(max-width:600px) { .glossary-heading { flex-direction:column; } }
+.glossary-panel .context-table th { white-space:nowrap; }
+.glossary-panel .context-table td:first-child { min-width:120px; }
+.glossary-panel .context-table td:nth-child(n+3) { min-width:100px; }
+.glossary-panel .context-table td:nth-child(2) { min-width:240px; }

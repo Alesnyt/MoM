@@ -574,3 +574,40 @@ export async function browseDirectory(baseDn = "", cursor = ""): Promise<Directo
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }
+
+export type GlossaryMapping = Partial<Record<'term' | 'aliases' | 'replacements' | 'description' | 'department', string>>;
+export type Glossary = {id: string; name: string; enabled: boolean; version: number; term_count: number;
+  mapping: GlossaryMapping; sheet: string; filename: string; updated_at: string | null};
+export type GlossaryJob = {id: string; glossary_id: string; filename: string; status: 'queued'|'running'|'succeeded'|'error';
+  received: number; error: string | null; finished_at: string | null};
+export type GlossaryCatalog = {glossaries: Glossary[]; terms: (CorporateTerm & {id: number; replacements: string[];
+  glossary_name: string; enabled: boolean})[]; term_count: number; active_term_count: number; matched_terms: number;
+  revision: number; jobs: GlossaryJob[]};
+export type GlossaryPreview = {upload_id: string; columns: string[]; sample: string[][]; mapping: GlossaryMapping;
+  sheets: string[]; sheet: string; name: string};
+
+export async function getGlossaries(query = '', glossaryId = '', offset = 0, signal?: AbortSignal): Promise<GlossaryCatalog> {
+  const response = await fetch(`/api/admin/glossaries?q=${encodeURIComponent(query)}&glossary_id=${encodeURIComponent(glossaryId)}&offset=${offset}`, {credentials:'include',signal});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+export async function previewGlossary(file: File, glossaryId: string, sheet: string): Promise<GlossaryPreview> {
+  const body = new FormData(); body.append('file',file); body.append('glossary_id',glossaryId); body.append('sheet',sheet);
+  const response = await fetch('/api/admin/glossaries/preview', {method:'POST',credentials:'include',body});
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+export async function discardGlossaryPreview(id: string): Promise<void> {
+  const response = await fetch(`/api/admin/glossaries/preview/${encodeURIComponent(id)}`, {method:'DELETE',credentials:'include'});
+  if (!response.ok) throw new Error(await parseError(response));
+}
+export async function queueGlossary(preview: GlossaryPreview, name: string, mapping: GlossaryMapping): Promise<void> {
+  const response = await fetch('/api/admin/glossaries/import', {method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:preview.upload_id,name,mapping,sheet:preview.sheet})});
+  if (!response.ok) throw new Error(await parseError(response));
+}
+export async function enableGlossary(id: string, enabled: boolean): Promise<void> {
+  const response = await fetch(`/api/admin/glossaries/${encodeURIComponent(id)}/enabled`,{method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
+  if (!response.ok) throw new Error(await parseError(response));
+}

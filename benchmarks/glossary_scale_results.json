@@ -1,0 +1,113 @@
+[
+  {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "cpu": "arm64",
+    "terms": 10000,
+    "csv_mb": 1.9,
+    "import_seconds": 1.17,
+    "search": {
+      "median_ms": 3.04,
+      "p95_ms": 5.13,
+      "max_ms": 9.7
+    },
+    "four_readers": {
+      "median_ms": 6.04,
+      "p95_ms": 11.22,
+      "max_ms": 14.51
+    },
+    "four_readers_during_import": {
+      "median_ms": 21.68,
+      "p95_ms": 32.56,
+      "max_ms": 35.87
+    },
+    "cold_context_ms": 91.7,
+    "warm_context": {
+      "median_ms": 11.54,
+      "p95_ms": 13.05,
+      "max_ms": 16.62
+    },
+    "select_1000_turns": {
+      "median_ms": 6.83,
+      "p95_ms": 7.51,
+      "max_ms": 8.6
+    },
+    "rss_start_mb": 33.8,
+    "rss_peak_mb": 94.9,
+    "rss_end_mb": 94.8,
+    "database_mb": 21.6
+  },
+  {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "cpu": "arm64",
+    "terms": 50000,
+    "csv_mb": 9.5,
+    "import_seconds": 7.17,
+    "search": {
+      "median_ms": 3.41,
+      "p95_ms": 5.41,
+      "max_ms": 33.72
+    },
+    "four_readers": {
+      "median_ms": 5.62,
+      "p95_ms": 12.92,
+      "max_ms": 15.42
+    },
+    "four_readers_during_import": {
+      "median_ms": 54.23,
+      "p95_ms": 73.58,
+      "max_ms": 80.34
+    },
+    "cold_context_ms": 422.74,
+    "warm_context": {
+      "median_ms": 11.79,
+      "p95_ms": 14.72,
+      "max_ms": 23.3
+    },
+    "select_1000_turns": {
+      "median_ms": 7.23,
+      "p95_ms": 8.12,
+      "max_ms": 10.05
+    },
+    "rss_start_mb": 33.4,
+    "rss_peak_mb": 264.3,
+    "rss_end_mb": 264.1,
+    "database_mb": 107.5
+  },
+  {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "cpu": "arm64",
+    "terms": 100000,
+    "csv_mb": 19.0,
+    "import_seconds": 17.31,
+    "search": {
+      "median_ms": 3.28,
+      "p95_ms": 9.43,
+      "max_ms": 68.45
+    },
+    "four_readers": {
+      "median_ms": 5.97,
+      "p95_ms": 11.86,
+      "max_ms": 13.73
+    },
+    "four_readers_during_import": {
+      "median_ms": 107.02,
+      "p95_ms": 124.35,
+      "max_ms": 129.6
+    },
+    "cold_context_ms": 889.1,
+    "warm_context": {
+      "median_ms": 9.97,
+      "p95_ms": 11.67,
+      "max_ms": 13.12
+    },
+    "select_1000_turns": {
+      "median_ms": 6.79,
+      "p95_ms": 7.77,
+      "max_ms": 8.89
+    },
+    "rss_start_mb": 35.7,
+    "rss_peak_mb": 465.1,
+    "rss_end_mb": 432.1,
+    "database_mb": 213.9
+  }
+]

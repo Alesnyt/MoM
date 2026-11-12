@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
-from . import transcript_import, upload, corporate_context
+from . import transcript_import, upload, corporate_context, glossary
 from . import word_protocol
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
@@ -58,6 +58,17 @@ class ContextSettingsIn(BaseModel):
     use_ad: bool | None = None
     sync_ad: bool | None = None  # Backwards compatibility for already-open admin tabs.
     sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+class GlossaryImportIn(BaseModel):
+    upload_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    mapping: dict[str, str] = Field(max_length=5)
+    sheet: str = Field(default="", max_length=120)
+
+
+class GlossaryEnabledIn(BaseModel):
+    enabled: bool
 
 
 class DirectorySettingsIn(BaseModel):
@@ -448,6 +459,49 @@ async def import_context(request: Request, admin: dict = Depends(require_admin))
             return await asyncio.to_thread(corporate_context.import_dictionary, file.filename or "", content, admin["username"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/glossaries")
+def get_glossaries(q: str = Query(default="", max_length=200), glossary_id: str = Query(default="", max_length=64),
+                   offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)) -> dict:
+    return glossary.catalog(q, glossary_id, offset)
+
+
+@app.post("/api/admin/glossaries/preview")
+async def preview_glossary(request: Request, admin: dict = Depends(require_admin)) -> dict:
+    async with request.form(max_files=1, max_fields=2, max_part_size=glossary.MAX_FILE_BYTES) as form:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(status_code=400, detail="Выберите Excel или CSV")
+        content = await file.read(glossary.MAX_FILE_BYTES + 1)
+        try:
+            return await asyncio.to_thread(glossary.preview, file.filename or "", content, admin["username"],
+                                           glossary_id=str(form.get("glossary_id") or ""), sheet=str(form.get("sheet") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/admin/glossaries/preview/{upload_id}")
+def discard_glossary_preview(upload_id: str, _admin: dict = Depends(require_admin)) -> dict:
+    with store.connect() as conn:
+        conn.execute("DELETE FROM glossary_imports WHERE id=? AND status='preview'", (upload_id,))
+    return {"ok": True}
+
+
+@app.post("/api/admin/glossaries/import", status_code=202)
+def import_glossary(payload: GlossaryImportIn, admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return glossary.queue_import(payload.upload_id, payload.name, payload.mapping, payload.sheet, admin["username"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/glossaries/{glossary_id}/enabled")
+def enable_glossary(glossary_id: str, payload: GlossaryEnabledIn, admin: dict = Depends(require_admin)) -> dict:
+    try:
+        return glossary.set_enabled(glossary_id, payload.enabled, admin["username"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/auth/status")
