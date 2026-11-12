@@ -198,3 +198,19 @@ def test_gigaam_full_recording_uses_actual_duration_and_keeps_tail(tmp_path, mon
     assert [(s["start"], s["end"]) for s in result["segments"]] == [(0, 24), (24, 48), (48, 49)]
     assert [t.numel() for t in model.inputs] == [24 * 16000, 24 * 16000, 16000]
     assert list(tmp_path.iterdir()) == [src]
+
+
+def test_short_gigaam_reply_preserves_samples_and_timestamp_without_neighbour_speech(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    src = tmp_path / "short-reply.wav"
+    # Neighbours have a different amplitude; they must never enter the reply.
+    write_wav(src, b"\xff\x7f" * 16000 + b"\x00\x40" * 3200 + b"\xff\x7f" * 16000)
+    model = RecordingModel(torch)
+    monkeypatch.setattr(gigaam_asr, "_load", lambda *a: model)
+    result = gigaam_asr.transcribe_spans(src, [{"start": 1.0, "end": 1.2}])
+    assert result['segments'] == [{'start':1.0, 'end':1.2, 'text':'реплика 1'}]
+    signal = model.inputs[0][0]
+    assert signal.numel() == 7200
+    assert torch.count_nonzero(signal).item() == 3200
+    torch.testing.assert_close(signal[2000:5200], torch.full((3200,), .5))
+    assert signal[:2000].eq(0).all() and signal[5200:].eq(0).all()

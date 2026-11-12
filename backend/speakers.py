@@ -25,7 +25,7 @@ def speaker_spans(turns: list[dict[str, Any]], *, max_seconds: float = 20.0) -> 
     cleaned.sort(key=lambda item: (item["start"], item["end"]))
     merged: list[dict[str, Any]] = []
     for turn in cleaned:
-        if turn["end"] - turn["start"] < MIN_SLICE_SECONDS:
+        if turn["end"] <= turn["start"]:
             continue
         if (
             merged
@@ -36,15 +36,14 @@ def speaker_spans(turns: list[dict[str, Any]], *, max_seconds: float = 20.0) -> 
         else:
             merged.append(dict(turn))
     spans: list[dict[str, float]] = []
-    step = max(MIN_SLICE_SECONDS, float(max_seconds))
+    step = min(24.5, max(MIN_SLICE_SECONDS, float(max_seconds)))
     for turn in merged:
         cursor = float(turn["start"])
         end = float(turn["end"])
         made = False
         while cursor < end:
-            if end - cursor < MIN_SLICE_SECONDS:
-                if made:
-                    spans[-1]["end"] = end
+            if made and end - cursor < MIN_SLICE_SECONDS:
+                spans[-1]["end"] = end
                 break
             stop = min(end, cursor + step)
             spans.append({"start": cursor, "end": stop})
@@ -69,7 +68,7 @@ def plan_cuts(segment: dict[str, Any], turns: list[dict[str, Any]]) -> list[dict
             continue
         left = max(start, float(turn.get("start") or 0))
         right = min(end, float(turn.get("end") or 0))
-        if right - left < MIN_SLICE_SECONDS:
+        if right <= left:
             continue
         slices.append({"start": left, "end": right, "speaker": str(turn["speaker"])})
     slices.sort(key=lambda item: (item["start"], item["end"]))
@@ -149,6 +148,9 @@ def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]])
         ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
         if not clean_turns:
             best_id = fallback
+        elif (len(ranked) == 1 and 0 < segment["end"] - segment["start"] < MIN_SLICE_SECONDS
+              and ranked[0][1] >= (segment["end"] - segment["start"]) * 0.8):
+            best_id = ranked[0][0]
         elif not ranked or ranked[0][1] < MIN_SLICE_SECONDS:
             best_id = UNKNOWN_ID
         elif len(ranked) == 1 or ranked[1][1] < MIN_SLICE_SECONDS or ranked[0][1] >= ranked[1][1] * 1.8:

@@ -7,6 +7,10 @@ import errno
 import ipaddress
 import tempfile
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from functools import wraps
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", interpolate=False)
@@ -26,6 +30,62 @@ ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
 SETUP_TOKEN = os.getenv("SETUP_TOKEN", "").strip()
 UI_THEME = os.getenv("UI_THEME", "classic").strip().lower()
 UI_THEMES = ("classic", "t2")
+
+
+_runtime_lock = threading.RLock()
+
+
+class SettingsSaveError(OSError):
+    """Persistence failed; the running configuration has not changed."""
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _runtime_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _commit_settings(runtime: dict) -> None:
+    payload = {key: ("1" if value else "0") if isinstance(value, bool) else str(value)
+               for key, value in runtime.items()}
+    with _runtime_lock:
+        try:
+            _upsert_env(payload)
+        except OSError as exc:
+            raise SettingsSaveError("Не удалось записать настройки") from exc
+        globals().update(runtime)
+        os.environ.update(payload)
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    api_key: str = field(repr=False)
+    base_url: str
+    chat_model: str
+    asr_model: str
+    provider: str
+    token_plan: bool
+    whisper_size: str
+
+
+_model_settings: ContextVar[ModelSettings | None] = ContextVar("model_settings", default=None)
+
+
+@contextmanager
+def model_settings_scope():
+    # ContextVars are inherited by asyncio tasks and asyncio.to_thread workers.
+    # Capture the resolved defaults too, so later configuration saves cannot
+    # change the model, provider options or endpoint halfway through a meeting.
+    with _runtime_lock:
+        snapshot = ModelSettings(get_api_key(), get_base_url(), get_chat_model(), get_asr_model(),
+                                 detect_provider(), is_token_plan(), local_whisper_size())
+    token = _model_settings.set(snapshot)
+    try:
+        yield snapshot
+    finally:
+        _model_settings.reset(token)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -181,12 +241,14 @@ def is_cloud_base(url: str) -> bool:
 
 
 def is_private_base(url: str | None = None) -> bool:
-    base = OPENAI_BASE_URL if url is None else url
+    base = get_base_url() if url is None else url
     base = (base or "").strip()
     return bool(base) and not is_cloud_base(base)
 
 
 def detect_provider(key: str | None = None) -> str:
+    if key is None and (snapshot := _model_settings.get()) is not None:
+        return snapshot.provider
     secret = (key if key is not None else OPENAI_API_KEY).strip()
     if secret.startswith(("sk-ws-", "sk-sp-")):
         return "qwen"
@@ -255,6 +317,8 @@ def default_base_url(key: str) -> str:
 
 
 def is_token_plan() -> bool:
+    if (snapshot := _model_settings.get()) is not None:
+        return snapshot.token_plan
     return OPENAI_API_KEY.startswith("sk-sp-") or "token-plan" in (OPENAI_BASE_URL or "")
 
 
@@ -305,6 +369,8 @@ def is_local_asr(model: str | None = None) -> bool:
 
 
 def local_whisper_size(model: str | None = None) -> str:
+    if model is None and (snapshot := _model_settings.get()) is not None:
+        return snapshot.whisper_size
     current = _asr_name(model)
     size = ""
     if current.startswith("local-whisper-"):
@@ -361,20 +427,28 @@ def get_hf_token() -> str:
 
 
 def get_api_key() -> str:
+    if (snapshot := _model_settings.get()) is not None:
+        return snapshot.api_key
     return OPENAI_API_KEY
 
 
 def get_base_url() -> str:
+    if (snapshot := _model_settings.get()) is not None:
+        return snapshot.base_url
     return OPENAI_BASE_URL or default_base_url(OPENAI_API_KEY)
 
 
 def get_chat_model() -> str:
+    if (snapshot := _model_settings.get()) is not None:
+        return snapshot.chat_model
     if OPENAI_MODEL:
         return OPENAI_MODEL
     return default_chat_model()
 
 
 def get_asr_model() -> str:
+    if (snapshot := _model_settings.get()) is not None:
+        return snapshot.asr_model
     if WHISPER_MODEL:
         return WHISPER_MODEL
     return default_asr_model()
@@ -421,6 +495,7 @@ def _upsert_env(values: dict[str, str]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+@_serialized
 def set_runtime(key: str, base_url: str = "", chat_model: str = "", asr_model: str = "") -> None:
     global OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, WHISPER_MODEL
     OPENAI_API_KEY = key
@@ -440,6 +515,7 @@ def set_runtime(key: str, base_url: str = "", chat_model: str = "", asr_model: s
         os.environ["WHISPER_MODEL"] = WHISPER_MODEL
 
 
+@_serialized
 def set_openai_api_key(key: str) -> None:
     key = key.strip()
     payload = {"OPENAI_API_KEY": key}
@@ -476,34 +552,17 @@ def set_openai_api_key(key: str) -> None:
             payload["OPENAI_MODEL"] = "gpt-4o"
         if (WHISPER_MODEL or "").startswith("qwen"):
             payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
-    set_runtime(
-        key,
-        payload.get("OPENAI_BASE_URL", OPENAI_BASE_URL),
-        payload.get("OPENAI_MODEL", OPENAI_MODEL),
-        payload.get("WHISPER_MODEL", WHISPER_MODEL),
-    )
-    _upsert_env(payload)
+    _commit_settings(payload)
 
 
+@_serialized
 def apply_connection(base_url: str, chat_model: str, asr_model: str) -> None:
-    global OPENAI_BASE_URL, OPENAI_MODEL, WHISPER_MODEL
-    OPENAI_BASE_URL = base_url
-    OPENAI_MODEL = chat_model
-    WHISPER_MODEL = asr_model
-    os.environ["OPENAI_BASE_URL"] = base_url
-    os.environ["OPENAI_MODEL"] = chat_model
-    os.environ["WHISPER_MODEL"] = asr_model
     payload = {
-        "OPENAI_API_KEY": OPENAI_API_KEY,
-        "OPENAI_BASE_URL": base_url,
-        "OPENAI_MODEL": chat_model,
-        "WHISPER_MODEL": asr_model,
+        "OPENAI_BASE_URL": base_url, "OPENAI_MODEL": chat_model, "WHISPER_MODEL": asr_model,
     }
     if is_whisper_asr(asr_model):
-        size = local_whisper_size(asr_model)
-        os.environ["LOCAL_WHISPER_SIZE"] = size
-        payload["LOCAL_WHISPER_SIZE"] = size
-    _upsert_env(payload)
+        payload["LOCAL_WHISPER_SIZE"] = local_whisper_size(asr_model)
+    _commit_settings(payload)
 
 
 def clear_openai_api_key() -> None:
@@ -527,12 +586,7 @@ def get_admin_password_hash() -> str:
 
 
 def set_admin_credentials(username: str, password_hash: str) -> None:
-    global ADMIN_USER, ADMIN_PASSWORD_HASH
-    ADMIN_USER = username.strip()
-    ADMIN_PASSWORD_HASH = password_hash.strip()
-    os.environ["ADMIN_USER"] = ADMIN_USER
-    os.environ["ADMIN_PASSWORD_HASH"] = ADMIN_PASSWORD_HASH
-    _upsert_env({"ADMIN_USER": ADMIN_USER, "ADMIN_PASSWORD_HASH": ADMIN_PASSWORD_HASH})
+    _commit_settings({"ADMIN_USER": username.strip(), "ADMIN_PASSWORD_HASH": password_hash.strip()})
 
 
 def get_ui_theme() -> str:
@@ -541,13 +595,10 @@ def get_ui_theme() -> str:
 
 
 def set_ui_theme(theme: str) -> str:
-    global UI_THEME
     name = (theme or "classic").strip().lower()
     if name not in UI_THEMES:
         raise ValueError("Неизвестная тема")
-    UI_THEME = name
-    os.environ["UI_THEME"] = name
-    _upsert_env({"UI_THEME": name})
+    _commit_settings({"UI_THEME": name})
     return name
 
 
@@ -556,11 +607,9 @@ def get_max_jobs() -> int:
 
 
 def set_max_jobs(value: int) -> int:
-    global MAX_JOBS
-    MAX_JOBS = max(1, min(MAX_JOBS_LIMIT, int(value)))
-    os.environ["MAX_JOBS"] = str(MAX_JOBS)
-    _upsert_env({"MAX_JOBS": str(MAX_JOBS)})
-    return MAX_JOBS
+    bounded = max(1, min(MAX_JOBS_LIMIT, int(value)))
+    _commit_settings({"MAX_JOBS": bounded})
+    return bounded
 
 
 def get_public_base_url() -> str:
@@ -568,11 +617,9 @@ def get_public_base_url() -> str:
 
 
 def set_public_base_url(url: str) -> str:
-    global PUBLIC_BASE_URL
-    PUBLIC_BASE_URL = url.strip().rstrip("/")
-    os.environ["PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
-    _upsert_env({"PUBLIC_BASE_URL": PUBLIC_BASE_URL})
-    return PUBLIC_BASE_URL
+    cleaned = url.strip().rstrip("/")
+    _commit_settings({"PUBLIC_BASE_URL": cleaned})
+    return cleaned
 
 
 def get_smtp_host() -> str:
@@ -611,30 +658,17 @@ def set_smtp(
     password: str,
     from_addr: str,
     starttls: bool,
+    public_url: str | None = None,
 ) -> None:
-    global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, SMTP_STARTTLS
-    SMTP_HOST = host.strip()
-    SMTP_PORT = max(1, min(65535, int(port)))
-    SMTP_USER = user.strip()
-    SMTP_FROM = from_addr.strip()
-    SMTP_STARTTLS = bool(starttls)
-    os.environ["SMTP_HOST"] = SMTP_HOST
-    os.environ["SMTP_PORT"] = str(SMTP_PORT)
-    os.environ["SMTP_USER"] = SMTP_USER
-    os.environ["SMTP_FROM"] = SMTP_FROM
-    os.environ["SMTP_STARTTLS"] = "1" if SMTP_STARTTLS else "0"
     payload = {
-        "SMTP_HOST": SMTP_HOST,
-        "SMTP_PORT": str(SMTP_PORT),
-        "SMTP_USER": SMTP_USER,
-        "SMTP_FROM": SMTP_FROM,
-        "SMTP_STARTTLS": "1" if SMTP_STARTTLS else "0",
+        "SMTP_HOST": host.strip(), "SMTP_PORT": max(1, min(65535, int(port))),
+        "SMTP_USER": user.strip(), "SMTP_FROM": from_addr.strip(), "SMTP_STARTTLS": bool(starttls),
     }
     if password:
-        SMTP_PASSWORD = password
-        os.environ["SMTP_PASSWORD"] = SMTP_PASSWORD
-        payload["SMTP_PASSWORD"] = SMTP_PASSWORD
-    _upsert_env(payload)
+        payload["SMTP_PASSWORD"] = password
+    if public_url is not None:
+        payload["PUBLIC_BASE_URL"] = public_url.strip().rstrip("/")
+    _commit_settings(payload)
 
 
 def ldap_enabled() -> bool:
@@ -705,9 +739,5 @@ def set_ldap(
     }
     if bind_password:
         runtime["LDAP_BIND_PASSWORD"] = bind_password
-    payload = {key: ("1" if value else "0") if isinstance(value, bool) else value
-               for key, value in runtime.items()}
     with _ldap_settings_lock:
-        _upsert_env(payload)
-        globals().update(runtime)
-        os.environ.update(payload)
+        _commit_settings(runtime)

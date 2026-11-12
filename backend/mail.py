@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 import subprocess
 import sys
 import time
@@ -183,12 +184,12 @@ def send_mail(
     try:
         try:
             if port == 465:
-                client = smtplib.SMTP_SSL(host, port, timeout=20)
+                client = smtplib.SMTP_SSL(host, port, timeout=20, context=ssl.create_default_context())
             else:
                 client = smtplib.SMTP(host, port, timeout=20)
                 if config.get_smtp_starttls():
                     client.ehlo()
-                    client.starttls()
+                    client.starttls(context=ssl.create_default_context())
                     client.ehlo()
             if user:
                 client.login(user, password)

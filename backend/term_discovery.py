@@ -105,7 +105,7 @@ def original_parts(raw: str | None) -> tuple[str, list[dict]]:
     doc = json.loads(raw or '{}')
     parts = []
     for turn, segment in enumerate(doc.get('segments') or []):
-        text = segment.get('context_original_text', segment.get('text', ''))
+        text = segment.get('context_original_text', segment.get('original_text', segment.get('text', '')))
         # Bound each part while retaining its original turn/time reference.
         for match in re.finditer(r'.{1,1200}(?:\s|$)|\S{1,1200}', text, re.S):
             parts.append(dict(id=len(parts), turn=turn, text=match[0], start=segment.get('start'), end=segment.get('end')))

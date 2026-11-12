@@ -62,7 +62,7 @@ def test_speaker_spans_follow_one_voice_and_stay_short() -> None:
     assert speaker_spans([{"start": 0.0, "end": 20.3, "speaker": "A"}]) == [
         {"start": 0.0, "end": 20.3}
     ]
-    assert speaker_spans([{"start": 0.0, "end": 0.2, "speaker": "A"}]) == []
+    assert speaker_spans([{"start": 0.0, "end": 0.2, "speaker": "A"}]) == [{"start": 0.0, "end": 0.2}]
 
 
 def test_short_phrase_stays_whole() -> None:

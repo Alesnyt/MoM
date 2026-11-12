@@ -4,7 +4,7 @@ import re
 import unicodedata
 
 
-def _key(text: str) -> str:
+def text_key(text: str) -> str:
     text = unicodedata.normalize("NFC", text).strip()
     text = re.sub(r"^(?:[•*–—-]\s+|\d+[.)]\s+)", "", text)
     return " ".join(text.rstrip(".!").casefold().split())
@@ -16,7 +16,7 @@ def _unique_lines(items: list, seen: set[str]) -> list:
         if not isinstance(item, str):
             lines.append(item)  # Legacy malformed fields still go through validation.
             continue
-        key = _key(item)
+        key = text_key(item)
         if key and key not in seen:
             seen.add(key)
             lines.append(item.strip())
@@ -38,7 +38,7 @@ def deduplicate(result: dict) -> dict:
             if (assignee is not None and not isinstance(assignee, str)) or (due is not None and not isinstance(due, str)):
                 unique.append(item)
                 continue
-            signature = (_key(item["task"]), _key(assignee or ""), _key(due or ""))
+            signature = (text_key(item["task"]), text_key(assignee or ""), text_key(due or ""))
             if signature not in action_keys:
                 action_keys.add(signature)
                 unique.append(item)

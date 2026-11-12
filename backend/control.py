@@ -57,9 +57,6 @@ def finish(meeting_id: str) -> str:
     stopped = meeting_id in _stop or meeting_id in _sealed
     if not stopped and not restart:
         return ""
-    _applied.add(meeting_id)
-    _stop.discard(meeting_id)
-    _restart.discard(meeting_id)
     if restart:
         meeting = store.get_meeting(meeting_id) or {}
         keep = meeting.get("source_type") == "text"
@@ -74,11 +71,14 @@ def finish(meeting_id: str) -> str:
             progress=88 if keep else 0,
             queued_at=store.utc_now(),
         )
-        store.refresh_queue_messages()
+        _applied.add(meeting_id)
+        _stop.discard(meeting_id)
+        _restart.discard(meeting_id)
         # Queued jobs have no running task to release their cancellation flags.
         # Active jobs are cleaned up in worker._run_job.finally.
         if meeting_id not in _jobs:
             release(meeting_id)
+        store.refresh_queue_messages()
         return "restart"
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting.get("status") != "done":
@@ -89,6 +89,9 @@ def finish(meeting_id: str) -> str:
             error="Обработка остановлена",
             progress=0,
         )
+    _applied.add(meeting_id)
+    _stop.discard(meeting_id)
+    _restart.discard(meeting_id)
     if meeting_id not in _jobs:
         release(meeting_id)
     return "stop"

@@ -660,6 +660,19 @@ def create_user(
     return _serialize_user(row, 0)
 
 
+def search_user_emails(query: str, limit: int = 40) -> list[dict[str, str]]:
+    """Bounded suggestions without loading accounts or counting their meetings."""
+    needle = query.strip().lower()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT email FROM users WHERE instr(lower(email), ?) > 0 OR ? = '' "
+            "ORDER BY CASE WHEN lower(email) = ? THEN 0 "
+            "WHEN instr(lower(email), ?) = 1 THEN 1 ELSE 2 END, lower(email) LIMIT ?",
+            (needle, needle, needle, needle, max(1, min(40, limit))),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_users() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
