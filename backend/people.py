@@ -10,7 +10,7 @@ def suggest(query: str = "") -> dict:
     people: list[dict[str, str]] = []
     by_email: dict[str, dict[str, str]] = {}
     error = None
-    for user in store.list_users():
+    for user in store.search_user_emails(needle):
         email = (user.get("email") or "").strip()
         if not email:
             continue
@@ -40,6 +40,15 @@ def suggest(query: str = "") -> dict:
             people.append(item)
             if key:
                 by_email[key] = people[-1]
+    folded = needle.casefold()
+
+    def rank(person):
+        values = (person["name"].casefold(), person["email"].casefold())
+        relevance = 0 if folded in values else 1 if any(v.startswith(folded) for v in values) else 2
+        # A directory name is more useful than an email-only account fallback.
+        return (person["source"] != "ldap", relevance, *values)
+
+    people.sort(key=rank)
     return {"people": people[:40], "ldap": config.ldap_configured(), "search_mode": mode,
             **({"error": error} if error else {})}
 

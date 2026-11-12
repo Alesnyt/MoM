@@ -16,7 +16,7 @@ from .analyze import (
     merge_transcripts,
     transcribe_file,
 )
-from . import config, corporate_context
+from . import prompts, config, corporate_context
 from .audio import AudioError, extract_audio_async, extract_wav, format_duration, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import complete_protocol
@@ -117,7 +117,7 @@ def has_saved_transcript(meeting: dict) -> bool:
 
 
 async def process_meeting(meeting_id: str) -> None:
-    with meeting_scope(meeting_id):
+    with meeting_scope(meeting_id), config.model_settings_scope(), prompts.settings_scope():
         started = time.perf_counter()
         try:
             await _process_meeting(meeting_id)
@@ -351,6 +351,13 @@ async def _process_meeting(meeting_id: str) -> None:
             error=public_error(exc),
         )
     finally:
+        # Close the per-meeting HTTP connection pool on success, error and stop.
+        close = getattr(client, "close", None)
+        try:
+            if close is not None:
+                await close()
+        except Exception:
+            log.warning("Не удалось закрыть клиент LLM", exc_info=True)
         if local_audio and not resume:
             try:
                 audio_path.unlink(missing_ok=True)

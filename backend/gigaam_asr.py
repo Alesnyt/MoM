@@ -190,7 +190,7 @@ def transcribe_gigaam_sync(
 
 def transcribe_span(src: Path, start: float, end: float) -> str:
     """Legacy single-span entry point, without a temporary file per utterance."""
-    if end - start < 0.3:
+    if end <= start:
         return ""
     model = _load()
     with open_pcm_audio(src) as audio:
@@ -242,6 +242,13 @@ def _transcribe_pcm(model: Any, frames: bytes) -> str:
         return ""
     if len(frames) % 2 or len(frames) // 2 > 25 * 16000:
         raise ValueError("GigaAM ожидает PCM16-фрагмент не длиннее 25 секунд")
+    # Preserve short answers. Silence padding satisfies the model's minimum
+    # acoustic window without leaking speech from a neighbouring speaker.
+    minimum_bytes = int(0.45 * 16000) * 2
+    if len(frames) < minimum_bytes:
+        missing = (minimum_bytes - len(frames)) // 2
+        left = missing // 2 * 2
+        frames = b"\x00" * left + frames + b"\x00" * (minimum_bytes - len(frames) - left)
     import torch
 
     inner = model.model

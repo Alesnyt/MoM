@@ -6,11 +6,19 @@ import zipfile
 from xml.sax.saxutils import escape
 
 
+def _csv_cell(value: str) -> str:
+    # Spreadsheet apps interpret these prefixes even in quoted CSV cells.
+    text = str(value)
+    if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
+        return "'" + text
+    return text
+
+
 def csv_bytes(headers: list[str], rows: list[list[str]]) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(headers)
-    writer.writerows(rows)
+    writer.writerow([_csv_cell(cell) for cell in headers])
+    writer.writerows([_csv_cell(cell) for cell in row] for row in rows)
     return buffer.getvalue().encode("utf-8-sig")
 
 

@@ -228,7 +228,7 @@ def test_people_lookup_reports_missing_cache_without_hiding_saved_users(db, monk
     from backend import people
     # Previously selected cache may become unavailable after a scope change.
     store.set_app_setting("ldap_speaker_search", {"mode": "cache"})
-    monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
+    monkeypatch.setattr(store, "search_user_emails", lambda query: [{"email": "anna@example.com"}])
     def unavailable(_query):
         pytest.fail("Speaker lookup must never call LDAP")
     monkeypatch.setattr(ldap_auth, "search_people", unavailable)
@@ -246,7 +246,7 @@ def test_cached_directory_partial_search_survives_outage_and_refreshes(db, monke
     monkeypatch.setattr(ldap_auth, "search_people", lambda *args: pytest.fail("No LDAP in speaker lookup"))
     cc._update(people=roster, directory_signature=cc.directory_signature(), synced_at=store.utc_now(), sync_error="server offline")
     cc.save_search_mode("cache", "admin")
-    monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
+    monkeypatch.setattr(store, "search_user_emails", lambda query: [{"email": "anna@example.com"}])
     assert people.suggest("anna")["people"] == [dict(roster[0], source="ldap")]
     assert cc.search_people("семено АН")[0] == [roster[0]]
     assert len(cc.search_people("сем")[0]) == 2
@@ -289,7 +289,7 @@ def test_speaker_search_defaults_to_live_and_can_switch_without_rebuilding_cache
 
 def test_live_outage_does_not_silently_switch_to_cache_or_expose_diagnostics(db, monkeypatch):
     from backend import people
-    monkeypatch.setattr(store, "list_users", lambda: [{"email": "anna@example.com"}])
+    monkeypatch.setattr(store, "search_user_emails", lambda query: [{"email": "anna@example.com"}])
     cc._update(people=[{"name": "Анна", "email": "anna@example.com"}],
                directory_signature=cc.directory_signature(), synced_at=store.utc_now())
     def unavailable(*args, **kwargs):

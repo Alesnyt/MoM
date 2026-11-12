@@ -4,8 +4,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from starlette.responses import JSONResponse
-
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = MAX_TEXT_BYTES + 64 * 1024
 MAX_SEGMENTS = 10_000
@@ -18,41 +16,6 @@ CUE = re.compile(rf"^({STAMP})\s+-->\s+({STAMP})(?:\s+.*)?$")
 
 class TranscriptError(ValueError):
     pass
-
-
-class TranscriptBodyLimit:
-    """Limit actual bytes before Starlette spools multipart files (even chunked)."""
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        limits = {"/api/meetings/transcript": (MAX_REQUEST_BYTES, "Транскрипт больше 1 МБ"),
-                  "/api/admin/context/import": (2 * 1024 * 1024 + 65536, "Словарь больше 2 МБ"),
-                  "/api/admin/glossaries/preview": (25 * 1024 * 1024 + 65536, "Глоссарий больше 25 МБ")}
-        limit = limits.get(scope.get("path", "").rstrip("/"))
-        if scope["type"] != "http" or scope.get("method") != "POST" or limit is None:
-            return await self.app(scope, receive, send)
-        body = bytearray()
-        while True:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                return
-            chunk = message.get("body", b"")
-            if len(body) + len(chunk) > limit[0]:
-                return await JSONResponse({"detail": limit[1]}, status_code=413)(scope, receive, send)
-            body.extend(chunk)
-            if not message.get("more_body", False):
-                break
-        delivered = False
-
-        async def replay():
-            nonlocal delivered
-            if not delivered:
-                delivered = True
-                return {"type": "http.request", "body": bytes(body), "more_body": False}
-            return await receive()
-
-        await self.app(scope, replay, send)
 
 
 def timestamp(value: str) -> float:

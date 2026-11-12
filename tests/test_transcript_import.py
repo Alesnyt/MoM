@@ -221,27 +221,12 @@ def test_html_is_plain_text_and_unnamed_text_is_preserved(client):
     assert "<img" in doc["transcript"]
 
 
-def test_chunked_body_guard_does_not_trust_content_length(monkeypatch):
+def test_chunked_body_guard_does_not_trust_content_length(client, monkeypatch):
     monkeypatch.setattr(ti, "MAX_REQUEST_BYTES", 16)
-    called, sent = [], []
-
-    async def app(*args):
-        called.append(True)
-
-    messages = iter([
-        {"type": "http.request", "body": b"x" * 10, "more_body": True},
-        {"type": "http.request", "body": b"x" * 10, "more_body": False},
-    ])
-
-    async def receive():
-        return next(messages)
-
-    async def send(message):
-        sent.append(message)
-
-    asyncio.run(ti.TranscriptBodyLimit(app)({"type": "http", "method": "POST", "path": "/api/meetings/transcript", "headers": [(b"content-length", b"1")]}, receive, send))
-    assert not called
-    assert sent[0]["status"] == 413
+    response = client.post("/api/meetings/transcript", content=iter([b"text=" + b"x" * 5, b"x" * 10]),
+                           headers={"content-length": "1", "content-type": "application/x-www-form-urlencoded"})
+    assert response.status_code == 413
+    assert client.get("/api/meetings").json() == []
 
 
 def test_archive_limit_only_prunes_owners_completed_items(client):

@@ -16,15 +16,44 @@ from contextlib import asynccontextmanager
 import anyio
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
+from .api_schemas import (
+    SettingsIn,
+    ContextSettingsIn,
+    GlossaryImportIn,
+    GlossaryEnabledIn,
+    TermScheduleIn,
+    TermReviewItem,
+    TermReviewIn,
+    DirectorySettingsIn,
+    DirectoryPolicyIn,
+    SpeakerSearchIn,
+    PromptsIn,
+    ModelsIn,
+    ThemeIn,
+    SmtpIn,
+    QueueIn,
+    LdapIn,
+    DirectoryScopeIn,
+    LdapTestIn,
+    SpeakerNameIn,
+    ProtocolRecipientIn,
+    ProtocolIn,
+    SpeakerAssignIn,
+    SmtpTestIn,
+    LoginIn,
+    UserLoginIn,
+    UserCreateIn,
+    UserPatchIn
+)
 
 from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
 from . import transcript_import, upload, corporate_context, glossary, term_discovery
-from . import word_protocol
+from . import word_protocol, context_api
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import build_eml, email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -47,158 +76,6 @@ SECURITY_HEADERS = {
         "base-uri 'self'; form-action 'self'"
     ),
 }
-
-
-class SettingsIn(BaseModel):
-    openai_api_key: str = Field(min_length=8)
-
-
-class ContextSettingsIn(BaseModel):
-    enabled: bool
-    use_ad: bool | None = None
-    sync_ad: bool | None = None  # Backwards compatibility for already-open admin tabs.
-    sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
-
-
-class GlossaryImportIn(BaseModel):
-    upload_id: str = Field(min_length=1, max_length=64)
-    name: str = Field(min_length=1, max_length=120)
-    mapping: dict[str, str] = Field(max_length=5)
-    sheet: str = Field(default="", max_length=120)
-
-
-class GlossaryEnabledIn(BaseModel):
-    enabled: bool
-
-
-class TermScheduleIn(BaseModel):
-    enabled: bool
-    run_time: str = Field(pattern=r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
-    max_batches: int = Field(ge=1, le=500)
-
-
-class TermReviewItem(BaseModel):
-    id: str = Field(min_length=1, max_length=64)
-    revision: int = Field(ge=1)
-
-
-class TermReviewIn(BaseModel):
-    items: list[TermReviewItem] = Field(min_length=1, max_length=20)
-    action: Literal['approve', 'reject', 'defer', 'reopen']
-    canonical: str = Field(default='', max_length=240)
-    description: str = Field(default='', max_length=4000)
-    department: str = Field(default='', max_length=120)
-    replace_text: bool = False
-
-
-class DirectorySettingsIn(BaseModel):
-    sync_ad: bool | None = None
-    sync_time: str | None = Field(default=None, min_length=5, max_length=5, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
-
-
-class DirectoryPolicyIn(BaseModel):
-    fields: list[str] = Field(max_length=3)
-    domains: list[str] = Field(max_length=32)
-
-
-class SpeakerSearchIn(BaseModel):
-    mode: Literal["live", "cache"]
-
-
-class PromptsIn(BaseModel):
-    protocol_prompt: str = Field(min_length=1, max_length=30000)
-    name_review_prompt: str = Field(min_length=1, max_length=30000)
-    name_review_enabled: bool = True
-
-
-class ModelsIn(BaseModel):
-    chat_model: str | None = None
-    asr_model: str | None = None
-
-
-class ThemeIn(BaseModel):
-    theme: str
-
-
-class SmtpIn(BaseModel):
-    host: str = ""
-    port: int = Field(default=587, ge=1, le=65535)
-    user: str = ""
-    password: str = ""
-    from_addr: str = ""
-    starttls: bool = True
-    public_url: str = ""
-
-
-class QueueIn(BaseModel):
-    max_jobs: int = Field(ge=1, le=8)
-
-
-class LdapIn(BaseModel):
-    enabled: bool = False
-    url: str = ""
-    bind_dn: str = ""
-    bind_password: str = ""
-    base_dn: str = ""
-    user_filter: str = "(mail={username})"
-    starttls: bool = False
-    tls_verify: bool = True
-    email_attr: str = "mail"
-
-
-class DirectoryScopeIn(BaseModel):
-    mode: Literal["all", "selected"]
-    bases: list[str] = Field(default_factory=list, max_length=32)
-
-
-class LdapTestIn(BaseModel):
-    username: str = ""
-
-
-class SpeakerNameIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    email: str | None = Field(default=None, max_length=254)
-    job_title: str | None = Field(default=None, max_length=200)
-
-
-class ProtocolRecipientIn(BaseModel):
-    speaker_id: str = Field(min_length=1, max_length=40)
-    email: str = Field(min_length=3, max_length=254)
-
-
-class ProtocolIn(BaseModel):
-    recipients: list[ProtocolRecipientIn] = Field(default_factory=list, max_length=200)
-
-
-class SpeakerAssignIn(BaseModel):
-    speaker_id: str = Field(min_length=1, max_length=40)
-    segment_indexes: list[int] = Field(min_length=1, max_length=500)
-
-
-class SmtpTestIn(BaseModel):
-    to: str = ""
-
-
-class LoginIn(BaseModel):
-    username: str = Field(min_length=1, max_length=80)
-    password: str = Field(min_length=1, max_length=200)
-    setup_token: str = ""
-
-
-class UserLoginIn(BaseModel):
-    email: str = Field(min_length=3, max_length=200)
-    password: str = Field(min_length=1, max_length=200)
-
-
-class UserCreateIn(BaseModel):
-    email: str = Field(min_length=3, max_length=200)
-    archive_limit: int = Field(default=5, ge=1, le=100)
-    auth_mode: str = "local"
-
-
-class UserPatchIn(BaseModel):
-    archive_limit: int | None = Field(default=None, ge=1, le=100)
-    auth_mode: str | None = None
 
 
 def _peer_trusted(request: Request) -> bool:
@@ -345,7 +222,8 @@ def _health(*, full: bool = False) -> dict:
     else:
         disk_status = {"ok": disk.has_room()}
     return {
-        "ok": True,
+        "ok": worker.snapshot()["ok"],
+        "worker": worker.snapshot(),
         "ffmpeg": ffmpeg_available(),
         "ui": (STATIC_DIR / "index.html").exists(),
         "theme": config.get_ui_theme(),
@@ -388,7 +266,14 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MoM", version="1.0.0", lifespan=lifespan)
-app.add_middleware(transcript_import.TranscriptBodyLimit)
+@app.exception_handler(config.SettingsSaveError)
+async def settings_save_error(_request: Request, exc: config.SettingsSaveError):
+    log.error("Не удалось сохранить настройки", exc_info=exc)
+    return JSONResponse(status_code=503, content={"detail":
+        "Не удалось записать настройки. Работающая конфигурация не изменена. "
+        "Проверьте права на файл настроек и свободное место."})
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -414,177 +299,14 @@ async def security_headers(request: Request, call_next):
 
 
 @app.get("/api/health")
-def health() -> dict:
-    return _health(full=False)
+def health(response: Response) -> dict:
+    state = _health(full=False)
+    if not state["ok"]:
+        response.status_code = 503
+    return state
 
 
-@app.get("/api/admin/context")
-def get_context(q: str = Query(default="", max_length=200), _admin: dict = Depends(require_admin)) -> dict:
-    return corporate_context.snapshot(q)
-
-
-@app.post("/api/admin/context/settings")
-def save_context(payload: ContextSettingsIn, admin: dict = Depends(require_admin)) -> dict:
-    return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"],
-                                           sync_time=payload.sync_time, use_ad=payload.use_ad)
-
-
-@app.get("/api/admin/directory/cache")
-def get_directory(_admin: dict = Depends(require_admin)) -> dict:
-    return corporate_context.snapshot()
-
-
-@app.post("/api/admin/directory/settings")
-def save_directory_settings(payload: DirectorySettingsIn, admin: dict = Depends(require_admin)) -> dict:
-    return corporate_context.save_settings(None, payload.sync_ad, admin["username"], sync_time=payload.sync_time)
-
-
-@app.post("/api/admin/directory/sync", status_code=202)
-@app.post("/api/admin/context/sync", status_code=202)
-def sync_context(admin: dict = Depends(require_admin)) -> dict:
-    try:
-        return corporate_context.request_sync(admin["username"])
-    except (ldap_auth.LdapError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/admin/directory/policy")
-@app.post("/api/admin/context/directory")
-def save_context_directory(payload: DirectoryPolicyIn, admin: dict = Depends(require_admin)) -> dict:
-    try:
-        policy = directory_scope.save_sync_policy(payload.fields, payload.domains)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    store.record_audit(admin["username"], "context.directory", detail=json.dumps(policy, ensure_ascii=False))
-    return corporate_context.snapshot()
-
-
-@app.post("/api/admin/directory/search")
-@app.post("/api/admin/context/search")
-def save_speaker_search(payload: SpeakerSearchIn, admin: dict = Depends(require_admin)) -> dict:
-    try:
-        return corporate_context.save_search_mode(payload.mode, admin["username"])
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/admin/context/import")
-async def import_context(request: Request, admin: dict = Depends(require_admin)) -> dict:
-    async with request.form(max_files=1, max_fields=0, max_part_size=corporate_context.MAX_FILE_BYTES) as form:
-        file = form.get("file")
-        if not isinstance(file, StarletteUploadFile):
-            raise HTTPException(status_code=400, detail="Выберите Excel или CSV со словарём")
-        content = await file.read(corporate_context.MAX_FILE_BYTES + 1)
-        try:
-            return await asyncio.to_thread(corporate_context.import_dictionary, file.filename or "", content, admin["username"])
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/admin/glossaries")
-def get_glossaries(q: str = Query(default="", max_length=200), glossary_id: str = Query(default="", max_length=64),
-                   offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)) -> dict:
-    return glossary.catalog(q, glossary_id, offset)
-
-
-@app.post("/api/admin/glossaries/preview")
-async def preview_glossary(request: Request, admin: dict = Depends(require_admin)) -> dict:
-    async with request.form(max_files=1, max_fields=2, max_part_size=glossary.MAX_FILE_BYTES) as form:
-        file = form.get("file")
-        if not isinstance(file, StarletteUploadFile):
-            raise HTTPException(status_code=400, detail="Выберите Excel или CSV")
-        content = await file.read(glossary.MAX_FILE_BYTES + 1)
-        try:
-            return await asyncio.to_thread(glossary.preview, file.filename or "", content, admin["username"],
-                                           glossary_id=str(form.get("glossary_id") or ""), sheet=str(form.get("sheet") or ""))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/admin/glossaries/preview/{upload_id}")
-def discard_glossary_preview(upload_id: str, _admin: dict = Depends(require_admin)) -> dict:
-    with store.connect() as conn:
-        conn.execute("DELETE FROM glossary_imports WHERE id=? AND status='preview'", (upload_id,))
-    return {"ok": True}
-
-
-@app.post("/api/admin/glossaries/import", status_code=202)
-def import_glossary(payload: GlossaryImportIn, admin: dict = Depends(require_admin)) -> dict:
-    try:
-        return glossary.queue_import(payload.upload_id, payload.name, payload.mapping, payload.sheet, admin["username"])
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/admin/glossaries/{glossary_id}/enabled")
-def enable_glossary(glossary_id: str, payload: GlossaryEnabledIn, admin: dict = Depends(require_admin)) -> dict:
-    try:
-        return glossary.set_enabled(glossary_id, payload.enabled, admin["username"])
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get('/api/admin/term-discovery')
-def get_term_discovery(state: Literal['pending','approved','rejected','deferred'] = 'pending',
-                       offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)):
-    return term_discovery.snapshot(state,offset)
-
-
-@app.post('/api/admin/term-discovery/settings')
-def save_term_schedule(payload: TermScheduleIn, admin: dict = Depends(require_admin)):
-    term_discovery.settings(**payload.model_dump(),actor=admin['username'])
-    return {'ok':True}
-
-
-@app.post('/api/admin/term-discovery/scan', status_code=202)
-def scan_terms(admin: dict = Depends(require_admin)):
-    try:
-        term_discovery.queue(admin['username'])
-        return {'status':'queued'}
-    except ValueError as exc:
-        raise HTTPException(409,str(exc)) from exc
-
-
-@app.post('/api/admin/term-discovery/stop')
-def stop_term_scan(admin: dict = Depends(require_admin)):
-    with store.connect() as conn:
-        conn.execute("UPDATE term_discovery SET status='idle',owner=NULL,lease=0 WHERE status IN ('queued','running','paused')")
-    store.record_audit(admin['username'],'terms.stop')
-    return {'ok':True}
-
-
-@app.post('/api/admin/term-discovery/review')
-def review_terms(payload: TermReviewIn, admin: dict = Depends(require_admin)):
-    try:
-        term_discovery.review(**payload.model_dump(),actor=admin['username'])
-        return {'ok':True}
-    except ValueError as exc:
-        raise HTTPException(409,str(exc)) from exc
-
-
-@app.get('/api/admin/term-discovery/evidence/{evidence_id}/audio')
-def term_audio(evidence_id: int, _admin: dict = Depends(require_admin)):
-    import math
-    import subprocess
-    with store.connect() as conn:
-        row = conn.execute('''SELECT e.*,m.filename FROM term_evidence e JOIN meetings m ON m.id=e.meeting_id
-            WHERE e.id=?''',(evidence_id,)).fetchone()
-    if not row or row['start'] is None:
-        raise HTTPException(404,'Для этой реплики нет аудиозаписи или таймкода')
-    source = term_discovery.audio_source(row['meeting_id'],row['filename'])
-    if not source or not math.isfinite(row['start']):
-        raise HTTPException(404,'Запись уже удалена из архива')
-    start = max(0,row['start']-2)
-    end = row['end'] if row['end'] is not None and math.isfinite(row['end']) else start+30
-    try:
-        result = subprocess.run(['ffmpeg','-v','error','-nostdin','-ss',str(start),'-i',str(source),
-                                 '-t',str(min(60,max(5,end-start+2))),'-vn','-ac','1','-ar','16000',
-                                 '-f','mp3','pipe:1'],capture_output=True,timeout=20)
-    except (OSError,subprocess.TimeoutExpired) as exc:
-        raise HTTPException(503,'Не удалось подготовить фрагмент записи') from exc
-    if result.returncode or not result.stdout:
-        raise HTTPException(503,'Не удалось прочитать аудиозапись')
-    return Response(result.stdout,media_type='audio/mpeg',headers={'Cache-Control':'no-store'})
+app.include_router(context_api.create_router(require_admin))
 
 
 @app.get("/api/auth/status")
@@ -953,8 +675,8 @@ def save_smtp(payload: SmtpIn, _admin: dict = Depends(require_admin)) -> dict:
         password=payload.password,
         from_addr=payload.from_addr,
         starttls=payload.starttls,
+        public_url=payload.public_url,
     )
-    config.set_public_base_url(payload.public_url)
     host = payload.host.strip()
     sender = payload.from_addr.strip()
     store.record_audit(
@@ -1083,9 +805,10 @@ def _disk_or_507(extra: int = 0) -> None:
 
 @app.post("/api/meetings/transcript")
 async def import_transcript(request: Request, user: dict = Depends(require_user)) -> dict:
-    # Authentication runs before multipart parsing. The ASGI guard bounds the
-    # entire request before Starlette can spool any uploaded file to disk.
-    async with request.form(max_files=1, max_fields=2, max_part_size=transcript_import.MAX_REQUEST_BYTES) as form:
+    # Dependencies authenticate before the first byte is read or file spooled.
+    async with upload.bounded_form(request, limit=transcript_import.MAX_REQUEST_BYTES,
+                                   message="Транскрипт больше 1 МБ", max_fields=2,
+                                   max_part_size=transcript_import.MAX_REQUEST_BYTES, allow_urlencoded=True) as form:
         if any(key not in {"text", "file", "title"} or len(form.getlist(key)) != 1 for key in form):
             raise HTTPException(400, "Нужен один текст или один файл и название")
         text, file, title = form.get("text"), form.get("file"), form.get("title", "")

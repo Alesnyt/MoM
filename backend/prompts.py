@@ -1,6 +1,20 @@
 from __future__ import annotations
 
 from . import store
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_frozen: ContextVar[dict | None] = ContextVar("meeting_prompts", default=None)
+
+
+@contextmanager
+def settings_scope():
+    token = _frozen.set(snapshot())
+    try:
+        yield
+    finally:
+        _frozen.reset(token)
+
 
 PROTOCOL_PROMPT = """Ты — ассистент, который готовит протокол встречи (Minutes of Meeting, MoM).
 По транскрипту созвона верни ТОЛЬКО JSON по схеме ниже.
@@ -71,6 +85,8 @@ segment_index — переданный индекс реплики; original —
 
 
 def snapshot() -> dict:
+    if (saved := _frozen.get()) is not None:
+        return dict(saved)
     saved = store.get_llm_settings()
     return {
         "version": saved["version"] if saved else 0,

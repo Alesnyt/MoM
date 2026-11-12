@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from . import config, prompts
 from .performance import stage_timer
 from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
-from .protocol_text import deduplicate
+from .protocol_text import deduplicate, text_key
 
 log = logging.getLogger("mom.llm")
 
@@ -460,28 +460,40 @@ def _merge_locally(parts: list[dict]) -> dict:
 
 def _retain_grounded_items(result: dict, parts: list[dict]) -> dict:
     """Keep cited decisions and tasks if a merge skips them."""
+    result = deduplicate(result)
     decisions = result.setdefault("decisions", [])
     sources = result.setdefault("decision_sources", [])
     actions = result.setdefault("action_items", [])
+    by_decision = {text_key(item): item for item in decisions}
+    by_action = {(text_key(item["task"]), text_key(item.get("assignee") or ""),
+                  text_key(item.get("due") or "")): item for item in actions}
     for part in parts:
         for entry in part.get("decision_sources", []):
-            decision = entry["decision"]
-            if decision in decisions:
-                sources.append(entry)
-            elif not any(set(entry["turns"]).intersection(existing["turns"]) for existing in sources):
-                decisions.append(decision)
-                sources.append(entry)
+            key = text_key(entry["decision"])
+            if key not in by_decision:
+                by_decision[key] = entry["decision"]
+                decisions.append(entry["decision"])
+            sources.append({"decision": by_decision[key], "turns": entry["turns"]})
         for action in part.get("action_items", []):
             turns = action.get("source_turns")
             if not turns:
                 continue
-            same_assignment = [item for item in actions if item.get("assignee") == action.get("assignee")
-                               and item.get("due") == action.get("due")]
-            same_task = next((item for item in same_assignment if item["task"] == action["task"]), None)
-            if same_task is not None:
-                same_task["source_turns"] = sorted(set(turns).union(same_task.get("source_turns") or []))
-            elif not any(set(turns).intersection(item.get("source_turns") or []) for item in same_assignment):
-                actions.append(action)
+            key = (text_key(action["task"]), text_key(action.get("assignee") or ""),
+                   text_key(action.get("due") or ""))
+            if key in by_action:
+                item = by_action[key]
+                item["source_turns"] = sorted(set(turns).union(item.get("source_turns") or []))
+            else:
+                item = {**action, "source_turns": list(turns)}
+                actions.append(item)
+                by_action[key] = item
+    citations: dict[str, set[int]] = {}
+    for entry in sources:
+        decision = by_decision.get(text_key(entry["decision"]))
+        if decision:
+            citations.setdefault(decision, set()).update(entry["turns"])
+    result["decision_sources"] = [{"decision": item, "turns": sorted(turns)} for item, turns in citations.items()]
+
     return deduplicate(result)
 
 
