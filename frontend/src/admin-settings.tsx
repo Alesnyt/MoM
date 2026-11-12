@@ -52,7 +52,7 @@ export function SettingsPanel({
   health,
   onChange,
 }: {
-  topic: Exclude<AdminTab, "monitoring" | "users" | "ldap" | "audit" | "prompts">;
+  topic: Exclude<AdminTab, "monitoring" | "users" | "ldap" | "audit" | "prompts" | "exchange">;
   health: Health | null;
   onChange: (health: Health) => void;
 }) {

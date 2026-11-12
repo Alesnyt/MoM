@@ -1838,3 +1838,42 @@ select.title-input {
 .term-variant audio { display: block; width: min(100%, 420px); margin-top: .6rem; }
 .term-discovery .composer-row { flex-wrap: wrap; }
 @media(max-width:640px) { .term-proposal { padding: .8rem; } .term-variant blockquote { margin-left: .4rem; } }
+
+/* Calendar home: the recording and its invitation stay visible together. */
+.meeting-home { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .9fr); gap: clamp(24px, 3vw, 48px); align-items: start; width: 100%; }
+.meeting-home > .composer { max-width: none; min-width: 0; }
+.calendar-panel { min-width: 0; border: 1px solid var(--line); border-radius: 16px; padding: 24px; background: var(--card); }
+.calendar-panel h2 { margin: 4px 0 12px; font-size: 24px; }
+.calendar-panel .eyebrow { margin-top: 0; }
+.calendar-panel .field-stack { gap: 12px; }
+.calendar-panel input, .calendar-panel select { width: 100%; min-width: 0; box-sizing: border-box; }
+.calendar-panel .banner { margin: 12px 0; }
+.calendar-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.calendar-connected { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.calendar-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, .65fr); gap: 12px; }
+.calendar-controls label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+.calendar-controls input, .calendar-controls select { background: var(--stage); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 8px; font: inherit; color-scheme: dark; }
+:root[data-appearance="light"] .calendar-controls input, :root[data-appearance="light"] .calendar-controls select { color-scheme: light; }
+.calendar-events { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 10px; max-height: 610px; overflow: auto; }
+.calendar-event { display: grid; gap: 7px; width: 100%; text-align: left; padding: 15px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--stage); color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
+.calendar-event:hover, .calendar-event:focus-visible { border-color: var(--accent); }
+.calendar-event.selected { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
+.calendar-event:disabled { opacity: .55; cursor: default; }
+.calendar-event time, .calendar-event small { font-size: 12px; color: var(--muted); }
+.calendar-event strong { font-size: 15px; line-height: 1.4; }
+.calendar-event.selected small:last-child { color: var(--accent); }
+.calendar-empty { padding: 20px 0; color: var(--muted); line-height: 1.6; }
+.calendar-loading { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; }
+.calendar-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: calendar-spin .8s linear infinite; }
+@keyframes calendar-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .calendar-spinner { animation: none; } }
+.calendar-context { margin: 24px 0; padding: 18px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
+.calendar-context-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.calendar-context-heading .eyebrow { margin: 0; }
+.calendar-context p { margin: 8px 0; line-height: 1.5; }
+.calendar-context summary { cursor: pointer; padding-top: 10px; color: var(--accent); }
+.calendar-context li { margin: 6px 0; }
+.calendar-agenda { white-space: pre-wrap; max-height: 280px; overflow: auto; }
+.exchange-settings { max-width: 850px; }
+@media (max-width: 1150px) { .meeting-home { grid-template-columns: minmax(0, 1fr); } .calendar-panel { max-width: none; } }
+@media (max-width: 600px) { .calendar-panel { padding: 16px; } .calendar-context { padding: 14px; } }

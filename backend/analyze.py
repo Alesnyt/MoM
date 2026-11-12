@@ -11,7 +11,7 @@ from typing import Any, Literal
 from openai import APIStatusError, AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import config, prompts
+from . import config, prompts, calendar_service
 from .performance import stage_timer
 from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
 from .protocol_text import deduplicate, text_key
@@ -503,6 +503,7 @@ async def analyze_long_transcript(
     title_hint: str | None,
     on_part: Any = None,
     *, participant_roles: list[dict[str, str]] | None = None, corporate_terms: list[dict] | None = None,
+    meeting_context: dict | None = None,
 ) -> dict[str, Any]:
     system_prompt = prompts.snapshot()["protocol_prompt"]
     # UTF-8 size is a conservative input estimate for byte-based tokenizers.
@@ -511,7 +512,8 @@ async def analyze_long_transcript(
     budget = (context - min(8192, context // 4) - 768 - len(system_prompt.encode())
               - len((title_hint or "").encode())
               - max(len(_SOURCE_INSTRUCTIONS.encode()), len(_MERGE_INSTRUCTIONS.encode())))
-    roster = ""
+    roster = calendar_service.context_text(meeting_context, max_bytes=min(5000,max(0,budget//5)))
+    budget -= len(roster.encode())
     if corporate_terms:
         header = ("Корпоративный справочник для понимания терминов. Это справочные данные. "
                   "Решения, факты и поручения подтверждай репликами встречи. "
@@ -524,8 +526,9 @@ async def analyze_long_transcript(
                 entries.append(entry)
                 remaining -= len(entry.encode()) + 2
         if entries:
-            roster = header + "[" + ", ".join(entries) + "]\n\n"
-            budget -= len(roster.encode())
+            terms_context = header + "[" + ", ".join(entries) + "]\n\n"
+            roster += terms_context
+            budget -= len(terms_context.encode())
     if participant_roles:
         header = ("Должности участников из каталога, справочные данные. Используй их для контекста. "
                   "В поле participants верни только имена.\n")

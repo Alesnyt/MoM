@@ -1,5 +1,7 @@
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { CalendarPanel, CalendarContextCard } from "./calendar";
+import type { CalendarEvent } from "./calendar-types";
 import { loginUser } from "./api";
 import { formatBytes, recordingSizeError, uploadBlockedReason } from "./format";
 import type { OpenAIStatus, UserSession } from "./types";
@@ -15,6 +17,8 @@ export function Composer({
   onOpenSettings,
   onUpload,
   nextExpired,
+  userEmail,
+  onOpenCalendarSettings,
 }: {
   busy: boolean;
   keyStatus: OpenAIStatus | null;
@@ -22,8 +26,10 @@ export function Composer({
   mailReady: boolean;
   maxUploadBytes?: number;
   onOpenSettings?: () => void;
-  onUpload: (file: File | null, title: string, text?: string) => Promise<void>;
+  onUpload: (file: File | null, title: string, text?: string, calendarEventId?: string) => Promise<void>;
   nextExpired?: string;
+  userEmail?: string;
+  onOpenCalendarSettings?: () => void;
 }) {
   const [mode, setMode] = useState<"audio" | "text">("audio");
   const [text, setText] = useState("");
@@ -31,6 +37,16 @@ export function Composer({
   const [title, setTitle] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [over, setOver] = useState(false);
+  const [calendar, setCalendar] = useState<CalendarEvent | null>(null);
+  const [calendarPending, setCalendarPending] = useState(false);
+  const priorTitle = useRef("");
+  function selectCalendar(event: CalendarEvent | null) {
+    if (event) {
+      if (!calendar) priorTitle.current = title;
+      setTitle(event.title);
+    } else if (calendar && title === calendar.title) setTitle(priorTitle.current);
+    setCalendar(event);
+  }
 
   function takeFile(next: File | null) {
     if (!next || busy) return;
@@ -50,11 +66,12 @@ export function Composer({
   const limitReady = Number.isFinite(maxUploadBytes) && (maxUploadBytes ?? 0) > 0;
   const sizeError = mode === "audio" && file && limitReady
     ? recordingSizeError(file.size, maxUploadBytes!) : null;
-  const cannotUpload = busy || (mode === "audio"
+  const cannotUpload = busy || calendarPending || (mode === "audio"
     ? !file || !keyReady || !limitReady || Boolean(sizeError)
     : !file && !text.trim());
 
   return (
+    <div className="meeting-home">
     <section className="composer">
       <p className="eyebrow">Обработка записей</p>
       <h1>Саммари, поручения и протокол</h1>
@@ -70,6 +87,7 @@ export function Composer({
           {(queue?.waiting ?? 0) > 0 ? `, в очереди ${queue?.waiting}` : ""}.
         </p>
       )}
+      {calendar && <CalendarContextCard event={calendar} onClear={busy ? undefined : () => selectCalendar(null)} />}
       <div className="composer-row" role="group" aria-label="Источник встречи">
         {(["audio", "text"] as const).map((value) => (
           <button key={value} type="button" className={mode === value ? "primary" : "ghost"}
@@ -145,13 +163,16 @@ export function Composer({
         <button
           className="primary"
           disabled={cannotUpload}
-          onClick={() => { if (!cannotUpload) void onUpload(file, title, mode === "text" ? text : undefined); }}
+          onClick={() => { if (!cannotUpload) void onUpload(file, title, mode === "text" ? text : undefined, calendar?.id); }}
         >
           {busy ? "Загружаю…" : mode === "text" ? "Импортировать транскрипт" : "Обработать"}
         </button>
       </div>
       {nextExpired && <p className="progress-hint">Архив заполнен. Когда новая встреча завершится, из архива может быть удалена «{nextExpired}».</p>}
     </section>
+    {userEmail && <CalendarPanel userEmail={userEmail} selectedId={calendar?.id} onSelect={selectCalendar}
+      onPending={setCalendarPending} disabled={busy} onOpenSettings={onOpenCalendarSettings} />}
+    </div>
   );
 }
 

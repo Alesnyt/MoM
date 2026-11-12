@@ -1,8 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
+import type { CalendarPerson } from "./calendar-types";
+import { CalendarContextCard } from "./calendar";
 import type { Meeting, Speaker, TranscriptSegment } from "./types";
 
+const NO_INVITEES: CalendarPerson[] = [];
 const COLORS = ["#c9843e", "#7f9d6e", "#6e8caf", "#c46b63", "#b089c4", "#d4a017", "#5ec98a", "#e07a5f"];
 
 type Turn = {
@@ -54,17 +57,19 @@ function SpeakerNameEditor({
   taken,
   disabled,
   directoryEnabled,
+  invited = NO_INVITEES,
   onRename,
 }: {
   speaker: Speaker;
   taken: string[];
   disabled: boolean;
   directoryEnabled: boolean;
+  invited?: CalendarPerson[];
   onRename: (speakerId: string, name: string, email?: string, jobTitle?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(speaker.name);
   const [open, setOpen] = useState(false);
-  const [people, setPeople] = useState<Person[]>([]);
+  const [directoryPeople, setPeople] = useState<Person[]>([]);
   const [searchState, setSearchState] = useState<"idle" | "loading" | "empty" | "error">("idle");
   const [activeIndex, setActiveIndex] = useState(-1);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
@@ -75,6 +80,20 @@ function SpeakerNameEditor({
   const searchFeedback = useRef<HTMLDivElement>(null);
   const savingRef = useRef(false);
   const defaultName = /^S\d+$/.test(speaker.id) ? `Спикер ${speaker.id.slice(1)}` : null;
+  const people = useMemo(() => {
+    const query = draft.trim() === speaker.name.trim() ? "" : draft.trim().toLocaleLowerCase();
+    const found: Person[] = invited.filter(person => person.kind !== "resource" &&
+      `${person.name} ${person.email}`.toLocaleLowerCase().includes(query)).map(person => ({
+        name: person.name || person.email, email: person.email.includes("@") ? person.email : "", source: "calendar",
+      }));
+    const seen = new Set<string>();
+    return [...found, ...directoryPeople].filter(person => {
+      const key = person.email.toLocaleLowerCase() || person.name.toLocaleLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 40);
+  }, [invited, directoryPeople, draft, speaker.name]);
 
   useEffect(() => {
     setDraft(speaker.name);
@@ -211,6 +230,7 @@ function SpeakerNameEditor({
           </div>}
           {open && (people.length > 0 || searchState === "empty" || searchState === "error") && (
             <div ref={searchFeedback} className="speaker-suggest" onMouseDown={(event) => event.preventDefault()}>
+              {people.some(person => person.source === "calendar") && <div className="speaker-search-note">Приглашённые из календаря: выберите человека, которого слышите в записи.</div>}
               {directoryEnabled && searchMode && <div className="speaker-search-note">
                 Режим поиска: {searchMode === "live" ? "живой AD" : "локальный кэш AD"}
               </div>}
@@ -224,7 +244,7 @@ function SpeakerNameEditor({
                       aria-selected={index === activeIndex} disabled={disabled}
                       onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(person)}>
                       <span className="speaker-suggest-name"><strong>{person.name}</strong>
-                        <span className="speaker-source">{person.source === "ldap" ? "AD" : "MoM"}</span></span>
+                        <span className="speaker-source">{person.source === "calendar" ? "Приглашён" : person.source === "ldap" ? "AD" : "MoM"}</span></span>
                       {person.job_title && <small>{person.job_title}</small>}
                       {person.email && person.email !== person.name ? <small>{person.email}</small> : null}
                     </button>
@@ -346,6 +366,7 @@ export function TranscriptView({
 
   return (
     <div className="speaker-markup">
+      {meeting.calendar_context && <CalendarContextCard event={meeting.calendar_context} />}
       {meeting.diarization_note && <p className="speaker-hint">{meeting.diarization_note}</p>}
       {error && <div className="banner" role="alert">{error}</div>}
       {meeting.name_review && <details className="name-review">
@@ -382,6 +403,7 @@ export function TranscriptView({
                   taken={speakers.filter((item) => item.id !== speaker.id).map((item) => item.name)}
                   disabled={busy || disabled}
                   directoryEnabled={directoryEnabled}
+                  invited={[...(meeting.calendar_context?.invitees || []), ...(meeting.calendar_context?.organizer ? [meeting.calendar_context.organizer] : [])]}
                   onRename={saveName}
                 />
                 {speaker.job_title && <p className="speaker-hint">{speaker.job_title}</p>}
