@@ -112,6 +112,48 @@ def authenticate(username: str, password: str) -> bool:
     return _bind_as(server, user_dn, password)
 
 
+def calendar_identity(email: str) -> dict[str, str]:
+    """Resolve the signed-in profile in login scopes, never in the speaker cache."""
+    from ldap3 import BASE, DEREF_NEVER
+
+    if not config.ldap_configured():
+        raise LdapError("Для календаря нужно действующее подключение LDAP")
+    connection = None
+    try:
+        connection, _server = _service_connection()
+        matches = _search(connection, email)
+        if len(matches) != 1 or matches[0][1].strip().casefold() != email.strip().casefold():
+            raise LdapError("Не удалось однозначно связать профиль MoM с учётной записью AD")
+        dn, _mail = matches[0]
+        ok = connection.search(search_base=dn, search_filter="(objectClass=person)",
+            search_scope=BASE, dereference_aliases=DEREF_NEVER,
+            attributes=["userPrincipalName", "mail", "proxyAddresses"], size_limit=1, time_limit=5)
+        if (not ok or (connection.result or {}).get("description") not in {None, "", "success"}
+                or len(connection.entries) != 1
+                or directory_scope.dn_key(str(connection.entries[0].entry_dn)) != directory_scope.dn_key(dn)):
+            raise LdapError("Не удалось прочитать учётную запись календаря из AD")
+        entry = connection.entries[0]
+        def values(name):
+            raw = entry[name].value if name in entry else None
+            return [raw] if isinstance(raw, str) else raw or []
+        def address(value):
+            return isinstance(value, str) and bool(re.fullmatch(r"[^\s@\\]{1,128}@[^\s@\\]{1,253}", value)) and len(value) <= 254
+        upns = values("userPrincipalName")
+        primary = [value[5:] for value in values("proxyAddresses") if isinstance(value,str) and value.startswith("SMTP:")]
+        mailboxes = primary or values("mail")
+        if len(upns) != 1 or not address(upns[0]):
+            raise LdapError("В AD не задан однозначный userPrincipalName для входа в Exchange")
+        if len(mailboxes) != 1 or not address(mailboxes[0]):
+            raise LdapError("В AD не задан однозначный основной почтовый адрес Exchange")
+        return {"username":upns[0], "mailbox":mailboxes[0]}
+    except LdapError:
+        raise
+    except Exception as exc:
+        raise LdapError(_connection_error(exc)) from exc
+    finally:
+        _close_connection(connection)
+
+
 def test_connection(username: str = "") -> dict:
     if not config.get_ldap_url() or not config.get_ldap_base_dn():
         raise LdapError("Укажите адрес каталога и базу поиска")

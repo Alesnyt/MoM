@@ -130,3 +130,54 @@ test('invitees are manual name choices; rooms never become speaker suggestions',
   fireEvent.click(option);
   await waitFor(()=>assert.equal(mutations,1));
 });
+
+
+test('LDAP calendar connects in background without a second login form',async()=>{
+  let polls=0, reads=0;
+  globalThis.fetch=async url=>{
+    if(url==='/api/calendar/status')return reply(++polls===1
+      ? {enabled:true,connected:false,connecting:true,ldap_bound:true,account_email:'owner@example.com'}
+      : {enabled:true,connected:true,connecting:false,ldap_bound:true,mailbox:'primary@example.com'});
+    assert.ok(url.includes('/events?'));reads++;return reply({events:[event],truncated:false});
+  };
+  const view=render(React.createElement(CalendarPanel,{userEmail:'owner@example.com',onSelect(){}}));
+  await view.findByText(/Подключаю ваш календарь после входа через LDAP/);
+  assert.equal(view.queryByLabelText('Пароль Exchange'),null);
+  assert.equal(view.queryByLabelText('Доменный логин или email'),null);
+  assert.ok(await view.findByRole('button',{name:/План DWH/},{timeout:3000}));
+  assert.equal(reads,1);
+  assert.ok(view.getByText('Календарь · primary@example.com'));
+});
+
+test('LDAP retry cannot select another account and sends only its password',async()=>{
+  let body;
+  globalThis.fetch=async(url,options)=>{
+    if(url==='/api/calendar/status')return reply({enabled:true,connected:false,ldap_bound:true,account_email:'owner@example.com',error:'Exchange недоступен'});
+    if(url==='/api/calendar/connect'){body=JSON.parse(options.body);return reply({enabled:true,connected:true,ldap_bound:true});}
+    assert.ok(url.includes('/events?'));return reply({events:[],truncated:false});
+  };
+  const view=render(React.createElement(CalendarPanel,{userEmail:'owner@example.com',onSelect(){}}));
+  assert.equal((await view.findByRole('alert')).textContent,'Exchange недоступен');
+  assert.equal(view.queryByLabelText('Доменный логин или email'),null);
+  fireEvent.change(view.getByLabelText('Пароль Exchange'),{target:{value:'test-secret'}});
+  fireEvent.click(view.getByRole('button',{name:'Подключить календарь'}));
+  await waitFor(()=>assert.deepEqual(body,{username:'',password:'test-secret'}));
+});
+
+test('cancel automatic LDAP connection ignores late status success',async()=>{
+  let polls=0,late,disconnects=0;
+  globalThis.fetch=async url=>{
+    if(url==='/api/calendar/status'){
+      if(++polls===1)return reply({enabled:true,connected:false,connecting:true,ldap_bound:true,account_email:'owner@example.com'});
+      return new Promise(resolve=>{late=resolve;});
+    }
+    assert.equal(url,'/api/calendar/connection');disconnects++;return reply({connected:false});
+  };
+  const view=render(React.createElement(CalendarPanel,{userEmail:'owner@example.com',onSelect(){}}));
+  await waitFor(()=>assert.ok(late),{timeout:3000});
+  fireEvent.click(view.getByRole('button',{name:'Отменить'}));
+  await waitFor(()=>assert.equal(disconnects,1));
+  await act(async()=>late(reply({enabled:true,connected:true})));
+  assert.ok(view.getByLabelText('Пароль Exchange'));
+  assert.equal(view.queryByLabelText('Доменный логин или email'),null);
+});

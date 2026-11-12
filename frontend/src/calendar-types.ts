@@ -5,5 +5,5 @@ export type CalendarEvent = {
   invitees?: CalendarPerson[]; resources?: CalendarPerson[]; uid?: string;
 };
 export type CalendarContext = Omit<CalendarEvent, "id"> & { source: "exchange"; selected_at: string };
-export type CalendarStatus = { enabled: boolean; connected: boolean; username?: string; expires_at?: string };
+export type CalendarStatus = { enabled: boolean; connected: boolean; username?: string; expires_at?: string; mailbox?: string; account_email?: string; ldap_bound?: boolean; connecting?: boolean; error?: string };
 export type ExchangeSettings = { enabled: boolean; url: string; auth_mode: "ntlm" | "basic"; revision?: string };

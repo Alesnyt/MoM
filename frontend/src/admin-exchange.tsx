@@ -17,12 +17,12 @@ export function ExchangePanel() {
     setBusy(true); setError(""); setNote("");
     try {
       setSettings(await saveExchangeSettings(settings));
-      setNote("Сохранено. Откройте «Встречи» → «Новая запись» и подключите свой календарь справа.");
+      setNote("Сохранено. При следующем входе через LDAP календарь подключится автоматически. Для локального профиля: «Встречи» → «Новая запись» → подключить календарь справа.");
     } catch (err) { setError(err instanceof Error ? err.message : "Не удалось сохранить Exchange"); }
     finally { setBusy(false); }
   }
   return <div className="exchange-settings">
-    <p className="lead">Корпоративный Exchange: события, повестка, приглашённые и переговорки. Каждый пользователь подключает свой календарь со своей учётной записью.</p>
+    <p className="lead">Корпоративный Exchange: события, повестка, приглашённые и переговорки. После входа через LDAP календарь подключается автоматически для этой же учётной записи. Локальные профили подключают календарь вручную.</p>
     {error && <div className="banner" role="alert">{error}</div>}
     {!settings && !error && <p role="status">Загружаю настройки…</p>}
     {settings && <form className="field-stack" onSubmit={(event) => { event.preventDefault(); void save(); }}>

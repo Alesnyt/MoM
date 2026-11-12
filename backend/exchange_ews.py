@@ -116,8 +116,9 @@ def event(item, *, details=False) -> dict:
 
 
 class EwsClient:
-    def __init__(self, url: str, username: str, password: str, mode: str):
+    def __init__(self, url: str, username: str, password: str, mode: str, mailbox: str):
         self.url = endpoint(url)
+        self.mailbox = mailbox
         self.session = requests.Session()
         self.session.trust_env = False  # Do not use ambient netrc credentials or proxy redirects.
         self.session.verify = os.environ.get('SSL_CERT_FILE') or True
@@ -181,7 +182,8 @@ class EwsClient:
         op.set('Traversal', 'Shallow')
         node(op, 'm:CalendarView', StartDate=start.astimezone(timezone.utc).isoformat(),
              EndDate=end.astimezone(timezone.utc).isoformat(), MaxEntriesReturned=str(MAX_EVENTS))
-        node(node(op, 'm:ParentFolderIds'), 't:DistinguishedFolderId', Id='calendar')
+        folder = node(node(op, 'm:ParentFolderIds'), 't:DistinguishedFolderId', Id='calendar')
+        node(node(folder, 't:Mailbox'), 't:EmailAddress', self.mailbox)
         root = self._send(envelope, 'FindItem')
         folder = root.find('.//m:RootFolder', NS)
         if folder is None: raise ExchangeError('Exchange не вернул папку календаря.')

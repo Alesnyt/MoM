@@ -393,6 +393,12 @@ def user_login(payload: UserLoginIn, request: Request, response: Response) -> di
     token = auth.create_user_session(record["id"], record["email"])
     store.record_audit(record["email"], "user.login", record["email"], "вход в профиль")
     response.set_cookie(auth.USER_COOKIE, token, **_cookie_kw(request))
+    # Only a successful LDAP login may hand its password to this session's
+    # Exchange client. Failure of this optional integration must not reject login.
+    try:
+        calendar_service.start_ldap(token, record, payload.password)
+    except Exception:
+        log.warning("Автоподключение календаря не запущено; вход в MoM выполнен")
     user = store.get_user(record["id"])
     return {
         "authenticated": True,

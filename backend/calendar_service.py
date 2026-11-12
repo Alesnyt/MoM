@@ -13,13 +13,14 @@ import sqlite3
 import threading
 import time
 
-from . import store
+from . import store, ldap_auth
 from .exchange_ews import EwsClient, ExchangeError, endpoint
 
 SETTING_KEY = 'exchange_calendar'
 MAX_CONNECTIONS = 128
 CACHE_SECONDS = 300
 _lock = threading.RLock()
+_login_slots = threading.BoundedSemaphore(4)
 _connections: OrderedDict[str, Connection] = OrderedDict()
 
 
@@ -48,10 +49,15 @@ class Connection:
     username: str
     expires: float
     revision: str
-    client: EwsClient = field(repr=False)
+    mailbox: str
+    ldap_bound: bool
+    session_key: str
+    client: EwsClient | None = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     closed: bool = False
     ready: bool = False
+    connecting: bool = True
+    error: str = ""
     events: dict[str, dict] = field(default_factory=dict, repr=False)
     details: OrderedDict[str, dict] = field(default_factory=OrderedDict, repr=False)
     range: tuple[str, str] | None = None
@@ -62,7 +68,7 @@ class Connection:
         self.closed = True
         if self.lock.acquire(blocking=False):
             try:
-                self.client.close()
+                if self.client: self.client.close()
                 self.events.clear(); self.details.clear()
             finally: self.lock.release()
 
@@ -77,7 +83,8 @@ def operation(connection: Connection):
         if connection.closed: raise ExchangeError('Подключение к календарю отменено.', 401)
     finally:
         if connection.closed:
-            connection.client.close(); connection.events.clear(); connection.details.clear()
+            if connection.client: connection.client.close()
+            connection.events.clear(); connection.details.clear()
         connection.lock.release()
 
 
@@ -88,10 +95,20 @@ def disconnect(token: str | None) -> None:
         if connection: connection.dispose()
 
 
+def _session_alive(connection: Connection) -> bool:
+    with store.connect() as db:
+        return db.execute("SELECT 1 FROM sessions WHERE token=? AND kind='user' AND user_id=? AND expires>?",
+                          (connection.session_key, connection.user_id, time.time())).fetchone() is not None
+
+
 def cleanup() -> None:
     with _lock:
+        if not _connections: return
+        with store.connect() as db:
+            active = {(row['token'],row['user_id']) for row in db.execute(
+                "SELECT token,user_id FROM sessions WHERE kind='user' AND expires>?", (time.time(),))}
         for key, connection in list(_connections.items()):
-            if connection.closed or connection.expires <= time.time():
+            if connection.closed or connection.expires <= time.time() or (key,connection.user_id) not in active:
                 connection.dispose(); _connections.pop(key, None)
 
 
@@ -120,10 +137,13 @@ def _connection(token: str | None, user_id: str) -> Connection:
 
 
 def status(token: str | None, user_id: str) -> dict:
-    configured = settings()['enabled']
+    profile = store.get_user(user_id) or {}
+    data = {'enabled':settings()['enabled'], 'connected':False,
+            'account_email':profile.get('email',''), 'ldap_bound':profile.get('auth_mode')=='ldap', 'connecting':False}
     try: connection = _connection(token, user_id)
-    except ExchangeError: return {'enabled':configured, 'connected':False}
-    return {'enabled':configured, 'connected':connection.ready, 'username':connection.username,
+    except ExchangeError: return data
+    return {**data, 'connected':connection.ready, 'connecting':connection.connecting,
+            'username':connection.username, 'mailbox':connection.mailbox, 'error':connection.error,
             'expires_at':datetime.fromtimestamp(connection.expires, timezone.utc).isoformat()}
 
 
@@ -157,45 +177,107 @@ def _fetch(connection: Connection, start: datetime, end: datetime, refresh: bool
             'truncated':connection.truncated, 'cached_seconds':max(0,int(time.monotonic()-connection.fetched))}
 
 
-def connect(token: str, user_id: str, username: str, password: str) -> dict:
+def _prepare(token: str, user_id: str) -> tuple[Connection, dict]:
     current = settings()
     if not current['enabled']: raise ExchangeError('Администратор ещё не включил Exchange.', 409)
     session = store.get_session_row(token)
-    if not session or session.get('user_id')!=user_id: raise ExchangeError('Войдите в профиль MoM.',401)
+    profile = store.get_user(user_id)
+    if not session or session.get('kind')!='user' or session.get('user_id')!=user_id or not profile:
+        raise ExchangeError('Войдите в профиль MoM.',401)
     cleanup()
-    connection = Connection(user_id, username.strip(), session['expires'], current['revision'],
-                            EwsClient(current['url'], username.strip(), password, current['auth_mode']))
     key = store.session_id(token)
+    connection = Connection(user_id=user_id, username=profile['email'], mailbox=profile['email'],
+                            expires=session['expires'], revision=current['revision'],
+                            ldap_bound=profile.get('auth_mode')=='ldap', session_key=key)
     with _lock:
         previous = _connections.pop(key, None)
         if previous: previous.dispose()
         while len(_connections)>=MAX_CONNECTIONS:
             _, old = _connections.popitem(last=False); old.dispose()
         _connections[key] = connection
+    return connection, current
+
+
+def _finish_connect(connection: Connection, current: dict, username: str, password: str) -> None:
     try:
-        # A successful calendar read validates credentials and EWS permission.
-        now = datetime.now(timezone.utc)
         with operation(connection):
+            if connection.ldap_bound:
+                # Both authentication principal and primary mailbox come from the
+                # AD object matched to the signed-in profile, not from the browser.
+                identity = ldap_auth.calendar_identity(connection.mailbox)
+                connection.username, connection.mailbox = identity['username'], identity['mailbox']
+            else:
+                connection.username = username.strip() or connection.mailbox
+            if connection.closed or not _session_alive(connection):
+                raise ExchangeError('Подключение отменено. Войдите в MoM заново.',401)
+            if settings()['revision']!=connection.revision:
+                raise ExchangeError('Настройки Exchange изменились. Подключитесь заново.',409)
+            connection.client = EwsClient(current['url'], connection.username, password,
+                                          current['auth_mode'], connection.mailbox)
+            now = datetime.now(timezone.utc)
             _fetch(connection, now-timedelta(days=1), now+timedelta(days=1), True)
+            if connection.closed or not _session_alive(connection):
+                raise ExchangeError('Подключение отменено. Войдите в MoM заново.',401)
             if settings()['revision']!=connection.revision:
                 raise ExchangeError('Настройки Exchange изменились. Подключитесь заново.',409)
             connection.ready = True
-    except Exception:
-        with _lock:
-            if _connections.get(key) is connection: _connections.pop(key, None)
-            connection.dispose()
+    except Exception as exc:
+        connection.ready = False
+        connection.error = str(exc) if isinstance(exc,(ExchangeError,ldap_auth.LdapError)) else 'Не удалось подключить календарь. Попробуйте позже.'
+        if connection.client: connection.client.close()
+        connection.client = None
+        connection.events.clear(); connection.details.clear()
+        if isinstance(exc,ldap_auth.LdapError): raise ExchangeError(str(exc),503) from exc
         raise
+    finally:
+        connection.connecting = False
+
+
+def connect(token: str, user_id: str, username: str, password: str) -> dict:
+    profile = store.get_user(user_id) or {}
+    if profile.get('auth_mode')=='ldap' and username.strip() and username.strip().casefold()!=profile['email'].casefold():
+        raise ExchangeError('Календарь закреплён за вашей учётной записью MoM. Выбрать другую нельзя.',403)
+    connection,current = _prepare(token,user_id)
+    _finish_connect(connection,current,username,password)
     return status(token,user_id)
+
+
+def start_ldap(token: str, profile: dict, password: str) -> threading.Thread | None:
+    """Bounded background login: Exchange outages never hold up MoM sign-in."""
+    if profile.get('auth_mode')!='ldap' or not settings()['enabled']: return
+    connection,current = _prepare(token,profile['id'])
+    if not _login_slots.acquire(blocking=False):
+        connection.connecting=False
+        connection.error='Сейчас много подключений к календарю. Подключите его позже.'
+        return
+    def run():
+        try:
+            _finish_connect(connection,current,'',password)
+        except Exception:
+            pass  # A sanitized error is available only to this user's status endpoint.
+        finally:
+            _login_slots.release()
+    try:
+        thread = threading.Thread(target=run,name='mom-calendar-login',daemon=True)
+        thread.start()
+        return thread
+    except Exception:
+        _login_slots.release()
+        connection.connecting=False
+        connection.error='Не удалось запустить подключение календаря. Подключите его позже.'
 
 
 def events(token: str, user_id: str, start: datetime, end: datetime, refresh=False) -> dict:
     connection = _connection(token,user_id)
-    with operation(connection): return _fetch(connection,start,end,refresh)
+    with operation(connection):
+        if not connection.ready: raise ExchangeError(connection.error or 'Календарь ещё подключается.',409)
+        return _fetch(connection,start,end,refresh)
 
 
 def detail(token: str, user_id: str, event_id: str) -> dict:
     connection = _connection(token,user_id)
     with operation(connection):
+        if not connection.ready: raise ExchangeError(connection.error or 'Календарь ещё подключается.',409)
         selected = connection.events.get(event_id)
         if not selected: raise ExchangeError('Событие устарело. Обновите список календаря и выберите его снова.',409)
         value = connection.client.detail(selected['ews_id'])

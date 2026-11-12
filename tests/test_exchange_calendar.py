@@ -50,7 +50,7 @@ def test_endpoint_rejects_insecure_or_ambiguous_addresses(value):
 
 
 def test_only_read_calendar_soap_operations_and_selected_fields(monkeypatch):
-    client = ews.EwsClient('https://mail.example.com/owa','DOMAIN\\user','test-secret','ntlm')
+    client = ews.EwsClient('https://mail.example.com/owa','DOMAIN\\user','test-secret','ntlm','owner@example.com')
     calls=[]
     def send(url,**kwargs):
         calls.append(kwargs)
@@ -69,6 +69,7 @@ def test_only_read_calendar_soap_operations_and_selected_fields(monkeypatch):
     assert result['agenda'].startswith('1. Обсудить')
     first=ews.ET.fromstring(calls[0]['data'])
     assert first.find('.//t:DistinguishedFolderId',ews.NS).get('Id')=='calendar'
+    assert first.find('.//t:DistinguishedFolderId/t:Mailbox/t:EmailAddress',ews.NS).text=='owner@example.com'
     assert first.find('.//m:CalendarView',ews.NS).get('MaxEntriesReturned')=='200'
     assert b'item:Body' not in calls[0]['data'] and b'test-secret' not in calls[0]['data']
     second=ews.ET.fromstring(calls[1]['data'])
@@ -79,14 +80,14 @@ def test_only_read_calendar_soap_operations_and_selected_fields(monkeypatch):
 
 @pytest.mark.parametrize('status', [301,302,401,403,404,429,503])
 def test_http_failures_do_not_follow_redirects_or_return_remote_body(monkeypatch,status):
-    client=ews.EwsClient('mail.example.com','user','secret','basic')
+    client=ews.EwsClient('mail.example.com','user','secret','basic','owner@example.com')
     monkeypatch.setattr(client.session,'post',lambda *a,**kw:Response(b'private server details',status))
     with pytest.raises(ews.ExchangeError) as error: client.detail('id')
     assert 'private server' not in str(error.value)
 
 
 def test_xml_entities_and_oversized_responses_are_rejected(monkeypatch):
-    client=ews.EwsClient('mail.example.com','user','secret','basic')
+    client=ews.EwsClient('mail.example.com','user','secret','basic','owner@example.com')
     monkeypatch.setattr(client.session,'post',lambda *a,**kw:Response(b'<!DOCTYPE a [<!ENTITY x SYSTEM "file:///etc/passwd">]><a>&x;</a>'))
     with pytest.raises(ews.ExchangeError): client.detail('id')
     monkeypatch.setattr(ews,'MAX_RESPONSE',16)
@@ -96,7 +97,7 @@ def test_xml_entities_and_oversized_responses_are_rejected(monkeypatch):
 
 class FakeClient:
     made=[]
-    def __init__(self,*args): self.closed=False; self.calls=0; self.made.append(self)
+    def __init__(self,*args): self.args=args; self.closed=False; self.calls=0; self.made.append(self)
     def close(self): self.closed=True
     def events(self,*args):
         self.calls+=1
@@ -221,7 +222,7 @@ def test_calendar_routes_require_user_and_settings_require_admin(db):
         assert client.get(path).status_code==401
     client.cookies.set(auth.USER_COOKIE,'owner-token')
     assert client.get('/api/settings/exchange').status_code==401
-    assert client.get('/api/calendar/status').json()=={'enabled':True,'connected':False}
+    assert client.get('/api/calendar/status').json()=={'enabled':True,'connected':False,'connecting':False,'account_email':'owner@example.com','ldap_bound':False}
 
 
 def test_context_is_bounded_and_distinguishes_invitees_from_actual_attendance():
@@ -284,3 +285,124 @@ def test_prompt_keeps_invitation_glossary_and_speaker_roles_together(db,monkeypa
         corporate_terms=[{'term':'TrueConf','description':'Видеосвязь'}],
         participant_roles=[{'name':'Анна','job_title':'Архитектор'}]))
     assert len(calls)==1
+
+
+def ldap_profile(db,monkeypatch):
+    from backend import ldap_auth
+    user=store.update_user(db[0]['id'],auth_mode='ldap')
+    monkeypatch.setattr(ldap_auth,'calendar_identity',lambda email:{'username':'owner@ad.example.com','mailbox':'primary@example.com'})
+    return user
+
+
+def test_ldap_connection_uses_server_identity_and_pins_primary_mailbox(db,monkeypatch):
+    user=ldap_profile(db,monkeypatch)
+    with pytest.raises(ews.ExchangeError,match='другую'):
+        cal.connect('owner-token',user['id'],'other@example.com','secret')
+    assert not FakeClient.made
+    value=cal.connect('owner-token',user['id'],'','verified-password')
+    assert value['ldap_bound'] and value['mailbox']=='primary@example.com'
+    assert FakeClient.made[-1].args[1:] == ('owner@ad.example.com','verified-password','ntlm','primary@example.com')
+    assert 'verified-password' not in json.dumps(value)
+    with store.connect() as conn: assert 'verified-password' not in '\n'.join(conn.iterdump())
+
+
+def test_local_preview_cannot_select_a_different_mailbox(db):
+    cal.connect('owner-token',db[0]['id'],'DOMAIN\\other-login','password')
+    assert FakeClient.made[-1].args[-1]=='owner@example.com'
+
+
+def test_ldap_login_returns_before_exchange_finishes_and_uses_only_verified_password(db,monkeypatch):
+    user=ldap_profile(db,monkeypatch)
+    entered,release=threading.Event(),threading.Event()
+    original_events=FakeClient.events
+    def slow(self,*args):
+        entered.set(); assert release.wait(5); return original_events(self,*args)
+    monkeypatch.setattr(FakeClient,'events',slow)
+    monkeypatch.setattr(auth,'authenticate_platform_user',lambda email,password:user if password=='verified-pass' else None)
+    jobs=[]; original_start=cal.start_ldap
+    def start(*args):
+        job=original_start(*args); jobs.append(job); return job
+    monkeypatch.setattr(cal,'start_ldap',start)
+    client=TestClient(main.app)
+    try:
+        response=client.post('/api/session/login',json={'email':user['email'],'password':'verified-pass'})
+        assert response.status_code==200 and entered.wait(2)
+        assert client.get('/api/calendar/status').json()['connecting']
+        release.set(); jobs[0].join(3); assert not jobs[0].is_alive()
+        status=client.get('/api/calendar/status').json()
+        assert status['connected'] and status['mailbox']=='primary@example.com'
+        assert FakeClient.made[-1].args[2]=='verified-pass'
+        assert client.post('/api/session/login',json={'email':user['email'],'password':'wrong-pass'}).status_code==401
+        assert len(jobs)==1
+    finally:
+        release.set()
+        for job in jobs: job.join(3)
+
+
+def test_exchange_failure_does_not_fail_ldap_signin(db,monkeypatch):
+    user=ldap_profile(db,monkeypatch)
+    monkeypatch.setattr(auth,'authenticate_platform_user',lambda *args:user)
+    monkeypatch.setattr(FakeClient,'events',lambda *args:(_ for _ in ()).throw(ews.ExchangeError('Exchange недоступен',503)))
+    jobs=[]; original=cal.start_ldap
+    def start(*args): jobs.append(original(*args))
+    monkeypatch.setattr(cal,'start_ldap',start)
+    client=TestClient(main.app)
+    response=client.post('/api/session/login',json={'email':user['email'],'password':'verified-pass'})
+    assert response.status_code==200
+    jobs[0].join(3); assert not jobs[0].is_alive()
+    status=client.get('/api/calendar/status').json()
+    assert not status['connected'] and not status['connecting'] and status['error']=='Exchange недоступен'
+    assert FakeClient.made[-1].closed
+    assert client.get('/api/meetings').status_code==200
+
+
+@pytest.mark.parametrize('action',['disconnect','revoke','settings'])
+def test_cancelled_auto_login_never_forwards_password_after_ldap_lookup(db,monkeypatch,action):
+    from backend import ldap_auth
+    user=ldap_profile(db,monkeypatch)
+    entered,release=threading.Event(),threading.Event()
+    def slow(email):
+        entered.set(); assert release.wait(4)
+        return {'username':'owner@ad.example.com','mailbox':'primary@example.com'}
+    monkeypatch.setattr(ldap_auth,'calendar_identity',slow)
+    job=cal.start_ldap('owner-token',user,'secret')
+    try:
+        assert entered.wait(2)
+        if action=='disconnect': cal.disconnect('owner-token')
+        elif action=='revoke': auth.drop_user_sessions_for(user['id'])
+        else: cal.save_settings(True,'https://new.example.com/ews/exchange.asmx','ntlm','admin')
+    finally:
+        release.set(); job.join(3)
+    assert not job.is_alive() and not FakeClient.made
+    assert not cal.status('owner-token',user['id'])['connected']
+
+
+def test_auto_connect_skips_local_users_disabled_integration_and_bounds_concurrency(db,monkeypatch):
+    assert cal.start_ldap('owner-token',db[0],'secret') is None
+    user=ldap_profile(db,monkeypatch)
+    monkeypatch.setattr(cal,'_login_slots',threading.BoundedSemaphore(0))
+    assert cal.start_ldap('owner-token',user,'secret') is None
+    assert 'много подключений' in cal.status('owner-token',user['id'])['error']
+    cal.save_settings(False,'','ntlm','admin')
+    assert cal.start_ldap('owner-token',user,'secret') is None
+    assert not FakeClient.made
+
+
+def test_two_ldap_users_receive_only_their_own_calendars(db,monkeypatch):
+    from backend import ldap_auth
+    users=[store.update_user(user['id'],auth_mode='ldap') for user in db]
+    monkeypatch.setattr(ldap_auth,'calendar_identity',lambda email:{'username':email,'mailbox':email})
+    original=FakeClient.events
+    def own(self,*args):
+        values,truncated=original(self,*args)
+        values[0]['title']=self.args[-1]
+        return values,truncated
+    monkeypatch.setattr(FakeClient,'events',own)
+    jobs=[cal.start_ldap(token,user,'password') for token,user in zip(['owner-token','other-token'],users)]
+    for job in jobs: job.join(3); assert not job.is_alive()
+    now=datetime.now(timezone.utc)
+    own_event=cal.events('owner-token',users[0]['id'],now,now+timedelta(days=1))['events'][0]
+    other_event=cal.events('other-token',users[1]['id'],now,now+timedelta(days=1))['events'][0]
+    assert own_event['title']=='owner@example.com' and other_event['title']=='other@example.com'
+    with pytest.raises(ews.ExchangeError): cal.detail('other-token',users[1]['id'],own_event['id'])
+    with pytest.raises(ews.ExchangeError): cal.selected_context('other-token',users[1]['id'],own_event['id'])

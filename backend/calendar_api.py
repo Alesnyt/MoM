@@ -16,7 +16,7 @@ class ExchangeSettingsIn(BaseModel):
 
 
 class ExchangeLoginIn(BaseModel):
-    username: str = Field(min_length=1,max_length=254)
+    username: str = Field(default='',max_length=254)
     password: SecretStr = Field(min_length=1,max_length=1024)
 
 
