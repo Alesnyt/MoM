@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getCorporateContext, saveCorporateContext,
   type CorporateContext } from "./api";
 import { GlossariesPanel } from "./glossaries";
+import { TermDiscoveryPanel } from "./term-discovery";
 import { formatDate } from "./format";
 export function CorporateContextPanel() {
   const [data, setData] = useState<CorporateContext | null>(null);
@@ -9,6 +10,7 @@ export function CorporateContextPanel() {
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [glossaryRevision,setGlossaryRevision] = useState(0);
 
   useEffect(() => {
     if (busy) return;
@@ -56,7 +58,8 @@ export function CorporateContextPanel() {
         <p>Подключение к AD, поиск спикеров, состав выгрузки и расписание обновления настраиваются на вкладке «Каталог».</p>
         {!data.directory_current && <p className="health-warn">Справочник нужно обновить на вкладке «Каталог».</p>}
       </section>
-      <GlossariesPanel />
+      <TermDiscoveryPanel onPublish={()=>setGlossaryRevision(value=>value+1)} />
+      <GlossariesPanel key={glossaryRevision} />
     </>}
   </div>;
 }

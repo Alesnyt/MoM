@@ -188,6 +188,8 @@ def _header(iterator) -> list[str]:
 
 
 def preview(filename: str, content: bytes, actor: str, *, glossary_id: str = '', sheet: str = '') -> dict:
+    if glossary_id == 'discovered-terms':
+        raise ValueError('Этот справочник обновляется через подтверждение предложений терминов')
     saved = None
     if glossary_id:
         with store.connect() as conn:
@@ -228,6 +230,8 @@ def queue_import(upload_id: str, name: str, mapping: dict, sheet: str, actor: st
         upload = conn.execute("SELECT * FROM glossary_imports WHERE id=? AND status='preview'", (upload_id,)).fetchone()
         if not upload or upload['created'] < time.time()-3600: raise ValueError('Предпросмотр устарел. Выберите файл заново')
         gid = upload['glossary_id'] or secrets.token_hex(12)
+        if gid == 'discovered-terms':
+            raise ValueError('Этот справочник обновляется через подтверждение предложений терминов')
         old = conn.execute('SELECT * FROM glossaries WHERE id=?', (gid,)).fetchone()
         if conn.execute("SELECT 1 FROM glossary_imports WHERE glossary_id=? AND status IN ('queued','running')", (gid,)).fetchone():
             raise ValueError('Этот глоссарий уже обновляется')

@@ -1821,3 +1821,20 @@ select.title-input {
 .glossary-panel .context-table td:first-child { min-width:120px; }
 .glossary-panel .context-table td:nth-child(n+3) { min-width:100px; }
 .glossary-panel .context-table td:nth-child(2) { min-width:240px; }
+
+.term-discovery { margin-top: 1.5rem; }
+.term-schedule { padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
+.term-run { display: grid; gap: .4rem; margin: 1rem 0; }
+.term-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1.4rem 0 .6rem; }
+.term-proposal { border: 1px solid var(--line); border-radius: 12px; padding: 1.2rem; margin: 1rem 0; }
+.term-proposal h3 { margin-top: 0; overflow-wrap: anywhere; }
+.term-proposal > label { display: block; margin: .7rem 0; }
+.term-proposal > label input:not([type=checkbox]) { display: block; width: 100%; margin-top: .4rem; }
+.term-proposal .context-toggle { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.term-variant { padding: .7rem 0; }
+.term-variant blockquote { margin: .5rem 0 .7rem 1.6rem; padding: .6rem .9rem; border-left: 2px solid var(--line); }
+.term-variant blockquote p { margin: 0 0 .5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.term-variant blockquote small { display: block; margin-bottom: .4rem; }
+.term-variant audio { display: block; width: min(100%, 420px); margin-top: .6rem; }
+.term-discovery .composer-row { flex-wrap: wrap; }
+@media(max-width:640px) { .term-proposal { padding: .8rem; } .term-variant blockquote { margin-left: .4rem; } }

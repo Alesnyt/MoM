@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
-from . import transcript_import, upload, corporate_context, glossary
+from . import transcript_import, upload, corporate_context, glossary, term_discovery
 from . import word_protocol
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
@@ -69,6 +69,26 @@ class GlossaryImportIn(BaseModel):
 
 class GlossaryEnabledIn(BaseModel):
     enabled: bool
+
+
+class TermScheduleIn(BaseModel):
+    enabled: bool
+    run_time: str = Field(pattern=r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
+    max_batches: int = Field(ge=1, le=500)
+
+
+class TermReviewItem(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    revision: int = Field(ge=1)
+
+
+class TermReviewIn(BaseModel):
+    items: list[TermReviewItem] = Field(min_length=1, max_length=20)
+    action: Literal['approve', 'reject', 'defer', 'reopen']
+    canonical: str = Field(default='', max_length=240)
+    description: str = Field(default='', max_length=4000)
+    department: str = Field(default='', max_length=120)
+    replace_text: bool = False
 
 
 class DirectorySettingsIn(BaseModel):
@@ -502,6 +522,69 @@ def enable_glossary(glossary_id: str, payload: GlossaryEnabledIn, admin: dict = 
         return glossary.set_enabled(glossary_id, payload.enabled, admin["username"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get('/api/admin/term-discovery')
+def get_term_discovery(state: Literal['pending','approved','rejected','deferred'] = 'pending',
+                       offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)):
+    return term_discovery.snapshot(state,offset)
+
+
+@app.post('/api/admin/term-discovery/settings')
+def save_term_schedule(payload: TermScheduleIn, admin: dict = Depends(require_admin)):
+    term_discovery.settings(**payload.model_dump(),actor=admin['username'])
+    return {'ok':True}
+
+
+@app.post('/api/admin/term-discovery/scan', status_code=202)
+def scan_terms(admin: dict = Depends(require_admin)):
+    try:
+        term_discovery.queue(admin['username'])
+        return {'status':'queued'}
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@app.post('/api/admin/term-discovery/stop')
+def stop_term_scan(admin: dict = Depends(require_admin)):
+    with store.connect() as conn:
+        conn.execute("UPDATE term_discovery SET status='idle',owner=NULL,lease=0 WHERE status IN ('queued','running','paused')")
+    store.record_audit(admin['username'],'terms.stop')
+    return {'ok':True}
+
+
+@app.post('/api/admin/term-discovery/review')
+def review_terms(payload: TermReviewIn, admin: dict = Depends(require_admin)):
+    try:
+        term_discovery.review(**payload.model_dump(),actor=admin['username'])
+        return {'ok':True}
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@app.get('/api/admin/term-discovery/evidence/{evidence_id}/audio')
+def term_audio(evidence_id: int, _admin: dict = Depends(require_admin)):
+    import math
+    import subprocess
+    with store.connect() as conn:
+        row = conn.execute('''SELECT e.*,m.filename FROM term_evidence e JOIN meetings m ON m.id=e.meeting_id
+            WHERE e.id=?''',(evidence_id,)).fetchone()
+    if not row or row['start'] is None:
+        raise HTTPException(404,'Для этой реплики нет аудиозаписи или таймкода')
+    source = term_discovery.audio_source(row['meeting_id'],row['filename'])
+    if not source or not math.isfinite(row['start']):
+        raise HTTPException(404,'Запись уже удалена из архива')
+    start = max(0,row['start']-2)
+    end = row['end'] if row['end'] is not None and math.isfinite(row['end']) else start+30
+    try:
+        result = subprocess.run(['ffmpeg','-v','error','-nostdin','-ss',str(start),'-i',str(source),
+                                 '-t',str(min(60,max(5,end-start+2))),'-vn','-ac','1','-ar','16000',
+                                 '-f','mp3','pipe:1'],capture_output=True,timeout=20)
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        raise HTTPException(503,'Не удалось подготовить фрагмент записи') from exc
+    if result.returncode or not result.stdout:
+        raise HTTPException(503,'Не удалось прочитать аудиозапись')
+    return Response(result.stdout,media_type='audio/mpeg',headers={'Cache-Control':'no-store'})
 
 
 @app.get("/api/auth/status")

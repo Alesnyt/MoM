@@ -81,7 +81,7 @@ export function GlossariesPanel() {
       <p>Excel (.xlsx) или CSV до 25 МБ. Всего до 100 000 терминов. Первая строка — названия столбцов.</p>
       <div className="glossary-fields">
         <label>Куда загрузить<select value={target} disabled={busy||!!preview} onChange={event=>setTarget(event.target.value)}>
-          <option value="">Новый глоссарий</option>{data?.glossaries.map(g=><option value={g.id} key={g.id}>Обновить: {g.name}</option>)}
+          <option value="">Новый глоссарий</option>{data?.glossaries.filter(g=>g.id!=='discovered-terms').map(g=><option value={g.id} key={g.id}>Обновить: {g.name}</option>)}
         </select></label>
         <label>Файл глоссария<input key={fileKey} type="file" accept=".csv,.xlsx" disabled={busy||!!preview}
           onChange={event=>{setFile(event.target.files?.[0]||null);setError('');}}/></label>

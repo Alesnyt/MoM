@@ -611,3 +611,19 @@ export async function enableGlossary(id: string, enabled: boolean): Promise<void
     headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
   if (!response.ok) throw new Error(await parseError(response));
 }
+
+export type TermVariant = {id:string;revision:number;variant:string;canonical:string;description:string;department:string;
+  replace_text:number;meetings:number;state:string;examples:{id:number;meeting_id:string;title:string;excerpt:string;start:number|null;audio:boolean}[]};
+export type TermProposal = {key:string;meetings:number;variants:TermVariant[]};
+export type TermDiscovery = {job:{enabled:boolean;run_time:string;max_batches:number;next_run_at:string;
+  status:string;batches:number;found:number;pending_meetings:number;error:string|null;started_at:string|null;finished_at:string|null;model:string|null};
+  counts:Record<string,number>;proposals:TermProposal[];total:number};
+export async function getTermDiscovery(state:string,offset:number,signal?:AbortSignal):Promise<TermDiscovery> {
+  const response=await fetch(`/api/admin/term-discovery?state=${encodeURIComponent(state)}&offset=${offset}`,{credentials:'include',signal});
+  if(!response.ok)throw new Error(await parseError(response));return response.json();
+}
+export async function termDiscoveryAction(action:'settings'|'scan'|'stop'|'review',payload:unknown={}) {
+  const response=await fetch(`/api/admin/term-discovery/${action}`,{method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  if(!response.ok)throw new Error(await parseError(response));
+}
