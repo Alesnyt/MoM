@@ -63,6 +63,6 @@ async def bounded_form(request, *, limit: int, message: str, max_fields: int,
 @asynccontextmanager
 async def audio_form(request, check_disk):
     async with bounded_form(request, limit=config.MAX_UPLOAD_BYTES + 64 * 1024,
-                            message="Файл превышает допустимый размер", max_fields=1,
+                            message="Файл превышает допустимый размер", max_fields=2,
                             check_disk=check_disk) as form:
         yield form

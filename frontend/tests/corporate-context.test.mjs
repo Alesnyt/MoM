@@ -7,7 +7,7 @@ const dom = new JSDOM('<!doctype html><html><body></body></html>', {url:'http://
 Object.assign(globalThis, {window:dom.window, document:dom.window.document, navigator:dom.window.navigator,
   HTMLElement:dom.window.HTMLElement, Node:dom.window.Node, FormData:dom.window.FormData});
 const React = await import('react');
-const {render, fireEvent, waitFor, cleanup} = await import('@testing-library/react');
+const {render, fireEvent, waitFor, cleanup, act} = await import('@testing-library/react');
 const {CorporateContextPanel} = loadSource('corporate-context.tsx');
 const {DirectoryCachePanel} = loadSource('directory-cache.tsx');
 const originalFetch = globalThis.fetch;
@@ -54,6 +54,7 @@ test('admin can persist a daily sync time without changing it during other setti
   assert.equal(input.value, '03:00');
   assert.ok(view.getByText(/московскому времени \(UTC\+3\)/));
   assert.match(view.getByText(/Ближайший запуск/).textContent, /03:00/);
+  await act(async () => {}); // Finish loading the saved schedule before editing it.
   fireEvent.change(input, {target:{value:'23:15'}});
   fireEvent.submit(view.getByRole('button', {name:'Сохранить время'}).closest('form'));
   await waitFor(() => assert.equal(current.sync_time, '23:15'));

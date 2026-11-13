@@ -21,6 +21,7 @@ function mockApi(handler, {openai = {configured:true,connected:true,message:'OK'
   globalThis.fetch = async (url,options={}) => {
     if(url==='/api/health')return response({ok:true,ffmpeg:true,openai,max_upload_bytes:1024 ** 3,smtp:{configured:false}});
     if(url==='/api/auth/status')return response({configured:true,authenticated:adminAuthenticated});
+    if(url==='/api/calendar/status')return response({enabled:false,connected:false});
     if(url==='/api/session')return response({authenticated:true,email:'test@example.com',archive_limit:5});
     return handler(url,options);
   };
@@ -33,7 +34,7 @@ test('a provider outage gives regular users a plain notice and no admin controls
     return response([]);
   }, {openai});
   const view = render(React.createElement(App));
-  const notice = await view.findByRole('status');
+  const notice = await view.findByText('Обработка записей сейчас недоступна. Попробуйте позже.');
   assert.equal(notice.textContent, 'Обработка записей сейчас недоступна. Попробуйте позже.');
   assert.equal(view.queryByRole('button', {name:/админ|ключ/i}), null);
   assert.equal(view.queryByText(/Ключ не принят/i), null);
@@ -58,7 +59,7 @@ test('a signed-in administrator keeps the model outage diagnostics and shortcut'
   const view = render(React.createElement(App));
   try {
     const shortcut = await view.findByRole('button', {name:'Открыть администрирование'});
-    assert.match(view.getByRole('status').textContent, /Выбранная модель недоступна/);
+    assert.match(view.getByText(/Выбранная модель недоступна/).textContent, /Выбранная модель недоступна/);
     assert.ok(view.getByRole('button', {name:'Админка'}));
     fireEvent.click(shortcut);
     assert.equal(window.location.pathname, '/admin');
@@ -99,6 +100,7 @@ test('review details load once while another job continues polling', async () =>
     throw new Error(`Unexpected ${url}`);
   });
   const view=render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   await waitFor(()=>assert.equal(detailCalls,1));
   assert.ok(view.getByText('Загружаю транскрипт…'));
   await waitFor(()=>assert.ok(polls>=2),{timeout:4000});
@@ -125,6 +127,7 @@ test('recognition opens speaker editing and the skip button queues the protocol'
     throw new Error(`Unexpected ${url}`);
   });
   const view = render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   const transcript = await view.findByRole('heading', { name: 'Транскрипт по спикерам' }, { timeout: 4000 });
   assert.ok(view.getByRole('combobox', { name: 'Имя спикера Спикер 1' }));
   assert.equal(view.queryByRole('button', { name: 'Разметить спикеров' }), null);
@@ -149,6 +152,7 @@ test('late status poll cannot undo a successful restart with the same processing
   });
   window.confirm=()=>true;
   const view=render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   await waitFor(()=>assert.ok(view.getByRole('button',{name:'Запустить заново'})));
   await waitFor(()=>assert.ok(finishPoll),{timeout:4000});
   fireEvent.click(view.getByRole('button',{name:'Запустить заново'}));
@@ -170,6 +174,7 @@ test('switching meetings aborts details and ignores late success and late failur
     throw new Error(`Unexpected ${url}`);
   });
   const view=render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   await waitFor(()=>assert.ok(finishA));
   fireEvent.click(view.getByRole('button',{name:/Встреча B Проверьте спикеров/}));
   await waitFor(()=>assert.ok(signalA.aborted));
@@ -187,6 +192,7 @@ test('failed detail load offers an explicit retry and clears the error after suc
     throw new Error(`Unexpected ${url}`);
   });
   const view=render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   await waitFor(()=>assert.ok(view.getByText('Временный сбой загрузки')));
   fireEvent.click(view.getByRole('button',{name:'Повторить загрузку'}));
   await waitFor(()=>assert.ok(view.getByText('Готовый текст')));
@@ -206,6 +212,7 @@ test('a speaker save in another meeting does not discard transcript details', as
     throw new Error(`Unexpected ${url}`);
   });
   const view = render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   const input = await view.findByRole('combobox', { name: 'Имя спикера Спикер 1' });
   fireEvent.change(input, { target: { value: 'Анна' } });
   fireEvent.submit(input.closest('form'));
@@ -232,6 +239,7 @@ test('a decision source opens and focuses the corresponding transcript page', as
     throw new Error(`Unexpected ${url}`);
   });
   const view = render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Встреча A/}));
   fireEvent.click(await view.findByRole('button', { name: 'Реплика 58' }));
   assert.ok(view.getByText('Реплики 51–60 из 60'));
   assert.equal(document.activeElement, view.getByText('Фраза 58').closest('article'));

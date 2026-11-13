@@ -1,6 +1,6 @@
 import type { AuditEvent, AuthStatus, Health, Meeting, MonitoringSnapshot, PlatformUser, ProtocolRecipient, UserSession } from "./types";
 
-async function parseError(response: Response): Promise<string> {
+export async function parseError(response: Response): Promise<string> {
   try {
     const data = await response.json();
     if (typeof data?.detail === "string") return data.detail;
@@ -395,10 +395,11 @@ export async function getMeeting(id: string, signal?: AbortSignal): Promise<Meet
   return response.json();
 }
 
-export async function createMeeting(file: File, title: string): Promise<Meeting> {
+export async function createMeeting(file: File, title: string, calendarEventId?: string): Promise<Meeting> {
   const body = new FormData();
   body.append("file", file);
   if (title.trim()) body.append("title", title.trim());
+  if (calendarEventId) body.append("calendar_event_id", calendarEventId);
   const response = await fetch("/api/meetings", { method: "POST", credentials: "include", body });
   if (!response.ok) throw new Error(await parseError(response));
   const created: Partial<Meeting> | null = await response.json();
@@ -408,11 +409,12 @@ export async function createMeeting(file: File, title: string): Promise<Meeting>
   return created as Meeting;
 }
 
-export async function createTranscript(file: File | null, text: string, title: string): Promise<Meeting> {
+export async function createTranscript(file: File | null, text: string, title: string, calendarEventId?: string): Promise<Meeting> {
   const body = new FormData();
   if (file) body.append("file", file);
   else body.append("text", text);
   if (title.trim()) body.append("title", title.trim());
+  if (calendarEventId) body.append("calendar_event_id", calendarEventId);
   const response = await fetch("/api/meetings/transcript", { method: "POST", credentials: "include", body });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
@@ -454,7 +456,7 @@ export async function retryMeeting(id: string): Promise<Meeting> {
 export type Person = {
   name: string;
   email: string;
-  source: "mom" | "ldap";
+  source: "mom" | "ldap" | "calendar";
   job_title?: string;
 };
 

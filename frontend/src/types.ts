@@ -1,3 +1,5 @@
+import type { CalendarContext } from "./calendar-types";
+
 export type MeetingStatus =
   | "queued"
   | "extracting"
@@ -8,7 +10,7 @@ export type MeetingStatus =
   | "error";
 
 export type Tab = "overview" | "actions" | "mom" | "transcript";
-export type AdminTab = "monitoring" | "prompts" | "context" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit";
+export type AdminTab = "monitoring" | "prompts" | "context" | "llm" | "asr" | "queue" | "smtp" | "ldap" | "theme" | "users" | "audit" | "exchange";
 
 export type AuditEvent = {
   id: number;
@@ -81,6 +83,7 @@ export type Meeting = {
   title: string;
   filename: string;
   source_type?: "audio" | "text";
+  calendar_context?: CalendarContext | null;
   status: MeetingStatus;
   status_message: string;
   created_at: string;

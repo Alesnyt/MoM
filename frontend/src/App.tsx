@@ -35,6 +35,7 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
       return {
         ...row,
         source_type: row.source_type ?? old.source_type,
+        calendar_context: row.calendar_context ?? old.calendar_context,
         result: old.result,
         transcript: old.transcript,
         speakers: row.speakers ?? old.speakers,
@@ -46,6 +47,7 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
     return {
       ...row,
       source_type: row.source_type ?? old.source_type,
+      calendar_context: row.calendar_context ?? old.calendar_context,
       result: row.result ?? old.result,
       transcript: row.transcript ?? old.transcript,
       speakers: row.speakers ?? old.speakers,
@@ -73,7 +75,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [detailFailure, setDetailFailure] = useState<{ key: string; message: string } | null>(null);
   const [detailAttempt, setDetailAttempt] = useState(0);
-  const [composing, setComposing] = useState(false);
+  const [composing, setComposing] = useState(true);
   const [screen, setScreen] = useState<"app" | "admin">(pathIsAdmin() ? "admin" : "app");
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [user, setUser] = useState<UserSession | null>(null);
@@ -220,13 +222,13 @@ export default function App() {
       .catch(() => setAuth((current) => ({ configured: current?.configured ?? true, authenticated: false })));
   }, [screen, auth?.authenticated]);
 
-  async function onUpload(file: File | null, title: string, text?: string) {
+  async function onUpload(file: File | null, title: string, text?: string, calendarEventId?: string) {
     setError(null);
     setBusy(true);
     try {
       const created = text !== undefined
-        ? await createTranscript(file, text, title)
-        : await createMeeting(file!, title);
+        ? await createTranscript(file, text, title, calendarEventId)
+        : await createMeeting(file!, title, calendarEventId);
       setMeetings((rows) => [created, ...rows.filter((row) => row.id !== created.id)], created.id);
       setSelectedId(created.id);
       setTab("overview");
@@ -483,6 +485,7 @@ export default function App() {
             <UserLogin
               onLogin={async (session) => {
                 setUser(session);
+                setComposing(true);
                 setError(null);
                 const rows = await refresh();
                 setSelectedId(rows[0]?.id ?? null);
@@ -496,6 +499,8 @@ export default function App() {
               mailReady={Boolean(health?.smtp?.configured)}
               maxUploadBytes={health?.max_upload_bytes}
               nextExpired={nextExpired}
+              userEmail={user?.email || undefined}
+              onOpenCalendarSettings={adminReady ? () => { setAdminTab("exchange"); goAdmin(); } : undefined}
               onOpenSettings={adminReady ? goAdmin : undefined}
               onUpload={onUpload}
             />
@@ -523,6 +528,8 @@ export default function App() {
               mailReady={Boolean(health?.smtp?.configured)}
               maxUploadBytes={health?.max_upload_bytes}
               nextExpired={nextExpired}
+              userEmail={user?.email || undefined}
+              onOpenCalendarSettings={adminReady ? () => { setAdminTab("exchange"); goAdmin(); } : undefined}
               onOpenSettings={adminReady ? goAdmin : undefined}
               onUpload={onUpload}
             />

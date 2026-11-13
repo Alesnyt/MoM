@@ -53,7 +53,8 @@ from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monit
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
 from . import transcript_import, upload, corporate_context, glossary, term_discovery
-from . import word_protocol, context_api
+from . import word_protocol, context_api, calendar_api, calendar_service
+from .exchange_ews import ExchangeError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
 from .mail import build_eml, email_body, open_or_save_eml, send_mail, smtp_snapshot
@@ -307,6 +308,7 @@ def health(response: Response) -> dict:
 
 
 app.include_router(context_api.create_router(require_admin))
+app.include_router(calendar_api.create_router(require_user, require_admin, _rate_or_429))
 
 
 @app.get("/api/auth/status")
@@ -391,6 +393,12 @@ def user_login(payload: UserLoginIn, request: Request, response: Response) -> di
     token = auth.create_user_session(record["id"], record["email"])
     store.record_audit(record["email"], "user.login", record["email"], "вход в профиль")
     response.set_cookie(auth.USER_COOKIE, token, **_cookie_kw(request))
+    # Only a successful LDAP login may hand its password to this session's
+    # Exchange client. Failure of this optional integration must not reject login.
+    try:
+        calendar_service.start_ldap(token, record, payload.password)
+    except Exception:
+        log.warning("Автоподключение календаря не запущено; вход в MoM выполнен")
     user = store.get_user(record["id"])
     return {
         "authenticated": True,
@@ -407,6 +415,7 @@ def user_logout(
     response: Response,
     mom_user: str | None = Cookie(default=None),
 ) -> dict:
+    calendar_service.disconnect(mom_user)
     auth.drop_user_session(mom_user)
     _clear_cookie(response, auth.USER_COOKIE, request)
     return {"authenticated": False, "email": None, "archive_limit": None}
@@ -807,15 +816,16 @@ def _disk_or_507(extra: int = 0) -> None:
 async def import_transcript(request: Request, user: dict = Depends(require_user)) -> dict:
     # Dependencies authenticate before the first byte is read or file spooled.
     async with upload.bounded_form(request, limit=transcript_import.MAX_REQUEST_BYTES,
-                                   message="Транскрипт больше 1 МБ", max_fields=2,
+                                   message="Транскрипт больше 1 МБ", max_fields=3,
                                    max_part_size=transcript_import.MAX_REQUEST_BYTES, allow_urlencoded=True) as form:
-        if any(key not in {"text", "file", "title"} or len(form.getlist(key)) != 1 for key in form):
+        if any(key not in {"text", "file", "title", "calendar_event_id"} or len(form.getlist(key)) != 1 for key in form):
             raise HTTPException(400, "Нужен один текст или один файл и название")
         text, file, title = form.get("text"), form.get("file"), form.get("title", "")
         if not isinstance(title, str) or len(title) > 200:
             raise HTTPException(400, "Название должно быть не длиннее 200 символов")
         if (text is None) == (file is None):
             raise HTTPException(400, "Передайте либо текст, либо файл")
+        calendar_context = _calendar_selection(request,user,form.get("calendar_event_id"))
         original, suffix = "transcript.txt", ".txt"
         if file is not None:
             if not isinstance(file, StarletteUploadFile):
@@ -841,8 +851,8 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
             raise HTTPException(400, str(exc)) from exc
     _disk_or_507(len(text.encode("utf-8")) * 4)
     meeting = store.create_text_meeting(
-        uuid.uuid4().hex, title.strip() or (Path(original).stem[:200] if file else "Текстовая встреча"),
-        original[:255], user["user_id"], document,
+        uuid.uuid4().hex, title.strip() or (calendar_context or {}).get("title") or (Path(original).stem[:200] if file else "Текстовая встреча"),
+        original[:255], user["user_id"], document, calendar_context=calendar_context,
     )
     return meeting
 
@@ -854,13 +864,24 @@ async def create_meeting(
 ) -> dict:
     # Dependencies run before any multipart parsing or temporary file creation.
     async with upload.audio_form(request, _disk_or_507) as form:
+        if any(key not in {"file", "title", "calendar_event_id"} or len(form.getlist(key)) != 1 for key in form):
+            raise HTTPException(400, "Некорректные поля загрузки записи")
         file, title = form.get("file"), form.get("title")
         if not isinstance(file, StarletteUploadFile) or (title is not None and not isinstance(title, str)):
             raise HTTPException(status_code=422, detail="Нужен файл записи и текстовое название")
-        return await _create_audio_meeting(request, file, title, user)
+        calendar_context = _calendar_selection(request,user,form.get("calendar_event_id"))
+        return await _create_audio_meeting(request, file, title, user, calendar_context=calendar_context)
 
 
-async def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict) -> dict:
+def _calendar_selection(request: Request, user: dict, event_id) -> dict | None:
+    try:
+        return calendar_service.selected_context(request.cookies.get(auth.USER_COOKIE), user["user_id"], event_id)
+    except ExchangeError as exc:
+        raise HTTPException(exc.status,str(exc)) from exc
+
+
+async def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict,
+                                *, calendar_context: dict | None = None) -> dict:
     if not ffmpeg_available():
         raise HTTPException(status_code=500, detail="Установите ffmpeg и ffprobe")
     if not keys.snapshot()["connected"]:
@@ -920,8 +941,8 @@ async def _create_audio_meeting(request: Request, file: StarletteUploadFile, tit
             detail="Файл не похож на запись (webm, mkv, mp4, mp3, wav, m4a или ogg)",
         )
 
-    display_title = (title or "").strip() or Path(original).stem
-    meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"])
+    display_title = (title or "").strip() or (calendar_context or {}).get("title") or Path(original).stem
+    meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"], calendar_context=calendar_context)
     worker.notify_work()
     return meeting
 

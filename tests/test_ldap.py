@@ -150,3 +150,37 @@ def test_admin_directory_suggests_catalog_mail(tmp_path, monkeypatch: pytest.Mon
             "people": [{"name": "Анна", "email": "anna@example.com"}],
             "ldap": True,
         }
+
+
+@pytest.mark.parametrize('problem',['','different_dn','multiple_upns','no_upn','multiple_primary','different_email','search_error'])
+def test_calendar_identity_is_bound_to_one_login_object(monkeypatch,problem):
+    from types import SimpleNamespace
+    from ldap3 import BASE
+    _enable_ldap(monkeypatch)
+    dn='cn=a,dc=example,dc=com'
+    class Entry(dict): pass
+    entry=Entry(userPrincipalName=SimpleNamespace(value='a@ad.example.com'),
+        mail=SimpleNamespace(value='a@example.com'),
+        proxyAddresses=SimpleNamespace(value=['SMTP:a@primary.example.com','smtp:a@example.com']))
+    entry.entry_dn=dn
+    if problem=='different_dn': entry.entry_dn='cn=b,dc=example,dc=com'
+    if problem=='multiple_upns': entry['userPrincipalName'].value=['a@ad.example.com','b@ad.example.com']
+    if problem=='no_upn': entry['userPrincipalName'].value=None
+    if problem=='multiple_primary': entry['proxyAddresses'].value=['SMTP:a@primary.example.com','SMTP:b@example.com']
+    class Connection:
+        entries=[entry]
+        result={'description':'operationsError' if problem=='search_error' else 'success'}
+        closed=False
+        def search(self,**kw):
+            assert kw['search_base']==dn and kw['search_scope']==BASE
+            assert set(kw['attributes'])=={'userPrincipalName','mail','proxyAddresses'}
+            return True
+        def unbind(self): self.closed=True
+    connection=Connection()
+    monkeypatch.setattr(ldap_auth,'_service_connection',lambda:(connection,object()))
+    monkeypatch.setattr(ldap_auth,'_search',lambda *a:[(dn,'b@example.com' if problem=='different_email' else 'a@example.com')])
+    if problem:
+        with pytest.raises(ldap_auth.LdapError): ldap_auth.calendar_identity('a@example.com')
+    else:
+        assert ldap_auth.calendar_identity('a@example.com')=={'username':'a@ad.example.com','mailbox':'a@primary.example.com'}
+    assert connection.closed

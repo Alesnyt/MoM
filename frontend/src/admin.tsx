@@ -10,6 +10,7 @@ import { LdapPanel } from "./admin-directory";
 import { AuditPanel } from "./admin-audit";
 import { SettingsPanel } from "./admin-settings";
 import { PromptsPanel } from "./admin-prompts";
+import { ExchangePanel } from "./admin-exchange";
 
 export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "monitoring", label: "Мониторинг" },
@@ -20,6 +21,7 @@ export const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "queue", label: "Очередь" },
   { id: "smtp", label: "Почта" },
   { id: "ldap", label: "Каталог" },
+  { id: "exchange", label: "Exchange" },
   { id: "theme", label: "Вид" },
   { id: "users", label: "Пользователи" },
   { id: "audit", label: "Журнал" },
@@ -208,6 +210,8 @@ export function AdminSection({
         <UsersPanel ldapConfigured={Boolean(health?.ldap?.configured)} />
       ) : tab === "ldap" ? (
         <LdapPanel health={health} onChange={onHealth} />
+      ) : tab === "exchange" ? (
+        <ExchangePanel />
       ) : tab === "prompts" ? (
         <PromptsPanel />
       ) : tab === "audit" ? (
@@ -222,6 +226,7 @@ export function AdminSection({
 
 
 function adminHeading(tab: AdminTab): { title: string; lead: string } {
+  if (tab === "exchange") return { title: "Календарь Exchange", lead: "События корпоративного календаря на стартовом экране пользователя." };
   if (tab === "context") return { title: "Корпоративный контекст", lead: "Корпоративные глоссарии и сотрудники AD для автоматического подбора подсказок к записям." };
   if (tab === "monitoring") return { title: "Мониторинг", lead: "Текущая обработка встреч и нагрузка на MoM." };
   if (tab === "prompts") return { title: "Промпты и проверка имён", lead: "Инструкции, которые получает LLM при обработке встреч." };

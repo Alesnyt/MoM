@@ -75,6 +75,8 @@ def init_db() -> None:
         if "queued_at" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN queued_at TEXT")
             conn.execute("UPDATE meetings SET queued_at = created_at WHERE queued_at IS NULL")
+        if "calendar_json" not in columns:
+            conn.execute("ALTER TABLE meetings ADD COLUMN calendar_json TEXT")
         if "segments_json" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN segments_json TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_queue ON meetings(status, queued_at)")
@@ -191,14 +193,14 @@ def save_llm_settings(payload: dict, actor: str) -> int:
         return int(cursor.lastrowid)
 
 
-def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> dict[str, Any]:
+def create_meeting(meeting_id: str, title: str, filename: str, user_id: str, *, calendar_context: dict | None = None) -> dict[str, Any]:
     now = utc_now()
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO meetings (
-                id, title, filename, status, status_message, created_at, queued_at, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, title, filename, status, status_message, created_at, queued_at, user_id, calendar_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 meeting_id,
@@ -209,6 +211,7 @@ def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> 
                 now,
                 now,
                 user_id,
+                json.dumps(calendar_context, ensure_ascii=False) if calendar_context else None,
             ),
         )
     refresh_queue_messages()
@@ -218,7 +221,7 @@ def create_meeting(meeting_id: str, title: str, filename: str, user_id: str) -> 
     return meeting
 
 
-def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str, document: dict) -> dict:
+def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str, document: dict, *, calendar_context: dict | None = None) -> dict:
     """Publish review + transcript atomically; never expose an ASR queue job."""
     from .speakers import render_transcript
 
@@ -227,10 +230,11 @@ def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str
         conn.execute(
             """INSERT INTO meetings
                (id, title, filename, user_id, status, status_message, created_at,
-                queued_at, progress, transcript, segments_json)
-               VALUES (?, ?, ?, ?, 'review', 'Транскрипт импортирован. Проверьте спикеров', ?, ?, 85, ?, ?)""",
+                queued_at, progress, transcript, segments_json, calendar_json)
+               VALUES (?, ?, ?, ?, 'review', 'Транскрипт импортирован. Проверьте спикеров', ?, ?, 85, ?, ?, ?)""",
             (meeting_id, title, filename, user_id, now, now,
-             render_transcript(document), json.dumps(document, ensure_ascii=False)),
+             render_transcript(document), json.dumps(document, ensure_ascii=False),
+             json.dumps(calendar_context, ensure_ascii=False) if calendar_context else None),
         )
     return get_meeting(meeting_id)
 
@@ -601,6 +605,9 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
     data = dict(row)
     raw = data.pop("result_json", None)
     raw_segments = data.pop("segments_json", None)
+    raw_calendar = data.pop("calendar_json", None)
+    if body:
+        data["calendar_context"] = json.loads(raw_calendar) if raw_calendar else None
     data["progress"] = int(data.get("progress") or 0)
     if "mail_pending" in data:
         data["mail_pending"] = bool(data["mail_pending"])

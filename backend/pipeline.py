@@ -16,7 +16,7 @@ from .analyze import (
     merge_transcripts,
     transcribe_file,
 )
-from . import prompts, config, corporate_context
+from . import prompts, config, corporate_context, calendar_service
 from .audio import AudioError, extract_audio_async, extract_wav, format_duration, split_audio_async
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
 from .mail import complete_protocol
@@ -71,6 +71,7 @@ async def _analyze_with_heartbeat(
     client, transcript: str, title: str, progress: _Progress, prefix: str,
     participant_roles: list[dict[str, str]] | None = None,
     corporate_terms: list[dict] | None = None,
+    meeting_context: dict | None = None,
 ):
     start = time.monotonic()
     stop = asyncio.Event()
@@ -106,7 +107,8 @@ async def _analyze_with_heartbeat(
             )
 
         return await analyze_long_transcript(client, transcript, title, on_part=on_part, participant_roles=participant_roles,
-                                             **({"corporate_terms": corporate_terms} if corporate_terms else {}))
+                                             **({"corporate_terms": corporate_terms} if corporate_terms else {}),
+                                             **({"meeting_context": meeting_context} if meeting_context else {}))
     finally:
         stop.set()
         await task
@@ -147,6 +149,8 @@ async def _process_meeting(meeting_id: str) -> None:
 
     asr_model = config.get_asr_model()
     context = await asyncio.to_thread(corporate_context.for_meeting, meeting)
+    calendar_context = meeting.get("calendar_context")
+    calendar_hint = calendar_service.search_text(calendar_context)
     local_audio = config.is_local_asr(asr_model)
     audio_path = AUDIO_DIR / f"{meeting_id}{'.wav' if local_audio else '.mp3'}"
     client = make_client(api_key)
@@ -245,7 +249,7 @@ async def _process_meeting(meeting_id: str) -> None:
             if voiced is None:
                 step = "расшифровка"
                 log.info("шаг: расшифровка model=%s", asr_model)
-                hints = await asyncio.to_thread(context.hotwords, meeting["title"])
+                hints = await asyncio.to_thread(context.hotwords, meeting["title"] + "\n" + calendar_hint)
                 payload = await _transcribe(client, audio_path, meeting_id, duration, progress, asr_model=asr_model,
                                             **({"hotwords": hints} if hints else {}))
                 if known_turns is not None:
@@ -317,17 +321,19 @@ async def _process_meeting(meeting_id: str) -> None:
         protocol_input = render_transcript(document, numbered=True) if document["segments"] else transcript
         roles = [{"name": speaker["name"], "job_title": speaker["job_title"]}
                  for speaker in document["speakers"] if speaker.get("job_title")]
-        terms = await asyncio.to_thread(context.select, protocol_input)
+        terms = await asyncio.to_thread(context.select, protocol_input + "\n" + calendar_hint)
         document["corporate_context"] = {"revision": context.revision, "entries": terms}
         store.update_meeting(meeting_id, transcript_segments=document)
         with stage_timer("protocol"):
             result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix, roles,
-                                                   **({"corporate_terms": terms} if terms else {}))
+                                                   **({"corporate_terms": terms} if terms else {}),
+                                                   **({"meeting_context": calendar_context} if calendar_context else {}))
         # A cloud LLM request cannot always be interrupted immediately. Ignore
         # its late response when the user has requested stop/restart.
         if control.is_stopped(meeting_id):
             raise control.ProcessingStopped()
-        title = (result.get("title") or meeting["title"]).strip() or meeting["title"]
+        title = meeting["title"] if calendar_context else (result.get("title") or meeting["title"]).strip() or meeting["title"]
+        result["title"] = title
         complete_protocol(
             {**meeting, "speakers": document["speakers"]},
             title=title,
