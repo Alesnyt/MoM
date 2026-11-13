@@ -139,7 +139,6 @@ def test_admin_journal_hides_secrets(db: Path, monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(worker, "run_worker", _idle)
     monkeypatch.setattr(config, "set_ldap", lambda **kwargs: None)
-    monkeypatch.setattr(main, "open_or_save_eml", lambda meeting: {"mode": "saved"})
 
     with TestClient(app) as client:
         assert client.get("/api/admin/audit").status_code == 401

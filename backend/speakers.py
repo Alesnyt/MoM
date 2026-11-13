@@ -275,21 +275,39 @@ def reassign_segments(document: dict[str, Any], indexes: list[int], speaker_id: 
 
 def _replace_name(text: str, old: str, new: str) -> str:
     if re.fullmatch(r"Спикер \d+", old):
-        return re.sub(re.escape(old) + r"(?!\d)", new, text)
+        return re.sub(re.escape(old) + r"(?!\d)", lambda _: new, text)
     pattern = rf"(?<![\w\-]){re.escape(old)}(?![\w\-])"
-    return re.sub(pattern, new, text)
+    return re.sub(pattern, lambda _: new, text)
 
 
 def replace_speaker_label(value: Any, old: str, new: str) -> Any:
-    if not old or old == new:
+    """Rename only human-readable protocol fields; preserve schema and metadata."""
+    if not old or old == new or not isinstance(value, dict):
         return value
-    if isinstance(value, str):
-        return _replace_name(value, old, new)
-    if isinstance(value, list):
-        return [replace_speaker_label(item, old, new) for item in value]
-    if isinstance(value, dict):
-        return {key: replace_speaker_label(item, old, new) for key, item in value.items()}
-    return value
+    import copy
+
+    result = copy.deepcopy(value)
+    def fields(item: dict, names: tuple[str, ...]) -> None:
+        for name in names:
+            if isinstance(item.get(name), str):
+                item[name] = _replace_name(item[name], old, new)
+
+    fields(result, ("title", "summary"))
+    for name in ("participants", "key_points", "decisions"):
+        if isinstance(result.get(name), list):
+            result[name] = [_replace_name(item, old, new) if isinstance(item, str) else item
+                            for item in result[name]]
+    for name, allowed in (("action_items", ("task", "assignee")), ("decision_sources", ("decision",))):
+        for item in result.get(name) or []:
+            if isinstance(item, dict):
+                fields(item, allowed)
+    minutes = result.get("mom")
+    if isinstance(minutes, dict):
+        fields(minutes, ("next_meeting",))
+        for item in minutes.get("agenda") or []:
+            if isinstance(item, dict):
+                fields(item, ("topic", "discussion", "outcome"))
+    return result
 
 
 def _segment(item: dict[str, Any]) -> dict[str, Any]:

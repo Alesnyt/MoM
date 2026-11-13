@@ -168,3 +168,30 @@ def test_large_sparse_recording_does_not_compare_every_interval(monkeypatch):
     assert len(result["segments"]) == count
     assert all(item["speaker"] != UNKNOWN_ID for item in result["segments"])
     assert calls == count
+
+
+def test_rename_preserves_protocol_metadata_and_literal_replacement():
+    from backend.analyze import ProtocolResult
+    for old in ('low', 'medium', 'high', 'ru', '2026-11-13'):
+        original = ProtocolResult.model_validate({
+            'title': old, 'language': 'ru', 'date_hint': old, 'summary': f'{old} выступил.',
+            'participants': [old], 'key_points': [old], 'decisions': [old],
+            'decision_sources': [{'decision': old, 'turns': [1]}],
+            'action_items': [{'task': old, 'assignee': old, 'due': old, 'priority': 'low', 'source_turns': [1]}],
+            'mom': {'agenda': [{'topic': old, 'discussion': old, 'outcome': old}], 'next_meeting': old},
+        }).model_dump()
+        original['extra_metadata'] = {'value': old}
+        new = r'Анна\1'
+        updated = replace_speaker_label(original, old, new)
+        ProtocolResult.model_validate(updated)  # Renaming must not break downloads/validation.
+        assert updated['title'] == new
+        assert updated['summary'] == new + ' выступил.'
+        for field in ('participants', 'key_points', 'decisions'):
+            assert updated[field] == [new]
+        assert updated['decision_sources'] == [{'decision': new, 'turns': [1]}]
+        assert updated['action_items'] == [{'task': new, 'assignee': new, 'due': old,
+                                           'priority': 'low', 'source_turns': [1]}]
+        assert updated['language'] == 'ru' and updated['date_hint'] == old
+        assert updated['extra_metadata'] == {'value': old}
+        assert updated['mom']['agenda'] == [{'topic': new, 'discussion': new, 'outcome': new}]
+        assert original['action_items'][0]['assignee'] == old

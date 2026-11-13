@@ -84,8 +84,15 @@ export async function saveDirectorySchedule(settings: {sync_ad?: boolean; sync_t
 
 export async function getHealth(): Promise<Health> {
   const response = await fetch("/api/health");
-  if (!response.ok) throw new Error(await parseError(response));
-  return response.json();
+  if (!response.ok && response.status !== 503) throw new Error(await parseError(response));
+  const state = await response.json();
+  // Readiness failures still carry the real capabilities needed by the UI.
+  if (typeof state?.ok !== "boolean" || typeof state?.ffmpeg !== "boolean" ||
+      typeof state?.openai?.connected !== "boolean" ||
+      !Number.isFinite(state?.max_upload_bytes) || state.max_upload_bytes <= 0) {
+    throw new Error("Не удалось получить состояние сервера");
+  }
+  return state;
 }
 
 export async function getAuthStatus(): Promise<AuthStatus> {

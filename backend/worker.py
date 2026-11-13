@@ -44,7 +44,7 @@ async def run_worker(stop: asyncio.Event) -> None:
     _wake = asyncio.Event()
     _loop = asyncio.get_running_loop()
     jobs = {"mail": _run_delivery, "directory": corporate_context.run_sync,
-            "glossary": glossary.run_imports, "term_discovery": term_discovery.run, "calendar": calendar_service.run_cleanup}
+            "sessions": retention.run_session_cleanup, "glossary": glossary.run_imports, "term_discovery": term_discovery.run, "calendar": calendar_service.run_cleanup}
     _services = {name: background.Service(name) for name in ("queue", *jobs)}
     queue = _services["queue"]
     services = [asyncio.create_task(_services[name].supervise(run, stop), name=f"mom-{name}")

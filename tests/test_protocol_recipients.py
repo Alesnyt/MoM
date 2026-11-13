@@ -313,3 +313,30 @@ def test_interrupted_smtp_attempt_is_not_sent_again(delivery):
     assert not store.get_meeting(mid)["mail_pending"]
     assert "SMTP не подтвердил отправку" in store.get_meeting(mid)["status_message"]
     assert sent == []
+
+
+def test_legacy_email_download_is_memory_only_and_owner_scoped(delivery, monkeypatch):
+    import subprocess
+    client, meeting, sent = delivery
+    mid = meeting['id']
+    path = f'/api/meetings/{mid}/email'
+    assert client.post(path).status_code == 409
+    store.update_meeting(mid, status='done', result={'title': 'План', 'summary': 'Согласовали запуск'})
+    before = set(config.DATA_DIR.rglob('*'))
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **kw: pytest.fail('export launched a desktop application'))
+    for method, suffix in (('POST', ''), ('GET', '.eml')):
+        downloaded = client.request(method, path + suffix)
+        assert downloaded.status_code == 200
+        assert downloaded.headers['content-type'] == 'message/rfc822'
+        assert downloaded.headers['cache-control'] == 'no-store'
+        message = BytesParser(policy=policy.default).parsebytes(downloaded.content)
+        attachment, = message.iter_attachments()
+        document = Document(BytesIO(attachment.get_payload(decode=True)))
+        assert any('Согласовали запуск' in p.text for p in document.paragraphs)
+    assert set(config.DATA_DIR.rglob('*')) == before
+    assert sent == []
+    store.put_session('other', 'user', user_id='other', email='other@example.com', expires=time.time()+3600)
+    client.cookies.set(auth.USER_COOKIE, 'other')
+    assert client.post(path).status_code == 404
+    client.cookies.clear()
+    assert client.post(path).status_code == 401

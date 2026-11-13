@@ -1,7 +1,8 @@
+import asyncio
 import logging
 import shutil
 
-from . import config, store
+from . import background, config, store
 
 log = logging.getLogger("mom.retention")
 
@@ -28,3 +29,9 @@ def remove_pruned(meetings: list[dict[str, str]], actor: str = "система")
             purge_files(meeting_id)
         except OSError:
             log.exception("Не удалось очистить файлы встречи %s", meeting_id)
+
+
+async def run_session_cleanup(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        await asyncio.to_thread(store.purge_expired_sessions)
+        await background.pause(stop, 60)

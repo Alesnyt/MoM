@@ -57,7 +57,7 @@ from . import word_protocol, context_api, calendar_api, calendar_service
 from .exchange_ews import ExchangeError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
-from .mail import build_eml, email_body, open_or_save_eml, send_mail, smtp_snapshot
+from .mail import build_eml, email_body, send_mail, smtp_snapshot
 from .pipeline import format_duration
 from .speakers import SpeakerError, participant_labels, reassign_segments, rename_speaker, render_transcript, replace_speaker_label, select_protocol_recipients
 
@@ -198,14 +198,6 @@ def _check_ldap_settings(payload: LdapIn) -> None:
 
 def _actor_name(session: dict) -> str:
     return (session.get("username") or session.get("email") or "система").strip() or "система"
-
-
-_EMAIL_OPENED = {
-    "saved": "черновик сохранён",
-    "opened-outlook": "открыт в Outlook",
-    "opened-mail": "открыт в Почте",
-    "opened": "открыт файл письма",
-}
 
 
 def _normalize_auth_mode(value: str) -> str:
@@ -1219,22 +1211,10 @@ def download_meeting_email(meeting_id: str, user: dict = Depends(require_user)) 
     })
 
 
-@app.post("/api/meetings/{meeting_id}/email")
-def send_meeting_email(meeting_id: str, user: dict = Depends(require_user)) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    if meeting["status"] != "done" or not meeting.get("result"):
-        raise HTTPException(status_code=409, detail="Протокол ещё не готов")
-    try:
-        opened = open_or_save_eml(meeting)
-    except ValidationError as exc:
-        raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
-    store.record_audit(
-        _actor_name(user),
-        "email.open",
-        meeting_id,
-        _EMAIL_OPENED.get(opened.get("mode") or "", "черновик сохранён"),
-    )
-    return opened
+@app.post("/api/meetings/{meeting_id}/email", deprecated=True)
+def send_meeting_email(meeting_id: str, user: dict = Depends(require_user)) -> Response:
+    # Legacy clients get the same download; never launch programs or persist drafts.
+    return download_meeting_email(meeting_id, user)
 
 
 def to_markdown(meeting: dict) -> str:
