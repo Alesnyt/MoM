@@ -12,7 +12,7 @@ export function calendarTime(event: Pick<CalendarEvent, "start" | "end" | "all_d
 
 export function CalendarContextCard({ event, onClear }: { event: CalendarEvent | CalendarContext; onClear?: () => void }) {
   return <section className="calendar-context" aria-label="Контекст из приглашения">
-    <div className="calendar-context-heading"><span className="eyebrow">Из календаря Exchange</span>
+    <div className="calendar-context-heading"><span className="eyebrow">Из вашего календаря</span>
       {onClear && <button className="ghost" type="button" onClick={onClear}>Убрать привязку</button>}</div>
     <strong>{event.title}</strong><p>{calendarTime(event)}</p>
     {event.location && <p>Место: {event.location}</p>}
@@ -42,7 +42,7 @@ export function CalendarPanel({ onSelect, selectedId, userEmail, disabled, onOpe
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [date, setDate] = useState(() => dateValue(new Date()));
-  const [days, setDays] = useState(7);
+  const [days, setDays] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const loginRequest = useRef<AbortController | null>(null);
   const detailRequest = useRef<AbortController | null>(null);
@@ -102,7 +102,7 @@ export function CalendarPanel({ onSelect, selectedId, userEmail, disabled, onOpe
     const secret = password; setPassword("");
     try {
       const next = await connectCalendar(status?.ldap_bound ? "" : username.trim(),secret,controller.signal);
-      if (!controller.signal.aborted) { setStatus(next); if (!next.connected) setError("Подключение не установлено. Проверьте настройки Exchange."); }
+      if (!controller.signal.aborted) { setStatus(next); if (!next.connected) setError("Подключение не установлено. Проверьте настройки календаря."); }
     } catch (err) { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Не удалось подключиться"); }
     finally { if (!controller.signal.aborted) { setConnecting(false); loginRequest.current = null; } }
   }
@@ -119,26 +119,30 @@ export function CalendarPanel({ onSelect, selectedId, userEmail, disabled, onOpe
     const value = new Date(`${date}T12:00:00`); value.setDate(value.getDate()+offset);
     clearSelection(); setDate(dateValue(value));
   }
+  function goToDay(offset: number) {
+    const value = new Date(); value.setDate(value.getDate()+offset);
+    clearSelection(); setDays(1); setDate(dateValue(value));
+  }
 
-  return <aside className="calendar-panel" aria-label="Календарь Exchange">
-    <p className="eyebrow">Ваш рабочий календарь</p><h2>Встречи в Exchange</h2>
+  return <aside className="calendar-panel" aria-label="Ваш рабочий календарь">
+    <h2>Ваш рабочий календарь</h2>
     <p className="progress-hint">Выберите событие, затем загрузите запись. Название, повестка и приглашённые помогут подготовить протокол.</p>
     {(error || status?.error) && <div className="banner" role="alert">{error || status?.error}</div>}
     {!status && !error && <p role="status">Проверяю подключение…</p>}
     {!status && error && <button className="ghost" onClick={() => { setError(""); void calendarStatus().then(setStatus).catch(err => setError(err.message)); }}>Повторить</button>}
-    {status && !status.enabled && <div className="calendar-empty"><p>Администратор ещё не настроил календарь Exchange.</p>
-      {onOpenSettings && <button className="primary" onClick={onOpenSettings}>Настроить Exchange</button>}</div>}
+    {status && !status.enabled && <div className="calendar-empty"><p>Администратор ещё не настроил подключение календаря.</p>
+      {onOpenSettings && <button className="primary" onClick={onOpenSettings}>Настроить календарь</button>}</div>}
     {status?.enabled && status.connecting && <div>
-      <p className="calendar-loading" role="status"><span className="calendar-spinner" />Подключаю ваш календарь после входа через LDAP…</p>
+      <p className="calendar-loading" role="status"><span className="calendar-spinner" />Подключаю ваш календарь…</p>
       <p className="progress-hint">Учётная запись: {status.account_email || userEmail}. Можно продолжать работу в MoM.</p>
       <button className="ghost" type="button" onClick={() => void disconnect()}>Отменить</button>
     </div>}
     {status?.enabled && !status.connected && !status.connecting && <form className="field-stack" onSubmit={event => { event.preventDefault(); void connect(); }}>
       {status.ldap_bound ? <div><p>Календарь учётной записи: <strong>{status.account_email || userEmail}</strong></p>
-        <p className="progress-hint">Календарь подключается автоматически при входе через LDAP. Для повторного подключения войдите в MoM заново или введите пароль своей учётной записи ниже.</p>
+        <p className="progress-hint">Календарь подключается автоматически при входе с корпоративной учётной записью. Для повторного подключения войдите в MoM заново или введите пароль своей учётной записи ниже.</p>
       </div> : <label className="field-label">Доменный логин или email<input className="title-input" value={username} autoComplete="username" disabled={connecting || disabled}
         placeholder="DOMAIN\login или email@company.ru" onChange={event => setUsername(event.target.value)} /></label>}
-      <label className="field-label">Пароль Exchange<input className="title-input" type="password" value={password} autoComplete="current-password" disabled={connecting || disabled}
+      <label className="field-label">Пароль корпоративной учётной записи<input className="title-input" type="password" value={password} autoComplete="current-password" disabled={connecting || disabled}
         onChange={event => setPassword(event.target.value)} /></label>
       <p className="progress-hint">Подключается только ваш календарь. Пароль не сохраняется на диск; после выхода из профиля или перезапуска MoM подключитесь снова.</p>
       <div className="calendar-actions"><button className="primary" disabled={connecting || disabled || !username.trim() || !password}>
@@ -153,7 +157,8 @@ export function CalendarPanel({ onSelect, selectedId, userEmail, disabled, onOpe
         <label>Период<select value={days} disabled={disabled} onChange={event => { clearSelection(); setDays(Number(event.target.value)); }}><option value={1}>День</option><option value={7}>Неделя</option></select></label>
       </div>
       <div className="calendar-actions"><button className="ghost" disabled={disabled} onClick={() => move(-days)} aria-label="Предыдущий период">←</button>
-        <button className="ghost" disabled={disabled} onClick={() => { clearSelection(); setDate(dateValue(new Date())); }}>Сегодня</button>
+        <button className="ghost" disabled={disabled} onClick={() => goToDay(-1)}>Вчера</button>
+        <button className="ghost" disabled={disabled} onClick={() => goToDay(0)}>Сегодня</button>
         <button className="ghost" disabled={disabled} onClick={() => move(days)} aria-label="Следующий период">→</button>
         <button className="ghost" disabled={loading || disabled} onClick={() => { clearSelection(); setRefresh(n => n+1); }}>Обновить</button></div>
       {loading && <p className="calendar-loading" role="status"><span className="calendar-spinner" />Загружаю события…</p>}
