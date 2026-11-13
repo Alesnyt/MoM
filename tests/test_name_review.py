@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from openai import BadRequestError
 
-from backend import analyze, config, control, name_review, pipeline, prompts, store
+from backend import analyze, config, context_budget, control, name_review, pipeline, prompts, store
 
 
 @pytest.fixture
@@ -188,15 +188,15 @@ def test_saved_prompt_used_for_every_summary_part_and_fallback(db):
 def test_long_protocol_groups_replies_and_retains_grounded_commitments(db, monkeypatch):
     monkeypatch.setattr(config, "PROTOCOL_CONTEXT_TOKENS", 8192)
     store.save_llm_settings({**prompts.snapshot(), "protocol_prompt": "Return JSON"}, "admin")
-    first = "[реплика 1] Анна: Утвердили пилот. " + "а" * 1400
-    second = "[реплика 2] Борис: Я подготовлю отчёт к пятнице. " + "б" * 1400
+    first = "[реплика 1] Анна: Утвердили пилот. " + "а" * 3200
+    second = "[реплика 2] Борис: Я подготовлю отчёт к пятнице. " + "б" * 3200
     calls = []
 
     async def create(**kwargs):
         messages = kwargs["messages"]
         body = messages[1]["content"]
         calls.append(body)
-        assert sum(len(message["content"].encode()) for message in messages) < 8192 - 2048
+        assert sum(context_budget.estimate_tokens(message["content"]) for message in messages) + kwargs["max_tokens"] + 64 < 8192
         if first in body:
             assert second not in body
             return response({"decisions": ["Одобрили пилот"],
@@ -221,10 +221,10 @@ def test_oversized_intermediate_protocols_stay_inside_model_context(db, monkeypa
     async def create(**kwargs):
         body = kwargs["messages"][1]["content"]
         calls.append(body)
-        assert len(body.encode()) < 8192 - 2048
+        assert sum(context_budget.estimate_tokens(message["content"]) for message in kwargs["messages"]) + kwargs["max_tokens"] + 64 < 8192
         return response({"summary": str(len(calls)) + "Я" * 4000, "decisions": [f"Решение {len(calls)}"]})
 
-    text = "\n".join(f"[реплика {index}] Анна: " + "А" * 1400 for index in range(1, 5))
+    text = "\n".join(f"[реплика {index}] Анна: " + "А" * 3200 for index in range(1, 5))
     result = asyncio.run(analyze.analyze_long_transcript(client_for(create), text, "Встреча"))
     assert len(calls) == 4
     assert result["decisions"] == [f"Решение {index}" for index in range(1, 5)]
@@ -237,7 +237,7 @@ def test_corporate_glossary_and_roles_share_a_bounded_prompt(db, monkeypatch):
     async def create(**kwargs):
         messages = kwargs["messages"]
         calls.append(messages)
-        assert sum(len(message["content"].encode()) for message in messages) < 8192 - 2048
+        assert sum(context_budget.estimate_tokens(message["content"]) for message in messages) + kwargs["max_tokens"] + 64 < 8192
         assert 'TrueConf' in messages[1]["content"]
         assert 'Архитектор' in messages[1]["content"]
         assert 'подтверждай репликами' in messages[1]["content"]

@@ -3,14 +3,11 @@ from __future__ import annotations
 import logging
 import smtplib
 import ssl
-import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate
-from pathlib import Path
 
 from . import config, protocol_email, retention, store, word_protocol
 from .analyze import ProtocolResult
@@ -112,37 +109,6 @@ def build_eml(meeting: dict) -> bytes:
     message["Date"] = formatdate(localtime=True)
     message["X-Unsent"] = "1"
     return message.as_bytes()
-
-
-def _slug(value: str) -> str:
-    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in value)
-    while "--" in cleaned:
-        cleaned = cleaned.replace("--", "-")
-    return cleaned.strip("-")[:60] or "mom"
-
-
-def open_or_save_eml(meeting: dict) -> dict[str, str]:
-    config.ensure_dirs()
-    export_dir = config.DATA_DIR / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
-    result = meeting.get("result") or {}
-    path = export_dir / f"{_slug(result.get('title') or meeting.get('title') or 'mom')}.eml"
-    path.write_bytes(build_eml(meeting))
-    config.restrict_path(path, 0o600)
-    opened = _open_local_eml(path)
-    return {"mode": opened}
-
-
-def _open_local_eml(path: Path) -> str:
-    if sys.platform != "darwin":
-        return "saved"
-    subprocess.run(["xattr", "-c", str(path)], capture_output=True, check=False)
-    for app, mode in (("Microsoft Outlook", "opened-outlook"), ("Mail", "opened-mail")):
-        proc = subprocess.run(["open", "-a", app, str(path)], capture_output=True, check=False)
-        if proc.returncode == 0:
-            return mode
-    subprocess.run(["open", str(path)], capture_output=True, check=False)
-    return "opened"
 
 
 def smtp_snapshot(*, full: bool = False) -> dict:

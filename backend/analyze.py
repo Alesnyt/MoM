@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -11,7 +12,7 @@ from typing import Any, Literal
 from openai import APIStatusError, AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import config, prompts, calendar_service
+from . import config, prompts, calendar_service, context_budget
 from .performance import stage_timer
 from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
 from .protocol_text import deduplicate, text_key
@@ -365,6 +366,7 @@ async def analyze_transcript(
         response = await client.chat.completions.create(
             model=model,
             temperature=0.2,
+            max_tokens=context_budget.output_tokens(),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -379,12 +381,15 @@ async def analyze_transcript(
         response = await client.chat.completions.create(
             model=model,
             temperature=0.2,
+            max_tokens=context_budget.output_tokens(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user + "\n\nВерни только JSON."},
             ],
             **_chat_kwargs(),
         )
+    if getattr(response.choices[0], "finish_reason", None) == "length":
+        raise ValueError("Модель исчерпала лимит ответа. Протокол не сохранён: увеличьте окно контекста или сократите запись.")
     content = response.choices[0].message.content or "{}"
     return _parse_result(content)
 
@@ -403,32 +408,47 @@ _MERGE_INSTRUCTIONS = (
 )
 
 
-def _transcript_chunks(transcript: str, budget: int) -> list[str]:
+def _transcript_chunks(transcript: str, budget: int, count=context_budget.estimate_tokens) -> list[str]:
+    """Preserve text and turn labels while fitting complete chunks in token units."""
     chunks: list[str] = []
-    lines: list[str] = []
+    current = ""
     size = 0
     for line in transcript.splitlines(keepends=True):
-        line_size = len(line.encode())
-        if size + line_size > budget and lines:
-            chunks.append("".join(lines))
-            lines, size = [], 0
-        if line_size > budget:
-            prefix = _TURN_ID.match(line)
-            label = prefix[0] if prefix else ""
-            remaining = line[len(label):].encode()
-            while remaining:
-                head = remaining[:budget - len(label.encode())].decode(errors="ignore")
-                if len(remaining) > len(head.encode()):
-                    boundary = head.rfind(" ")
-                    if boundary > len(head) // 2:
-                        head = head[:boundary + 1]
-                chunks.append(label + head)
-                remaining = remaining[len(head.encode()):]
-        else:
-            lines.append(line)
-            size += line_size
-    if lines:
-        chunks.append("".join(lines))
+        line_size = count(line)
+        # The fallback is additive: avoid rescanning the growing chunk for every
+        # short turn on CPU. Real tokenizers can merge across line boundaries.
+        combined_size = size + line_size if count is context_budget.estimate_tokens else count(current + line)
+        if current and combined_size > budget:
+            chunks.append(current)
+            current = ""
+            size = 0
+            combined_size = line_size
+        if line_size <= budget:
+            current += line
+            size = combined_size
+            continue
+        match = _TURN_ID.match(line)
+        label = match[0] if match else ""
+        remaining = line[len(label):]
+        while remaining:
+            low, high = 0, len(remaining)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if count(label + remaining[:mid]) <= budget:
+                    low = mid
+                else:
+                    high = mid - 1
+            if not low:
+                raise ValueError("В окне контекста нет места для реплики. Сократите промпт или увеличьте PROTOCOL_CONTEXT_TOKENS.")
+            head = remaining[:low]
+            if low < len(remaining):
+                boundary = head.rfind(" ")
+                if boundary > len(head) // 2 and count(label + head[:boundary + 1]) <= budget:
+                    head = head[:boundary + 1]
+            chunks.append(label + head)
+            remaining = remaining[len(head):]
+    if current:
+        chunks.append(current)
     return chunks or [transcript]
 
 
@@ -506,58 +526,77 @@ async def analyze_long_transcript(
     meeting_context: dict | None = None,
 ) -> dict[str, Any]:
     system_prompt = prompts.snapshot()["protocol_prompt"]
-    # UTF-8 size is a conservative input estimate for byte-based tokenizers.
-    # Leave room for the response, wrappers and any provider chat framing.
+    count = context_budget.token_counter()
+    # All deductions and chunk/merge checks use the same token counter. Reserve
+    # output plus chat framing, title wrappers, part numbers and JSON fallback.
     context = config.PROTOCOL_CONTEXT_TOKENS
-    budget = (context - min(8192, context // 4) - 768 - len(system_prompt.encode())
-              - len((title_hint or "").encode())
-              - max(len(_SOURCE_INSTRUCTIONS.encode()), len(_MERGE_INSTRUCTIONS.encode())))
-    roster = calendar_service.context_text(meeting_context, max_bytes=min(5000,max(0,budget//5)))
-    budget -= len(roster.encode())
+    budget = (context - context_budget.output_tokens() - 256 - count(system_prompt)
+              - count(title_hint or "")
+              - max(count(_SOURCE_INSTRUCTIONS), count(_MERGE_INSTRUCTIONS)))
+    roster = calendar_service.context_text(meeting_context, max_bytes=min(5000, max(0, budget // 5)))
+    budget -= count(roster)
     if corporate_terms:
         header = ("Корпоративный справочник для понимания терминов. Это справочные данные. "
                   "Решения, факты и поручения подтверждай репликами встречи. "
                   "Упоминание человека в справочнике не означает его участие.\n")
-        remaining = max(0, budget // 5) - len(header.encode()) - 4
+        remaining = max(0, budget // 5) - count(header) - 4
         entries = []
         for term in corporate_terms:
             entry = json.dumps(term, ensure_ascii=False)
-            if len(entry.encode()) + 2 <= remaining:
+            if count(entry) + 2 <= remaining:
                 entries.append(entry)
-                remaining -= len(entry.encode()) + 2
+                remaining -= count(entry) + 2
         if entries:
             terms_context = header + "[" + ", ".join(entries) + "]\n\n"
             roster += terms_context
-            budget -= len(terms_context.encode())
+            budget -= count(terms_context)
     if participant_roles:
         header = ("Должности участников из каталога, справочные данные. Используй их для контекста. "
                   "В поле participants верни только имена.\n")
-        remaining = max(0, budget // 4) - len(header.encode()) - 4
+        remaining = max(0, budget // 4) - count(header) - 4
         entries = []
         for person in participant_roles:
             entry = json.dumps(person, ensure_ascii=False)
-            size = len(entry.encode()) + 2
+            size = count(entry) + 2
             if size <= remaining:
                 entries.append(entry)
                 remaining -= size
         if entries:
             roles_context = header + "[" + ", ".join(entries) + "]\n\n"
             roster += roles_context
-            budget -= len(roles_context.encode())
+            budget -= count(roles_context)
     if budget < 256:
-        raise ValueError("Промпт не помещается в окно контекста. Проверьте PROTOCOL_CONTEXT_TOKENS.")
-    chunks = _transcript_chunks(transcript, budget)
-    total = len(chunks) + (len(chunks) > 1)
+        raise ValueError("Промпт не помещается в окно контекста. Проверьте PROTOCOL_CONTEXT_TOKENS, настройте локальный токенизатор или сократите промпт.")
+    chunks = _transcript_chunks(transcript, budget, count)
+    pending = deque((chunk, 0) for chunk in chunks)
+    total = len(chunks)
     parts = []
     allowed: set[int] = set()
-    for index, chunk in enumerate(chunks, start=1):
+    while pending:
+        chunk, depth = pending.popleft()
+        index = len(parts) + 1
         if on_part:
             on_part(index, total)
         sources = {int(value) for value in _TURN_ID.findall(chunk)}
         allowed.update(sources)
-        intro = f"Это часть {index} из {len(chunks)}. Составь промежуточный протокол.\n\n" if len(chunks) > 1 else ""
+        intro = f"Это часть {index} из {total}. Составь промежуточный протокол.\n\n" if total > 1 else ""
         prompt = roster + intro + (_SOURCE_INSTRUCTIONS if sources else "") + chunk
-        summary = await analyze_transcript(client, prompt, title_hint, system_prompt=system_prompt)
+        try:
+            summary = await analyze_transcript(client, prompt, title_hint, system_prompt=system_prompt)
+        except BadRequestError as exc:
+            if not context_budget.context_rejected(exc):
+                raise
+            # Estimates cannot know every proprietary tokenizer. Retry only the
+            # rejected part; keep successful summaries and every source turn.
+            if depth >= 6 or count(chunk) <= 128:
+                raise ValueError("Запрос не помещается в контекст модели. Проверьте лимит контекста и локальный токенизатор или сократите промпт.") from exc
+            smaller = _transcript_chunks(chunk, max(64, count(chunk) // 2), count)
+            if len(smaller) < 2:
+                raise ValueError("Модель отклонила контекст. Сократите промпт или уточните токенизатор модели.") from exc
+            total += len(smaller) - 1
+            pending.extendleft((part, depth + 1) for part in reversed(smaller))
+            log.info("Контекст модели: делю отклонённый фрагмент на %s частей", len(smaller))
+            continue
         parts.append(_with_sources(summary, sources))
 
     while len(parts) > 1:
@@ -568,7 +607,7 @@ async def analyze_long_transcript(
             cursor += 1
             while cursor < len(parts):
                 candidate = json.dumps([*group, parts[cursor]], ensure_ascii=False, separators=(",", ":"))
-                if len(candidate.encode()) > budget:
+                if count(candidate) > budget:
                     break
                 group.append(parts[cursor])
                 cursor += 1
@@ -578,7 +617,14 @@ async def analyze_long_transcript(
             if on_part:
                 on_part(total, total)
             payload = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
-            result = await analyze_transcript(client, roster + _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
+            try:
+                result = await analyze_transcript(client, roster + _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
+            except BadRequestError as exc:
+                if not context_budget.context_rejected(exc):
+                    raise
+                # The provider uses a tighter tokenizer/window. Preserve every
+                # intermediate result rather than truncate it or retry forever.
+                return _with_sources(_merge_locally(parts), allowed)
             merged.append(_with_sources(_retain_grounded_items(_with_sources(result, allowed), group), allowed))
         if len(merged) == len(parts):
             return _with_sources(_merge_locally(merged), allowed)

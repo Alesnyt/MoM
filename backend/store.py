@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -32,10 +32,8 @@ def utc_now() -> str:
 
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
-    ensure_dirs()
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -44,10 +42,14 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.commit()
     finally:
         conn.close()
-    restrict_path(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def init_db() -> None:
+    ensure_dirs()
+    # WAL persists in the database; connection-specific pragmas stay in connect().
+    with closing(sqlite3.connect(DB_PATH, timeout=30)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+    restrict_path(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
     with connect() as conn:
         conn.execute(
             """
@@ -772,16 +774,18 @@ def get_session_row(token: str) -> dict[str, Any] | None:
     now = time.time()
     stored = session_id(token)
     with connect() as conn:
-        conn.execute("DELETE FROM sessions WHERE expires < ?", (now,))
         row = conn.execute("SELECT * FROM sessions WHERE token = ?", (stored,)).fetchone()
         if row is None and token != stored:
             row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
-    if not row:
-        return None
-    if float(row["expires"]) < now:
-        drop_session_token(token)
+    # Preserve precedence of hashed rows over legacy plaintext rows, even on expiry.
+    if not row or float(row["expires"]) <= now:
         return None
     return dict(row)
+
+
+def purge_expired_sessions() -> int:
+    with connect() as conn:
+        return conn.execute("DELETE FROM sessions WHERE expires <= ?", (time.time(),)).rowcount
 
 
 def drop_session_token(token: str) -> None:

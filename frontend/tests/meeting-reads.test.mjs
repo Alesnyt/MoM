@@ -244,3 +244,28 @@ test('a decision source opens and focuses the corresponding transcript page', as
   assert.ok(view.getByText('Реплики 51–60 из 60'));
   assert.equal(document.activeElement, view.getByText('Фраза 58').closest('article'));
 });
+
+test('503 health retains real capabilities and upload limit when a background service retries', async () => {
+  mockApi(url => { assert.equal(url, '/api/meetings'); return response([]); });
+  const normalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (url !== '/api/health') return normalFetch(url, options);
+    return new Response(JSON.stringify({ok:false, ffmpeg:true, max_upload_bytes:1024 ** 3,
+      openai:{configured:true, connected:true, message:'OK'},
+      worker:{ok:false,services:{directory:{state:'retrying'}}}}), {status:503});
+  };
+  const view = render(React.createElement(App));
+  await view.findByRole('button', {name:'Обработать'});
+  const file = new window.File(['demo'], 'demo.wav', {type:'audio/wav'});
+  fireEvent.change(view.container.querySelector('input[type=file]'), {target:{files:[file]}});
+  await waitFor(() => assert.equal(view.getByRole('button', {name:'Обработать'}).disabled, false));
+  assert.equal(view.queryByText(/ffmpeg|Нет связи с сервером/), null);
+});
+
+test('health errors from a proxy are not treated as capabilities', async () => {
+  const {getHealth} = loadSource('api.ts');
+  for (const [status, body] of [[503, '<html>unavailable</html>'], [503, '{}'], [502, '{}']]) {
+    globalThis.fetch = async () => new Response(body, {status});
+    await assert.rejects(getHealth());
+  }
+});
