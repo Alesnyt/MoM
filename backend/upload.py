@@ -1,10 +1,36 @@
 """Authenticate at the route, then bound streaming form input before spooling."""
+import asyncio
 from contextlib import asynccontextmanager
 
+import anyio
+
 from fastapi import HTTPException
+from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
 
 from . import config
+
+
+async def run_file_operation(func, *args, **kwargs):
+    """Keep the form's spool alive until its worker finishes, even on cancellation."""
+    with anyio.CancelScope(shield=True):
+        task = asyncio.create_task(run_in_threadpool(func, *args, **kwargs))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError() from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
 
 
 @asynccontextmanager
@@ -24,7 +50,7 @@ async def bounded_form(request, *, limit: int, message: str, max_fields: int,
                 if total > limit:
                     raise HTTPException(413, message)
                 if check_disk is not None:
-                    check_disk(len(chunk))
+                    await run_in_threadpool(check_disk, len(chunk))
             except HTTPException as exc:
                 error = exc
                 # Starlette closes partial files on MultiPartException.

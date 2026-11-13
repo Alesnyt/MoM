@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from . import config, corporate_context, directory_scope, ldap_auth, store
+from . import config, corporate_context, directory_scope, directory_search, ldap_auth, store
 
 
 def suggest(query: str = "") -> dict:
@@ -24,7 +24,7 @@ def suggest(query: str = "") -> dict:
             found, error = corporate_context.search_people(needle)
         else:
             try:
-                found = ldap_auth.search_people(needle, for_speakers=True)
+                found = directory_search.search(needle, for_speakers=True)
             except ldap_auth.LdapError:
                 found = []
                 error = "Поиск в AD временно недоступен. Можно выбрать сохранённого пользователя или ввести имя вручную."
@@ -61,7 +61,7 @@ def directory(query: str = "") -> dict:
     if len(needle) < 2:
         return {"people": [], "ldap": True}
     try:
-        found = ldap_auth.search_people(needle)
+        found = directory_search.search(needle)
     except ldap_auth.LdapError as exc:
         return {"people": [], "ldap": True, "error": str(exc)}
     people: list[dict[str, str]] = []

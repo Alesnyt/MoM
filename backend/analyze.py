@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from . import config, prompts, calendar_service, context_budget
 from .performance import stage_timer
+from .speakers import has_timestamps
 from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
 from .protocol_text import deduplicate, text_key
 
@@ -233,11 +234,9 @@ async def transcribe_qwen(
 ) -> dict[str, Any]:
     import base64
 
-    raw = path.read_bytes()
-    encoded = base64.b64encode(raw).decode("ascii")
-    del raw
-    data_uri = f"data:audio/mpeg;base64,{encoded}"
-    del encoded
+    def encode_audio():
+        return "data:audio/mpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+    data_uri = await asyncio.to_thread(encode_audio)
     last_error: Exception | None = None
     for candidate in config.asr_model_candidates(model):
         try:
@@ -328,9 +327,11 @@ def merge_transcripts(chunks: list[tuple[float, dict[str, Any]]]) -> dict[str, A
         text = (payload.get("text") or "").strip()
         if text:
             texts.append(text)
-        for segment in payload.get("segments") or []:
-            start = float(segment.get("start") or 0) + offset
-            end = float(segment.get("end") or 0) + offset
+        source_segments = payload.get("segments") or ([{"text": text}] if text else [])
+        for segment in source_segments:
+            timed = has_timestamps(segment)
+            start = float(segment["start"]) + offset if timed else None
+            end = float(segment["end"]) + offset if timed else None
             body = (segment.get("text") or "").strip()
             if not body:
                 continue

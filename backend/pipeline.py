@@ -414,7 +414,7 @@ async def _transcribe(
         try:
             chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
             merged = []
-            for index, chunk in enumerate(chunks):
+            for index, (offset, chunk) in enumerate(chunks):
                 base = 16 + int(index / max(1, len(chunks)) * 70)
                 progress.set(
                     base,
@@ -422,9 +422,6 @@ async def _transcribe(
                     status="transcribing",
                     force=True,
                 )
-                offset = index * chunk_seconds
-                if offset > duration:
-                    offset = max(0.0, duration - chunk_seconds)
                 payload = await transcribe_file(client, chunk, asr_model)
                 merged.append((float(offset), payload))
             return merge_transcripts(merged)

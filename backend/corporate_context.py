@@ -100,8 +100,10 @@ def save_search_mode(mode: str, actor: str) -> dict:
         raise ValueError("Выберите живой AD или локальный кэш")
     if mode == "cache" and not snapshot()["search_cache_ready"]:
         raise ValueError("Сначала успешно синхронизируйте AD с текущими настройками")
-    # Separate from the context snapshot: switching never rebuilds or invalidates the cache.
+    # Switching leaves the synchronized dataset intact, but live lookups restart fresh.
     store.set_app_setting("ldap_speaker_search", {"mode": mode})
+    from . import directory_search
+    directory_search.invalidate()
     store.record_audit(actor, "context.search", detail="Живой AD" if mode == "live" else "Локальный кэш AD")
     return snapshot()
 

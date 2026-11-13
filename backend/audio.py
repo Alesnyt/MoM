@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import logging
 import math
 import shutil
@@ -268,6 +269,7 @@ def split_wav(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
 def split_audio(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     pattern = dest_dir / "chunk_%03d.mp3"
+    manifest = dest_dir / "segments.csv"
     _run(
         [
             "ffmpeg",
@@ -280,6 +282,12 @@ def split_audio(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
             str(chunk_seconds),
             "-c",
             "copy",
+            "-reset_timestamps",
+            "1",
+            "-segment_list",
+            str(manifest),
+            "-segment_list_type",
+            "csv",
             str(pattern),
         ]
     )
@@ -293,5 +301,28 @@ async def extract_audio_async(src: Path, dst: Path) -> float:
     return await asyncio.to_thread(extract_audio, src, dst)
 
 
-async def split_audio_async(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
-    return await asyncio.to_thread(split_audio, src, dest_dir, chunk_seconds)
+def split_audio_timed(src: Path, dest_dir: Path, chunk_seconds: int) -> list[tuple[float, Path]]:
+    chunks = split_audio(src, dest_dir, chunk_seconds)
+    # Packet boundaries are authoritative. Probing MP3 durations can include
+    # encoder padding; multiplying the requested segment length also drifts.
+    try:
+        with (dest_dir / "segments.csv").open(newline="", encoding="utf-8") as file:
+            rows = list(csv.reader(file))
+        if len(rows) != len(chunks):
+            raise ValueError("incomplete segment manifest")
+        timed = []
+        previous_end = 0.0
+        for chunk, (name, start, end) in zip(chunks, rows):
+            first, last = float(start), float(end)
+            if (Path(name).name != chunk.name or not math.isfinite(first) or not math.isfinite(last)
+                    or first < 0 or last <= first or first < previous_end - 0.000001):
+                raise ValueError("invalid segment manifest")
+            timed.append((first, chunk))
+            previous_end = last
+        return timed
+    except (OSError, ValueError) as exc:
+        raise AudioError("Не удалось прочитать точные границы аудиофрагментов") from exc
+
+
+async def split_audio_async(src: Path, dest_dir: Path, chunk_seconds: int) -> list[tuple[float, Path]]:
+    return await asyncio.to_thread(split_audio_timed, src, dest_dir, chunk_seconds)

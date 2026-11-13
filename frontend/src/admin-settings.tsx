@@ -382,6 +382,7 @@ export function SettingsPanel({
                     setAsrModel(encodeAsrModel({ ...asr, cloudModel: event.target.value }));
                   }}
                 />
+                <small>Qwen ASR в текущем подключении возвращает текст без таймкодов. Для автоматической разметки спикеров выберите Whisper или GigaAM.</small>
               </label>
             )}
           </div>
