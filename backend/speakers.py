@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import math
 from bisect import bisect_left, bisect_right
 from typing import Any
 
@@ -162,6 +163,12 @@ def assign_speakers(segments: list[dict[str, Any]], turns: list[dict[str, Any]])
         speakers.append({"id": UNKNOWN_ID, "name": UNKNOWN_NAME})
     speakers.sort(key=_speaker_sort_key)
     return {"speakers": speakers, "segments": assigned, "note": None}
+
+
+def has_timestamps(segment: dict) -> bool:
+    start, end = segment.get("start"), segment.get("end")
+    return (type(start) in (int, float) and type(end) in (int, float)
+            and math.isfinite(start) and math.isfinite(end) and 0 <= start < end)
 
 
 def render_transcript(document: dict[str, Any], *, numbered: bool = False) -> str:

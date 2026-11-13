@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from . import config
 from .audio import extract_wav
-from .speakers import assign_speakers, expand_coarse_segments, render_transcript
+from .speakers import UNKNOWN_ID, UNKNOWN_NAME, assign_speakers, expand_coarse_segments, has_timestamps, render_transcript
 from .performance import configure_torch_threads, stage_timer
 
 log = logging.getLogger("mom.diarize")
@@ -32,7 +32,19 @@ def apply_diarization(
 ) -> dict[str, Any]:
     segments = list(payload.get("segments") or [])
     if not segments and (payload.get("text") or "").strip():
-        segments = [{"start": 0.0, "end": 0.0, "text": payload["text"]}]
+        segments = [{"start": None, "end": None, "text": payload["text"]}]
+    if any(not has_timestamps(segment) for segment in segments):
+        # Qwen/text-only fallbacks cannot be aligned to speaker turns. Keep every
+        # word, don't invent zero timestamps or spend CPU on unusable diarization.
+        document = {
+            "speakers": [{"id": UNKNOWN_ID, "name": UNKNOWN_NAME}],
+            "segments": [{"text": segment.get("text", ""), "speaker": UNKNOWN_ID,
+                          "start": segment.get("start") if has_timestamps(segment) else None,
+                          "end": segment.get("end") if has_timestamps(segment) else None} for segment in segments],
+            "note": "Модель распознавания не вернула таймкоды реплик. Автоматическая разметка спикеров недоступна. Для разметки выберите Whisper или GigaAM и повторите распознавание.",
+        }
+        document["text"] = render_transcript(document)
+        return document
     note = None
     turns: list[dict[str, Any]] = []
     if on_progress:

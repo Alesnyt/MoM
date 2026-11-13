@@ -14,6 +14,7 @@ import threading
 import time
 
 from . import store, ldap_auth
+from starlette.concurrency import run_in_threadpool
 from .exchange_ews import EwsClient, ExchangeError, endpoint
 
 SETTING_KEY = 'exchange_calendar'
@@ -115,13 +116,17 @@ def cleanup() -> None:
 async def run_cleanup(stop: asyncio.Event):
     try:
         while not stop.is_set():
-            cleanup()
+            await run_in_threadpool(cleanup)
             try: await asyncio.wait_for(stop.wait(), 60)
             except TimeoutError: pass
     finally:
-        with _lock:
-            for connection in _connections.values(): connection.dispose()
-            _connections.clear()
+        await run_in_threadpool(close_all)
+
+
+def close_all():
+    with _lock:
+        for connection in _connections.values(): connection.dispose()
+        _connections.clear()
 
 
 def _connection(token: str | None, user_id: str) -> Connection:

@@ -18,6 +18,8 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+from . import directory_search, request_origin
 from pydantic import ValidationError
 from .api_schemas import (
     SettingsIn,
@@ -116,6 +118,11 @@ def _clear_cookie(response: Response, name: str, request: Request) -> None:
 def _rate_or_429(request: Request, action: str) -> None:
     if not auth.rate_allow(f"{action}:{_client_ip(request)}"):
         raise HTTPException(status_code=429, detail="Слишком много попыток, подождите минуту")
+
+
+def _search_rate_or_429(principal: str) -> None:
+    if not directory_search.allow(principal):
+        raise HTTPException(429, "Слишком много запросов поиска. Подождите минуту.", headers={"Retry-After": "60"})
 
 
 def _assert_setup_allowed(request: Request, token: str) -> None:
@@ -283,7 +290,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    response = await call_next(request)
+    if not request_origin.allowed(request, trusted_proxy=_peer_trusted(request)):
+        response = JSONResponse({"detail": "Запрос с другого сайта отклонён. Откройте MoM и повторите действие."}, status_code=403)
+    else:
+        response = await call_next(request)
     for key, value in SECURITY_HEADERS.items():
         response.headers.setdefault(key, value)
     if request.url.path.startswith("/assets/"):
@@ -449,7 +459,8 @@ def admin_list_users(_admin: dict = Depends(require_admin)) -> list[dict]:
 
 
 @app.get("/api/admin/directory")
-def admin_directory(q: str = "", _admin: dict = Depends(require_admin)) -> dict:
+def admin_directory(q: str = Query(default="", max_length=200), _admin: dict = Depends(require_admin)) -> dict:
+    _search_rate_or_429("admin:" + _admin["username"])
     return people.directory(q)
 
 
@@ -624,12 +635,14 @@ async def save_settings(
     key = payload.openai_api_key.strip()
     if " " in key or len(key) < 20:
         raise HTTPException(status_code=400, detail="Похоже, это не API-ключ")
-    config.set_openai_api_key(key)
-    keys.reset_status("Ключ сохранён. Проверьте подключение.")
-    store.record_audit(_actor_name(_admin), "key.save", "llm", "ключ сохранён")
+    def persist():
+        config.set_openai_api_key(key)
+        keys.reset_status("Ключ сохранён. Проверьте подключение.")
+        store.record_audit(_actor_name(_admin), "key.save", "llm", "ключ сохранён")
+    await run_in_threadpool(persist)
     if verify:
         await _verify_until_disconnect(request, key)
-    return _health(full=True)
+    return await run_in_threadpool(_health, full=True)
 
 
 @app.post("/api/settings/models")
@@ -771,7 +784,7 @@ async def verify_settings(request: Request, _admin: dict = Depends(require_admin
     if not config.get_api_key():
         raise HTTPException(status_code=400, detail="Сначала сохраните ключ")
     await _verify_until_disconnect(request)
-    return _health(full=True)
+    return await run_in_threadpool(_health, full=True)
 
 
 @app.delete("/api/settings")
@@ -783,7 +796,8 @@ def delete_settings(_admin: dict = Depends(require_admin)) -> dict:
 
 
 @app.get("/api/people")
-def list_people(q: str = "", _user: dict = Depends(require_user)) -> dict:
+def list_people(q: str = Query(default="", max_length=200), _user: dict = Depends(require_user)) -> dict:
+    _search_rate_or_429("user:" + _user["user_id"])
     return people.suggest(q)
 
 
@@ -817,7 +831,7 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
             raise HTTPException(400, "Название должно быть не длиннее 200 символов")
         if (text is None) == (file is None):
             raise HTTPException(400, "Передайте либо текст, либо файл")
-        calendar_context = _calendar_selection(request,user,form.get("calendar_event_id"))
+        calendar_context = await run_in_threadpool(_calendar_selection, request, user, form.get("calendar_event_id"))
         original, suffix = "transcript.txt", ".txt"
         if file is not None:
             if not isinstance(file, StarletteUploadFile):
@@ -838,11 +852,11 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
         if len(text.encode("utf-8")) > transcript_import.MAX_TEXT_BYTES:
             raise HTTPException(413, "Транскрипт больше 1 МБ")
         try:
-            document = transcript_import.parse_transcript(text, suffix)
+            document = await run_in_threadpool(transcript_import.parse_transcript, text, suffix)
         except transcript_import.TranscriptError as exc:
             raise HTTPException(400, str(exc)) from exc
-    _disk_or_507(len(text.encode("utf-8")) * 4)
-    meeting = store.create_text_meeting(
+    await run_in_threadpool(_disk_or_507, len(text.encode("utf-8")) * 4)
+    meeting = await run_in_threadpool(store.create_text_meeting,
         uuid.uuid4().hex, title.strip() or (calendar_context or {}).get("title") or (Path(original).stem[:200] if file else "Текстовая встреча"),
         original[:255], user["user_id"], document, calendar_context=calendar_context,
     )
@@ -861,8 +875,8 @@ async def create_meeting(
         file, title = form.get("file"), form.get("title")
         if not isinstance(file, StarletteUploadFile) or (title is not None and not isinstance(title, str)):
             raise HTTPException(status_code=422, detail="Нужен файл записи и текстовое название")
-        calendar_context = _calendar_selection(request,user,form.get("calendar_event_id"))
-        return await _create_audio_meeting(request, file, title, user, calendar_context=calendar_context)
+        calendar_context = await run_in_threadpool(_calendar_selection, request, user, form.get("calendar_event_id"))
+        return await upload.run_file_operation(_create_audio_meeting, request, file, title, user, calendar_context=calendar_context)
 
 
 def _calendar_selection(request: Request, user: dict, event_id) -> dict | None:
@@ -872,7 +886,7 @@ def _calendar_selection(request: Request, user: dict, event_id) -> dict | None:
         raise HTTPException(exc.status,str(exc)) from exc
 
 
-async def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict,
+def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict,
                                 *, calendar_context: dict | None = None) -> dict:
     if not ffmpeg_available():
         raise HTTPException(status_code=500, detail="Установите ffmpeg и ffprobe")
@@ -903,7 +917,7 @@ async def _create_audio_meeting(request: Request, file: StarletteUploadFile, tit
     try:
         with dest.open("wb") as out:
             while True:
-                chunk = await file.read(1024 * 1024)
+                chunk = file.file.read(1024 * 1024)
                 if not chunk:
                     break
                 size += len(chunk)
@@ -940,7 +954,7 @@ async def _create_audio_meeting(request: Request, file: StarletteUploadFile, tit
 
 
 @app.post("/api/meetings/{meeting_id}/retry")
-async def retry_meeting(
+def retry_meeting(
     meeting_id: str,
     user: dict = Depends(require_user),
 ) -> dict:

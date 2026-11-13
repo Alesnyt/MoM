@@ -86,6 +86,7 @@ def main():
             response = connection.getresponse()
             assert response.status == 200
             headers = json.loads(response.read())
+            assert headers['Host'] == f'localhost:{https_port}'
             assert headers['X-Forwarded-Proto'] == 'https'
             assert headers['X-Forwarded-For'] != 'spoofed'
             connection.close()
