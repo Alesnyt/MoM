@@ -86,11 +86,13 @@ def test_parallel_limit_does_not_hold_cache_lock_and_policy_race_discards_result
     entered, release = threading.Event(), threading.Event()
     def slow(*a,**kw): entered.set(); assert release.wait(3); return [{'name':'private'}]
     monkeypatch.setattr(search,'MAX_INFLIGHT',1)
+    monkeypatch.setattr(search,'MAX_WAITERS',0)
     monkeypatch.setattr(ldap_auth,'search_people',slow)
     with ThreadPoolExecutor() as pool:
         request = pool.submit(search.search,'анна',for_speakers=True)
         assert entered.wait(2)
         with pytest.raises(ldap_auth.LdapError,match='занят'): search.search('борис')
+        with pytest.raises(ldap_auth.LdapError,match='занят'): search.search('анна',for_speakers=True)
         directory_scope.save_sync_policy([],['restricted.example'])
         release.set()
         with pytest.raises(ldap_auth.LdapError,match='изменились'): request.result(2)

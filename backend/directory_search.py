@@ -12,6 +12,7 @@ from . import config, directory_scope, ldap_auth, store
 TTL_SECONDS = 30
 MAX_CACHE = 256
 MAX_INFLIGHT = 4
+MAX_WAITERS = 8
 MAX_PRINCIPALS = 2048
 REQUESTS_PER_MINUTE = 120
 _lock = threading.Lock()
@@ -19,6 +20,7 @@ _cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
 _pending: dict[tuple, Future] = {}
 _rates: OrderedDict[str, deque] = OrderedDict()
 _generation = 0
+_waiters = 0
 
 
 def invalidate() -> None:
@@ -54,6 +56,7 @@ def _revision(for_speakers: bool) -> str:
 
 
 def search(query: str, *, for_speakers: bool = False) -> list[dict]:
+    global _waiters
     needle = query.strip()
     if len(needle) < 2 or not config.ldap_configured():
         return []
@@ -74,11 +77,19 @@ def search(query: str, *, for_speakers: bool = False) -> list[dict]:
             if len(_pending) >= MAX_INFLIGHT:
                 raise ldap_auth.LdapError('Каталог занят. Повторите поиск через несколько секунд.')
             future = _pending[key] = Future()
+        else:
+            # Coalesced requests must not occupy the whole HTTP thread pool.
+            if _waiters >= MAX_WAITERS:
+                raise ldap_auth.LdapError('Каталог занят. Повторите поиск через несколько секунд.')
+            _waiters += 1
     if not owner:
         try:
             result = future.result(timeout=15)
         except TimeoutError as exc:
             raise ldap_auth.LdapError('Поиск в AD ещё выполняется. Повторите запрос позже.') from exc
+        finally:
+            with _lock:
+                _waiters -= 1
         if _revision(for_speakers) != revision:
             raise ldap_auth.LdapError('Настройки каталога изменились. Повторите поиск.')
         return copy.deepcopy(result)
