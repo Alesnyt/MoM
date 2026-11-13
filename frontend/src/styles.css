@@ -1843,7 +1843,7 @@ select.title-input {
 .meeting-home { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .9fr); gap: clamp(24px, 3vw, 48px); align-items: start; width: 100%; }
 .meeting-home > .composer { max-width: none; min-width: 0; }
 .calendar-panel { min-width: 0; border: 1px solid var(--line); border-radius: 16px; padding: 24px; background: var(--card); }
-.calendar-panel h2 { margin: 4px 0 12px; font-size: 24px; }
+.calendar-panel h2 { margin: 0 0 12px; font-size: clamp(24px, 1.6vw, 30px); line-height: 1.2; }
 .calendar-panel .eyebrow { margin-top: 0; }
 .calendar-panel .field-stack { gap: 12px; }
 .calendar-panel input, .calendar-panel select { width: 100%; min-width: 0; box-sizing: border-box; }
@@ -1854,7 +1854,7 @@ select.title-input {
 .calendar-controls label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
 .calendar-controls input, .calendar-controls select { background: var(--stage); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 8px; font: inherit; color-scheme: dark; }
 :root[data-appearance="light"] .calendar-controls input, :root[data-appearance="light"] .calendar-controls select { color-scheme: light; }
-.calendar-events { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 10px; max-height: 610px; overflow: auto; }
+.calendar-events { list-style: none; margin: 16px 0 0; padding: 0; display: grid; align-content: start; gap: 10px; max-height: min(610px, 70dvh); overflow: auto; }
 .calendar-event { display: grid; gap: 7px; width: 100%; text-align: left; padding: 15px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--stage); color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
 .calendar-event:hover, .calendar-event:focus-visible { border-color: var(--accent); }
 .calendar-event.selected { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
@@ -1875,5 +1875,13 @@ select.title-input {
 .calendar-context li { margin: 6px 0; }
 .calendar-agenda { white-space: pre-wrap; max-height: 280px; overflow: auto; }
 .exchange-settings { max-width: 850px; }
+@media (min-width: 1151px) {
+  .stage:has(> .meeting-home) { display: flex; flex-direction: column; padding-bottom: 28px; }
+  .meeting-home { flex: 1; }
+  .calendar-panel { display: flex; flex-direction: column; align-self: stretch; }
+  .calendar-panel > * { flex-shrink: 0; }
+  /* Let the available screen height size the list, rather than its contents. */
+  .calendar-events { flex: 1 1 0; height: 0; min-height: 180px; max-height: none; }
+}
 @media (max-width: 1150px) { .meeting-home { grid-template-columns: minmax(0, 1fr); } .calendar-panel { max-width: none; } }
 @media (max-width: 600px) { .calendar-panel { padding: 16px; } .calendar-context { padding: 14px; } }
