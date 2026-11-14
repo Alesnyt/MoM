@@ -58,13 +58,15 @@ def _update(**changes) -> dict:
     return data
 
 
-def directory_signature() -> str:
+def directory_signature(policy: dict | None = None) -> str:
+    # A change to the LDAP filter also makes previously downloaded snapshots stale.
+    if policy is None:
+        policy = directory_scope.sync_policy()
     data = [config.ldap_configured(), config.get_ldap_url(), config.get_ldap_base_dn(),
-            config.get_ldap_email_attr(), config.get_ldap_bind_dn(), directory_scope.search_bases()]
-    policy = directory_scope.sync_policy()
-    # Preserve existing complete snapshots on upgrade when the defaults are unchanged.
+            config.get_ldap_email_attr(), config.get_ldap_bind_dn(), directory_scope.search_bases(),
+            policy["ldap_filter"]]
     if set(policy["fields"]) != set(directory_scope.OPTIONAL_FIELDS) or policy["domains"]:
-        data.append(policy)
+        data.append({"fields": policy["fields"], "domains": policy["domains"]})
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -367,7 +369,10 @@ def sync_directory(actor: str = "system", *, scheduled: bool = False) -> dict:
         if scheduled:
             actor = _sync_job().get("actor", actor)
         thread.start()
-        people = ldap_auth.sync_people(progress=progress)
+        policy = directory_scope.sync_policy()
+        if directory_signature(policy) != signature:
+            raise ValueError("Настройки AD изменились во время синхронизации. Запустите её снова")
+        people = ldap_auth.sync_people(progress=progress, policy=policy)
         if lost.is_set():
             raise ldap_auth.LdapError("Обновление кэша прервано: потеряна связь с задачей")
         if _publish_directory(token, signature, people):

@@ -1,10 +1,14 @@
 """Search-only LDAP allowlist; authentication continues to use its own base/filter."""
+import json
 import re
 
 from . import config, store
 
 # Only attributes used by speaker assignment or corporate context are eligible.
 OPTIONAL_FIELDS = {"job_title": ("title", 200), "department": ("department", 120), "surname": ("sn", 120)}
+DEFAULT_LDAP_FILTER = "(!(userAccountControl:1.2.840.113556.1.4.803:=2))"
+_LDAP_IDENTIFIER = r"(?:[A-Za-z][A-Za-z0-9-]*|[0-9]+(?:\.[0-9]+)+)"
+_LDAP_ATTRIBUTE = re.compile(rf"{_LDAP_IDENTIFIER}(?:;[A-Za-z0-9-]+)*")
 
 
 def speaker_search_mode() -> str:
@@ -13,10 +17,54 @@ def speaker_search_mode() -> str:
 
 
 def sync_policy() -> dict:
-    return store.get_app_setting("ldap_sync_policy") or {"fields": list(OPTIONAL_FIELDS), "domains": []}
+    return {"fields": list(OPTIONAL_FIELDS), "domains": [], "ldap_filter": DEFAULT_LDAP_FILTER,
+            **(store.get_app_setting("ldap_sync_policy") or {})}
 
 
-def save_sync_policy(fields: list[str], domains: list[str]) -> dict:
+def _validate_ldap_filter(value: str) -> str:
+    from ldap3.core.exceptions import LDAPInvalidFilterError
+    from ldap3.operation.search import NOT, compile_filter, parse_filter
+    from pyasn1.codec.ber.encoder import encode
+    from pyasn1.error import PyAsn1Error
+
+    if len(value) > 4096:
+        raise ValueError("LDAP-фильтр должен содержать не больше 4096 символов")
+    value = value.strip()
+    if not value:
+        return ""
+
+    error = "Некорректный LDAP-фильтр. Укажите одно выражение в скобках, например (department=IT)"
+    if re.search(r"[\x00\ud800-\udfff]|\\(?![0-9a-fA-F]{2})|\(\s*\)", value):
+        raise ValueError(error)
+    try:
+        root = parse_filter(value, schema=None, auto_escape=False, auto_encode=True, validator=None, check_names=False)
+    except LDAPInvalidFilterError as exc:
+        raise ValueError(error) from exc
+
+    nodes = [(root, 0)]
+    while nodes:
+        node, depth = nodes.pop()
+        if depth > 64:
+            raise ValueError("LDAP-фильтр слишком глубоко вложен. Упростите выражение")
+        if node.assertion is None:
+            if not node.elements or (node.tag == NOT and len(node.elements) != 1):
+                raise ValueError(error)
+            nodes.extend((child, depth + 1) for child in node.elements)
+        else:
+            attribute = node.assertion["attr"]
+            rule = node.assertion.get("matchingRule")
+            if ((attribute and not _LDAP_ATTRIBUTE.fullmatch(attribute))
+                    or (rule and not re.fullmatch(_LDAP_IDENTIFIER, rule))
+                    or not (attribute or rule)):
+                raise ValueError(error)
+    try:
+        encode(compile_filter(root.elements[0]))
+    except PyAsn1Error as exc:
+        raise ValueError(error) from exc
+    return value
+
+
+def save_sync_policy(fields: list[str], domains: list[str], ldap_filter: str | None = None) -> dict:
     if len(fields) > len(OPTIONAL_FIELDS) or any(field not in OPTIONAL_FIELDS for field in fields):
         raise ValueError("Выберите поля из списка: должность, подразделение, фамилия")
     if len(domains) > 32:
@@ -34,8 +82,14 @@ def save_sync_policy(fields: list[str], domains: list[str]) -> dict:
         if domain not in normalized:
             normalized.append(domain)
     policy = {"fields": sorted(set(fields)), "domains": sorted(normalized)}
-    store.set_app_setting("ldap_sync_policy", policy)
-    return policy
+    if ldap_filter is not None:
+        policy["ldap_filter"] = _validate_ldap_filter(ldap_filter)
+    # An already open admin tab can save fields/domains without sending a filter.
+    with store.connect() as conn:
+        row = conn.execute("INSERT INTO app_settings (key, payload) VALUES ('ldap_sync_policy', ?) "
+                           "ON CONFLICT(key) DO UPDATE SET payload=json_patch(app_settings.payload, excluded.payload) "
+                           "RETURNING payload", (json.dumps(policy, ensure_ascii=False),)).fetchone()
+    return {"ldap_filter": DEFAULT_LDAP_FILTER, **json.loads(row["payload"])}
 
 
 def _preserve_escaped_spaces(value: str) -> str:

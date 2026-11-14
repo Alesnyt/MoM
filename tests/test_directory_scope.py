@@ -124,11 +124,21 @@ def test_live_speaker_lookup_obeys_cache_domains_and_optional_title_policy(db, m
     monkeypatch.setattr(ldap_auth, "_service_connection", lambda: (conn, None))
     assert ldap_auth.search_people("ан", for_speakers=True) == [{"name": "Анна", "email": "anna@example.com", "source": "ldap"}]
     assert "(mail=*@example.com)" in conn.calls[0]["search_filter"]
+    assert "(!(userAccountControl:1.2.840.113556.1.4.803:=2))" in conn.calls[0]["search_filter"]
     assert "title" not in conn.calls[0]["attributes"]
     assert conn.calls[0]["search_base"] == base
     # Admin user provisioning retains its separate live search behavior.
     assert len(ldap_auth.search_people("ан")) == 2
     assert "(mail=*@example.com)" not in conn.calls[-1]["search_filter"]
+    assert "userAccountControl" not in conn.calls[-1]["search_filter"]
+    directory_scope.save_sync_policy([], ["example.com"], "(department=IT)")
+    ldap_auth.search_people("ан", for_speakers=True)
+    assert "(department=IT)" in conn.calls[-1]["search_filter"]
+    assert "userAccountControl" not in conn.calls[-1]["search_filter"]
+    directory_scope.save_sync_policy([], ["example.com"], "")
+    ldap_auth.search_people("ан", for_speakers=True)
+    assert "(mail=*@example.com)" in conn.calls[-1]["search_filter"]
+    assert "department" not in conn.calls[-1]["search_filter"]
 
 
 def test_login_keeps_its_own_base_and_filter(db, monkeypatch):

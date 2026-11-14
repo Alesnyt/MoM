@@ -14,7 +14,7 @@ export async function parseError(response: Response): Promise<string> {
 }
 
 export type CorporateTerm = { term: string; aliases: string[]; description: string; department: string };
-export type DirectoryPolicy = { fields: string[]; domains: string[] };
+export type DirectoryPolicy = { fields: string[]; domains: string[]; ldap_filter: string };
 export type SpeakerSearchMode = "live" | "cache";
 export type CorporateContext = {
   enabled: boolean; use_ad: boolean; sync_ad: boolean; revision: number; term_count: number; people_count: number;
