@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import csv
 import logging
 import math
@@ -11,6 +10,8 @@ import wave
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+from .background import run_sync
 
 from . import config
 
@@ -298,7 +299,7 @@ def split_audio(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
 
 
 async def extract_audio_async(src: Path, dst: Path) -> float:
-    return await asyncio.to_thread(extract_audio, src, dst)
+    return await run_sync(extract_audio, src, dst)
 
 
 def split_audio_timed(src: Path, dest_dir: Path, chunk_seconds: int) -> list[tuple[float, Path]]:
@@ -325,4 +326,4 @@ def split_audio_timed(src: Path, dest_dir: Path, chunk_seconds: int) -> list[tup
 
 
 async def split_audio_async(src: Path, dest_dir: Path, chunk_seconds: int) -> list[tuple[float, Path]]:
-    return await asyncio.to_thread(split_audio_timed, src, dest_dir, chunk_seconds)
+    return await run_sync(split_audio_timed, src, dest_dir, chunk_seconds)

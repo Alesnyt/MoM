@@ -6,9 +6,33 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+import anyio
+
 log = logging.getLogger("mom.background")
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 30.0
+
+
+async def run_sync(func, *args, **kwargs):
+    """Offload work without releasing its files/slot before its thread exits."""
+    with anyio.CancelScope(shield=True):
+        task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError() from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
 
 
 async def pause(stop: asyncio.Event, seconds: float) -> None:

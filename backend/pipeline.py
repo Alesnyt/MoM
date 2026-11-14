@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from . import disk, store
+from .background import run_sync
 from .name_review import review_names
 from .analyze import (
     analyze_long_transcript,
@@ -33,29 +35,32 @@ log = logging.getLogger("mom.pipeline")
 class _Progress:
     def __init__(self, meeting_id: str) -> None:
         self.meeting_id = meeting_id
+        self._lock = threading.Lock()
         self.last_pct = -1
         self.last_t = 0.0
         self.last_message = ""
 
     def set(self, percent: int, message: str, status: str | None = None, force: bool = False) -> None:
-        if control.is_stopped(self.meeting_id):
-            raise control.ProcessingStopped()
-        percent = max(0, min(100, int(percent)))
-        now = time.monotonic()
-        if (
-            not force
-            and percent < self.last_pct + 1
-            and now - self.last_t < 0.7
-            and message == self.last_message
-        ):
-            return
-        self.last_pct = percent
-        self.last_t = now
-        self.last_message = message
-        fields: dict[str, Any] = {"progress": percent, "status_message": message}
-        if status:
-            fields["status"] = status
-        store.update_meeting(self.meeting_id, **fields)
+        with self._lock:
+            if control.is_stopped(self.meeting_id):
+                raise control.ProcessingStopped()
+            percent = max(self.last_pct, 0, min(100, int(percent)))
+            now = time.monotonic()
+            if (
+                not force
+                and percent < self.last_pct + 1
+                and now - self.last_t < 0.7
+                and message == self.last_message
+            ):
+                return
+            fields: dict[str, Any] = {"progress": percent, "status_message": message}
+            if status:
+                fields["status"] = status
+            store.update_meeting(self.meeting_id, **fields)
+
+            self.last_pct = percent
+            self.last_t = now
+            self.last_message = message
 
 
 def _clock(seconds: int) -> str:
@@ -81,7 +86,7 @@ async def _analyze_with_heartbeat(
             elapsed = int(time.monotonic() - start)
             creep = min(8, elapsed // 20)
             try:
-                progress.set(
+                await run_sync(progress.set,
                     88 + creep,
                     f"{prefix} · {_clock(elapsed)}",
                     status="analyzing",
@@ -119,12 +124,13 @@ def has_saved_transcript(meeting: dict) -> bool:
 
 
 async def process_meeting(meeting_id: str) -> None:
-    with meeting_scope(meeting_id), config.model_settings_scope(), prompts.settings_scope():
+    settings = await run_sync(prompts.snapshot)
+    with meeting_scope(meeting_id), config.model_settings_scope(), prompts.settings_scope(settings):
         started = time.perf_counter()
         try:
             await _process_meeting(meeting_id)
         finally:
-            current = store.get_meeting(meeting_id) or {}
+            current = await run_sync(store.get_meeting, meeting_id) or {}
             log.info(
                 "timing stage=total seconds=%.3f status=%s audio_seconds=%s",
                 time.perf_counter() - started, current.get("status", "missing"),
@@ -133,13 +139,13 @@ async def process_meeting(meeting_id: str) -> None:
 
 
 async def _process_meeting(meeting_id: str) -> None:
-    meeting = store.get_meeting(meeting_id)
+    meeting = await run_sync(store.get_meeting, meeting_id)
     if not meeting:
         log.warning("Встреча не найдена")
         return
     api_key = config.get_api_key()
     if not api_key:
-        store.update_meeting(
+        await run_sync(store.update_meeting,
             meeting_id,
             status="error",
             status_message="Нет ключа OpenAI",
@@ -148,7 +154,7 @@ async def _process_meeting(meeting_id: str) -> None:
         return
 
     asr_model = config.get_asr_model()
-    context = await asyncio.to_thread(corporate_context.for_meeting, meeting)
+    context = await run_sync(corporate_context.for_meeting, meeting)
     calendar_context = meeting.get("calendar_context")
     calendar_hint = calendar_service.search_text(calendar_context)
     local_audio = config.is_local_asr(asr_model)
@@ -164,13 +170,13 @@ async def _process_meeting(meeting_id: str) -> None:
             transcript = meeting["transcript"].strip()
             step = "протокол"
             log.info("шаг: протокол, расшифровка уже сохранена, символов %s", len(transcript))
-            progress.set(88, "Продолжаю с готовой расшифровки", status="analyzing", force=True)
+            await run_sync(progress.set, 88, "Продолжаю с готовой расшифровки", status="analyzing", force=True)
         else:
             src = UPLOAD_DIR / f"{meeting_id}{Path(meeting['filename']).suffix.lower() or '.webm'}"
             if not src.exists():
                 src = next(UPLOAD_DIR.glob(f"{meeting_id}.*"), None)
             if not src or not src.exists():
-                store.update_meeting(
+                await run_sync(store.update_meeting,
                     meeting_id,
                     status="error",
                     status_message="Исходный файл не найден",
@@ -180,37 +186,37 @@ async def _process_meeting(meeting_id: str) -> None:
             step = "извлечение"
             log.info("шаг: извлечение %s", src.name)
             try:
-                disk.ensure_space()
+                await run_sync(disk.ensure_space)
             except disk.DiskError as exc:
                 log.warning("нет места: %s", exc)
-                store.update_meeting(
+                await run_sync(store.update_meeting,
                     meeting_id,
                     status="error",
                     status_message="Не хватает места на диске",
                     error=str(exc),
                 )
                 return
-            progress.set(5, "Извлекаю звуковую дорожку", status="extracting", force=True)
+            await run_sync(progress.set, 5, "Извлекаю звуковую дорожку", status="extracting", force=True)
             with stage_timer("audio_prepare"):
                 if local_audio:
-                    duration = await asyncio.to_thread(extract_wav, src, audio_path)
+                    duration = await run_sync(extract_wav, src, audio_path)
                 else:
                     duration = await extract_audio_async(src, audio_path)
-            store.update_meeting(meeting_id, duration_seconds=duration)
-            progress.set(15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
+            await run_sync(store.update_meeting, meeting_id, duration_seconds=duration)
+            await run_sync(progress.set, 15, "Аудио готово, запускаю расшифровку", status="transcribing", force=True)
 
             voiced = None
             payload: dict = {"language": meeting.get("language")}
             known_turns: list | None = None
             known_note: str | None = None
-            if config.is_gigaam_asr(asr_model) and diarization_available():
+            if config.is_gigaam_asr(asr_model) and await run_sync(diarization_available):
                 step = "спикеры"
                 log.info("шаг: спикеры до расшифровки")
-                progress.set(20, "Размечаю спикеров", status="transcribing", force=True)
+                await run_sync(progress.set, 20, "Размечаю спикеров", status="transcribing", force=True)
                 try:
                     async with local_asr_slot():
                         with stage_timer("diarization"):
-                            known_turns = await asyncio.to_thread(diarize_turns, audio_path, prepared=audio_path)
+                            known_turns = await run_sync(diarize_turns, audio_path, prepared=audio_path)
                 except DiarizeUnavailable as exc:
                     known_turns = []
                     known_note = str(exc)
@@ -227,14 +233,14 @@ async def _process_meeting(meeting_id: str) -> None:
                 if spans:
                     step = "расшифровка"
                     log.info("шаг: расшифровка по голосам, реплик %s", len(spans))
-                    progress.set(30, "Расшифровываю реплики по голосам", status="transcribing", force=True)
+                    await run_sync(progress.set, 30, "Расшифровываю реплики по голосам", status="transcribing", force=True)
 
                     def on_slice(pct: int, message: str) -> None:
                         progress.set(30 + int(max(0, min(100, pct)) * 0.55), message, status="transcribing")
 
                     async with local_asr_slot():
                         with stage_timer("asr"):
-                            payload = await asyncio.to_thread(
+                            payload = await run_sync(
                                 transcribe_spans,
                                 audio_path,
                                 spans,
@@ -249,7 +255,7 @@ async def _process_meeting(meeting_id: str) -> None:
             if voiced is None:
                 step = "расшифровка"
                 log.info("шаг: расшифровка model=%s", asr_model)
-                hints = await asyncio.to_thread(context.hotwords, meeting["title"] + "\n" + calendar_hint)
+                hints = await run_sync(context.hotwords, meeting["title"] + "\n" + calendar_hint)
                 payload = await _transcribe(client, audio_path, meeting_id, duration, progress, asr_model=asr_model,
                                             **({"hotwords": hints} if hints else {}))
                 if known_turns is not None:
@@ -259,17 +265,17 @@ async def _process_meeting(meeting_id: str) -> None:
                 else:
                     step = "спикеры"
                     log.info("шаг: спикеры")
-                    progress.set(86, "Размечаю спикеров", status="transcribing", force=True)
+                    await run_sync(progress.set, 86, "Размечаю спикеров", status="transcribing", force=True)
                     async with local_asr_slot():
                         with stage_timer("diarization"):
-                            voiced = await asyncio.to_thread(
+                            voiced = await run_sync(
                                 apply_diarization,
                                 audio_path,
                                 payload,
                                 lambda message: progress.set(86, message, status="transcribing", force=True),
                                 prepared=audio_path if local_audio else None,
                             )
-            voiced = await asyncio.to_thread(context.apply, voiced)
+            voiced = await run_sync(context.apply, voiced)
             transcript = (render_transcript(voiced) if voiced.get("segments") else voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
@@ -278,7 +284,7 @@ async def _process_meeting(meeting_id: str) -> None:
             if control.is_stopped(meeting_id):
                 raise control.ProcessingStopped()
 
-            store.update_meeting(
+            await run_sync(store.update_meeting,
                 meeting_id,
                 transcript=transcript,
                 transcript_segments={
@@ -313,17 +319,17 @@ async def _process_meeting(meeting_id: str) -> None:
             if control.is_stopped(meeting_id):
                 raise control.ProcessingStopped()
             transcript = render_transcript(document)
-            store.update_meeting(meeting_id, transcript=transcript, transcript_segments=document)
+            await run_sync(store.update_meeting, meeting_id, transcript=transcript, transcript_segments=document)
         step = "протокол"
         prefix = f"{config.chat_label()} пишет протокол"
-        progress.set(88, f"{prefix} · 0:00", status="analyzing", force=True)
+        await run_sync(progress.set, 88, f"{prefix} · 0:00", status="analyzing", force=True)
         log.info("шаг: протокол model=%s", config.get_chat_model())
         protocol_input = render_transcript(document, numbered=True) if document["segments"] else transcript
         roles = [{"name": speaker["name"], "job_title": speaker["job_title"]}
                  for speaker in document["speakers"] if speaker.get("job_title")]
-        terms = await asyncio.to_thread(context.select, protocol_input + "\n" + calendar_hint)
+        terms = await run_sync(context.select, protocol_input + "\n" + calendar_hint)
         document["corporate_context"] = {"revision": context.revision, "entries": terms}
-        store.update_meeting(meeting_id, transcript_segments=document)
+        await run_sync(store.update_meeting, meeting_id, transcript_segments=document)
         with stage_timer("protocol"):
             result = await _analyze_with_heartbeat(client, protocol_input, meeting["title"], progress, prefix, roles,
                                                    **({"corporate_terms": terms} if terms else {}),
@@ -334,7 +340,7 @@ async def _process_meeting(meeting_id: str) -> None:
             raise control.ProcessingStopped()
         title = meeting["title"] if calendar_context else (result.get("title") or meeting["title"]).strip() or meeting["title"]
         result["title"] = title
-        complete_protocol(
+        await run_sync(complete_protocol,
             {**meeting, "speakers": document["speakers"]},
             title=title,
             result=result,
@@ -343,20 +349,21 @@ async def _process_meeting(meeting_id: str) -> None:
         record_outcome("done")
         log.info("готово")
     except control.ProcessingStopped:
-        control.finish(meeting_id)
+        await run_sync(control.finish, meeting_id)
         return
     except Exception as exc:  # noqa: BLE001 — surface a short phrase; log the rest
         if control.is_stopped(meeting_id):
-            control.finish(meeting_id)
+            await run_sync(control.finish, meeting_id)
             return
         log.exception("Встреча остановилась на шаге «%s»", step)
-        store.update_meeting(
+        await run_sync(store.update_meeting,
             meeting_id,
             status="error",
             status_message="Обработка не удалась",
             error=public_error(exc),
         )
     finally:
+        disk.invalidate_recordings()
         # Close the per-meeting HTTP connection pool on success, error and stop.
         close = getattr(client, "close", None)
         try:
@@ -366,7 +373,8 @@ async def _process_meeting(meeting_id: str) -> None:
             log.warning("Не удалось закрыть клиент LLM", exc_info=True)
         if local_audio and not resume:
             try:
-                audio_path.unlink(missing_ok=True)
+                await run_sync(audio_path.unlink, missing_ok=True)
+                disk.invalidate_recordings()
             except OSError:
                 log.warning("Не удалось удалить временный WAV %s", audio_path.name, exc_info=True)
 
@@ -382,7 +390,7 @@ async def _transcribe(
         progress.set(overall, message, status="transcribing")
 
     if config.is_local_asr(asr_model):
-        progress.set(
+        await run_sync(progress.set,
             16,
             f"Расшифровываю локально ({config.asr_engine_label(asr_model)})",
             status="transcribing",
@@ -400,7 +408,7 @@ async def _transcribe(
     with stage_timer("asr_cloud"):
         limit = 2 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
         chunk_seconds = 2 * 60 if config.is_qwen() else CHUNK_SECONDS
-        size = audio_path.stat().st_size
+        size = (await run_sync(audio_path.stat)).st_size
         if size <= limit:
             return await transcribe_file(
                 client,
@@ -416,7 +424,7 @@ async def _transcribe(
             merged = []
             for index, (offset, chunk) in enumerate(chunks):
                 base = 16 + int(index / max(1, len(chunks)) * 70)
-                progress.set(
+                await run_sync(progress.set,
                     base,
                     f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
                     status="transcribing",
@@ -426,7 +434,7 @@ async def _transcribe(
                 merged.append((float(offset), payload))
             return merge_transcripts(merged)
         finally:
-            shutil.rmtree(chunks_dir, ignore_errors=True)
+            await run_sync(shutil.rmtree, chunks_dir, ignore_errors=True)
 
 
 def public_error(exc: BaseException) -> str:

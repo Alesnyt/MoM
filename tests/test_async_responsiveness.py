@@ -133,3 +133,52 @@ def test_cancelled_upload_keeps_spool_open_until_worker_finishes():
             release.set()
             await asyncio.gather(task,return_exceptions=True)
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('stage', ['prompts', 'read', 'progress', 'complete'])
+def test_pipeline_database_and_word_work_does_not_block_http(app_db, monkeypatch, stage):
+    from backend import pipeline, prompts
+    user = store.create_user('background@example.test', 'unused')
+    store.create_meeting('background', 'Встреча', 'test.wav', user['id'])
+    store.update_meeting('background', status='analyzing', transcript='Анна: План утверждён.')
+    monkeypatch.setattr(config, 'get_api_key', lambda: 'test')
+    monkeypatch.setattr(pipeline, 'make_client', lambda key: object())
+    async def analyze(*args, **kwargs):
+        return {'summary': 'План утверждён.', 'participants': []}
+    monkeypatch.setattr(pipeline, '_analyze_with_heartbeat', analyze)
+    entered, release = threading.Event(), threading.Event()
+    module, name = {
+        'prompts': (prompts, 'snapshot'), 'read': (store, 'get_meeting'),
+        'progress': (store, 'update_meeting'), 'complete': (pipeline, 'complete_protocol'),
+    }[stage]
+    original = getattr(module, name)
+    def slow(*args, **kwargs):
+        entered.set()
+        assert release.wait(3), 'Meeting work blocked HTTP requests'
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, name, slow)
+    async def call(client):
+        await pipeline.process_meeting('background')
+        return await client.get('/api/health')
+    asyncio.run(responsive_call(call, entered, release))
+    assert store.get_meeting('background')['status'] == 'done'
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_audio_upload_invalidates_recording_size_on_success_and_rejection(app_db, monkeypatch, valid):
+    from backend import disk
+    payload = b'RIFF' + b'x' * 100
+    disk.invalidate_recordings()
+    assert disk._recordings_bytes() == 0
+    def inspect_file(path):
+        # Monitoring may observe the complete file just before validation.
+        disk.invalidate_recordings()
+        assert disk._recordings_bytes() == len(payload)
+        return valid
+    monkeypatch.setattr(main, 'looks_like_audio', inspect_file)
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://testserver') as client:
+            response = await client.post('/api/meetings', files={'file': ('record.wav', payload)})
+            assert response.status_code == (200 if valid else 400), response.text
+    asyncio.run(scenario())
+    assert disk._recordings_bytes() == (len(payload) if valid else 0)

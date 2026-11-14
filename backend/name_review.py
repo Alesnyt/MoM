@@ -10,6 +10,7 @@ from typing import Any
 from openai import BadRequestError
 
 from . import control, prompts, store
+from .background import run_sync
 from .analyze import _chat_kwargs, json_format_unsupported
 from .config import get_chat_model
 
@@ -187,10 +188,10 @@ async def review_names(client, document: dict, *, on_progress=None) -> dict:
         pieces, locations = _review_segments(result["segments"])
         for start, end, context in _chunks(pieces):
             if on_progress:
-                on_progress(f"Проверяю имена · фрагменты {start + 1}–{end} из {len(pieces)}")
+                await run_sync(on_progress, f"Проверяю имена · фрагменты {start + 1}–{end} из {len(pieces)}")
             received = await _request(client, settings, participants, context)
             if on_progress:
-                on_progress("Проверяю имена · проверяю предложенные исправления")
+                await run_sync(on_progress, "Проверяю имена · проверяю предложенные исправления")
             for item in received:
                 if isinstance(item, dict) and type(item.get("segment_index")) is int and start <= item["segment_index"] < end:
                     mapped = _remap_mention(item, pieces, locations, result["segments"])

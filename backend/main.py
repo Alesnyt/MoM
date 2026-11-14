@@ -905,52 +905,55 @@ def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: st
             detail="Нужен файл записи: webm, mkv, mp4, mp3, wav, m4a или ogg",
         )
 
-    meeting_id = uuid.uuid4().hex
-    dest = UPLOAD_DIR / f"{meeting_id}{suffix}"
-    size = 0
-    limit = config.MAX_UPLOAD_BYTES
-    declared = 0
-    raw_length = request.headers.get("content-length") or ""
-    if raw_length.isdigit():
-        declared = int(raw_length)
-    _disk_or_507(declared)
     try:
-        with dest.open("wb") as out:
-            while True:
-                chunk = file.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > limit:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Файл больше {limit // (1024 * 1024)} МБ",
-                    )
-                if size % (8 * 1024 * 1024) < len(chunk):
-                    _disk_or_507()
-                out.write(chunk)
-    except HTTPException:
-        dest.unlink(missing_ok=True)
-        raise
-    except OSError as exc:
-        dest.unlink(missing_ok=True)
-        if exc.errno == errno.ENOSPC:
-            raise HTTPException(status_code=507, detail="Диск заполнился во время загрузки") from exc
-        raise
-    if size == 0:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="Пустой файл")
-    if not looks_like_audio(dest):
-        dest.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=400,
-            detail="Файл не похож на запись (webm, mkv, mp4, mp3, wav, m4a или ogg)",
-        )
+        meeting_id = uuid.uuid4().hex
+        dest = UPLOAD_DIR / f"{meeting_id}{suffix}"
+        size = 0
+        limit = config.MAX_UPLOAD_BYTES
+        declared = 0
+        raw_length = request.headers.get("content-length") or ""
+        if raw_length.isdigit():
+            declared = int(raw_length)
+        _disk_or_507(declared)
+        try:
+            with dest.open("wb") as out:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Файл больше {limit // (1024 * 1024)} МБ",
+                        )
+                    if size % (8 * 1024 * 1024) < len(chunk):
+                        _disk_or_507()
+                    out.write(chunk)
+        except HTTPException:
+            dest.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            dest.unlink(missing_ok=True)
+            if exc.errno == errno.ENOSPC:
+                raise HTTPException(status_code=507, detail="Диск заполнился во время загрузки") from exc
+            raise
+        if size == 0:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Пустой файл")
+        if not looks_like_audio(dest):
+            dest.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400,
+                detail="Файл не похож на запись (webm, mkv, mp4, mp3, wav, m4a или ogg)",
+            )
 
-    display_title = (title or "").strip() or (calendar_context or {}).get("title") or Path(original).stem
-    meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"], calendar_context=calendar_context)
-    worker.notify_work()
-    return meeting
+        display_title = (title or "").strip() or (calendar_context or {}).get("title") or Path(original).stem
+        meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"], calendar_context=calendar_context)
+        worker.notify_work()
+        return meeting
+    finally:
+        disk.invalidate_recordings()
 
 
 @app.post("/api/meetings/{meeting_id}/retry")
