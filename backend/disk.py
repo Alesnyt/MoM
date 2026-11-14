@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from pathlib import Path
 
 from . import config
 
-_recordings_cache: dict[str, float | int] = {"at": 0.0, "bytes": 0}
+_recordings_cache: dict = {"at": 0.0, "bytes": 0}
+_cache_lock = threading.Lock()
+_scan_lock = threading.Lock()
+_generation = 0
+
+
+def invalidate_recordings() -> None:
+    """Invalidate without waiting for a scan of a large archive to finish."""
+    global _generation
+    with _cache_lock:
+        _generation += 1
+        _recordings_cache.clear()
 
 
 class DiskError(RuntimeError):
@@ -32,14 +44,30 @@ def _dir_size(path: Path) -> int:
 
 
 def _recordings_bytes() -> int:
-    now = time.monotonic()
-    cached_at = float(_recordings_cache["at"])
-    if cached_at > 0 and now - cached_at < 30:
-        return int(_recordings_cache["bytes"])
-    total = _dir_size(config.UPLOAD_DIR) + _dir_size(config.AUDIO_DIR)
-    _recordings_cache["at"] = now
-    _recordings_cache["bytes"] = total
-    return total
+    paths = (config.UPLOAD_DIR, config.AUDIO_DIR)
+
+    def cached():
+        if (_recordings_cache.get("paths") == paths
+                and time.monotonic() - _recordings_cache.get("at", 0) < 30):
+            return int(_recordings_cache["bytes"])
+        return None
+
+    with _cache_lock:
+        value = cached()
+    if value is not None:
+        return value
+    # Concurrent monitoring requests share one directory scan.
+    with _scan_lock:
+        with _cache_lock:
+            value = cached()
+            if value is not None:
+                return value
+            generation = _generation
+        total = sum(_dir_size(path) for path in paths)
+        with _cache_lock:
+            if generation == _generation:
+                _recordings_cache.update(at=time.monotonic(), bytes=total, paths=paths)
+        return total
 
 
 def format_bytes(value: int) -> str:

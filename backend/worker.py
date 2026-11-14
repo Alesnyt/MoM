@@ -123,7 +123,7 @@ async def _run_job(meeting_id: str) -> None:
         with meeting_scope(meeting_id):
             await _run_job_scoped(meeting_id)
     except asyncio.CancelledError:
-        control.finish(meeting_id)
+        await background.run_sync(control.finish, meeting_id)
         raise
     except Exception:
         log.exception("Сбой завершения встречи %s", meeting_id)
@@ -159,19 +159,21 @@ async def _run_job_scoped(meeting_id: str) -> None:
         raise
     except Exception:
         log.exception("Обработка прервалась")
-        meeting = store.get_meeting(meeting_id)
+        meeting = await background.run_sync(store.get_meeting, meeting_id)
         if meeting and meeting.get("status") not in {"done", "error"}:
-            store.update_meeting(
+            await background.run_sync(store.update_meeting,
                 meeting_id,
                 status="error",
                 status_message="Обработка не удалась",
                 error="Внутренняя ошибка очереди",
             )
     finally:
-        meeting = store.get_meeting(meeting_id)
+        if control.is_stopped(meeting_id):
+            await background.run_sync(control.finish, meeting_id)
+        meeting = await background.run_sync(store.get_meeting, meeting_id)
         if meeting and meeting["status"] == "error":
             if meeting["status_message"] != "Остановлено":
                 record_outcome("error")
             if meeting.get("user_id"):
-                await asyncio.to_thread(retention.trim_archive, meeting["user_id"])
+                await background.run_sync(retention.trim_archive, meeting["user_id"])
         notify_work()

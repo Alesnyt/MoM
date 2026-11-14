@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from . import config, prompts, calendar_service, context_budget
 from .performance import stage_timer
+from .background import run_sync
 from .speakers import has_timestamps
 from .prompts import PROTOCOL_PROMPT as SYSTEM_PROMPT  # Public default for integrations.
 from .protocol_text import deduplicate, text_key
@@ -172,16 +173,16 @@ async def _transcribe_local(
     hotwords: str = "",
 ) -> dict[str, Any]:
     if _local_asr_lock.locked() and on_progress:
-        on_progress(1, "Жду свободный слот распознавания")
+        await run_sync(on_progress, 1, "Жду свободный слот распознавания")
     async with local_asr_slot():
         with stage_timer("asr"):
             if config.is_gigaam_asr(model):
                 from .gigaam_asr import transcribe_gigaam_sync
 
-                return await asyncio.to_thread(transcribe_gigaam_sync, path, language, duration, on_progress)
+                return await run_sync(transcribe_gigaam_sync, path, language, duration, on_progress)
             from .local_asr import transcribe_local_sync
 
-            return await asyncio.to_thread(transcribe_local_sync, path, language, duration, on_progress,
+            return await run_sync(transcribe_local_sync, path, language, duration, on_progress,
                                            **({"hotwords": hotwords} if hotwords else {}))
 
 
@@ -220,7 +221,13 @@ async def transcribe_file(
 
     try:
         return await _once(True)
-    except Exception:
+    except BadRequestError as exc:
+        message = str(exc).lower()
+        if "timestamp_granularities" not in message or not any(term in message for term in (
+            "not supported", "unsupported", "does not support", "not allowed",
+            "unknown parameter", "unrecognized request argument",
+        )):
+            raise
         return await _once(False)
 
 
@@ -236,7 +243,7 @@ async def transcribe_qwen(
 
     def encode_audio():
         return "data:audio/mpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
-    data_uri = await asyncio.to_thread(encode_audio)
+    data_uri = await run_sync(encode_audio)
     last_error: Exception | None = None
     for candidate in config.asr_model_candidates(model):
         try:
@@ -577,7 +584,7 @@ async def analyze_long_transcript(
         chunk, depth = pending.popleft()
         index = len(parts) + 1
         if on_part:
-            on_part(index, total)
+            await run_sync(on_part, index, total)
         sources = {int(value) for value in _TURN_ID.findall(chunk)}
         allowed.update(sources)
         intro = f"Это часть {index} из {total}. Составь промежуточный протокол.\n\n" if total > 1 else ""
@@ -616,7 +623,7 @@ async def analyze_long_transcript(
                 merged.append(group[0])
                 continue
             if on_part:
-                on_part(total, total)
+                await run_sync(on_part, total, total)
             payload = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
             try:
                 result = await analyze_transcript(client, roster + _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)

@@ -413,3 +413,116 @@ def test_corporate_context_reaches_asr_review_and_protocol(recording_db, monkeyp
     store.update_meeting(meeting_id, status="queued")
     asyncio.run(pipeline.process_meeting(meeting_id))
     assert store.get_meeting(meeting_id)["status"] == "done"
+
+
+@pytest.mark.parametrize('restart', [False, True])
+def test_task_cancel_keeps_asr_slot_and_wav_until_cpu_thread_exits(recording_db, monkeypatch, restart):
+    from backend import analyze, local_asr, worker
+    mid = 'cancel-cpu'
+    store.create_meeting(mid, 'Тест', 'test.wav', recording_db)
+    store.update_meeting(mid, status='extracting')
+    (config.UPLOAD_DIR / f'{mid}.wav').write_bytes(b'original')
+    monkeypatch.setattr(config, 'get_asr_model', lambda: config.LOCAL_ASR_MODEL)
+    monkeypatch.setattr(config, 'is_gigaam_asr', lambda model=None: False)
+    def extract(src, dest):
+        dest.write_bytes(b'prepared wav')
+        return 1.
+    monkeypatch.setattr(pipeline, 'extract_wav', extract)
+    entered, release = threading.Event(), threading.Event()
+    def cpu(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return {'text': 'Текст', 'segments': []}
+    monkeypatch.setattr(local_asr, 'transcribe_local_sync', cpu)
+    async def scenario():
+        lock = asyncio.Lock()
+        monkeypatch.setattr(analyze, '_local_asr_lock', lock)
+        task = asyncio.create_task(worker._run_job(mid))
+        control.bind_job(mid, task)
+        try:
+            assert await asyncio.to_thread(entered.wait, 4)
+            control.request_stop(mid, restart=restart)
+            task.cancel()
+            await asyncio.sleep(.02)
+            task.cancel()
+            await asyncio.sleep(.02)
+            assert not task.done()
+            assert lock.locked()
+            assert control.cancel_job(mid)
+            assert (config.AUDIO_DIR / f'{mid}.wav').exists()
+            assert store.get_meeting(mid)['status'] != 'queued'
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            assert not lock.locked()
+            assert not control.cancel_job(mid)
+            assert not (config.AUDIO_DIR / f'{mid}.wav').exists()
+            assert store.get_meeting(mid)['status'] == ('queued' if restart else 'error')
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            control.release(mid)
+    asyncio.run(scenario())
+
+
+def test_stop_during_word_preparation_does_not_publish_or_enqueue_mail(recording_db, monkeypatch):
+    from backend import mail
+    mid = 'stop-word'
+    store.create_meeting(mid, 'Тест', 'test.wav', recording_db)
+    store.update_meeting(mid, status='analyzing', transcript='Анна: План утверждён.')
+    async def analyze(*args, **kwargs): return _result()
+    monkeypatch.setattr(pipeline, '_analyze_with_heartbeat', analyze)
+    monkeypatch.setattr(mail, '_protocol_recipients', lambda meeting: ['recipient@example.test'])
+    entered, release = threading.Event(), threading.Event()
+    original = mail.prepare_protocol_mail
+    def prepare(meeting):
+        entered.set()
+        assert release.wait(4)
+        return original(meeting)
+    monkeypatch.setattr(mail, 'prepare_protocol_mail', prepare)
+    async def scenario():
+        task = asyncio.create_task(pipeline.process_meeting(mid))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            control.request_stop(mid, restart=False)
+            release.set()
+            await asyncio.wait_for(task, 5)
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            control.release(mid)
+    asyncio.run(scenario())
+    meeting = store.get_meeting(mid)
+    assert meeting['status'] == 'error' and meeting['result'] is None
+    with store.connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM protocol_mail WHERE meeting_id=?', (mid,)).fetchone()[0] == 0
+
+
+def test_stop_received_during_final_write_is_applied_before_worker_releases_job(recording_db, monkeypatch):
+    from backend import background, worker
+    mid = 'stop-final-write'
+    store.create_meeting(mid, 'Тест', 'test.wav', recording_db)
+    store.update_meeting(mid, status='transcribing')
+    entered, release = threading.Event(), threading.Event()
+    def write():
+        entered.set()
+        assert release.wait(4)
+        store.update_meeting(mid, status='review', transcript='Текст')
+    async def process(meeting_id):
+        await background.run_sync(write)
+    monkeypatch.setattr(worker, 'process_meeting', process)
+    async def scenario():
+        task = asyncio.create_task(worker._run_job(mid))
+        control.bind_job(mid, task)
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            control.request_stop(mid, restart=False)
+            release.set()
+            await asyncio.wait_for(task, 5)
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            control.release(mid)
+    asyncio.run(scenario())
+    meeting = store.get_meeting(mid)
+    assert meeting['status'] == 'error' and meeting['status_message'] == 'Остановлено'

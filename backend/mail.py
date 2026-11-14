@@ -9,7 +9,7 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate
 
-from . import config, protocol_email, retention, store, word_protocol
+from . import config, control, protocol_email, retention, store, word_protocol
 from .analyze import ProtocolResult
 from .speakers import SpeakerError, clean_speaker_email, participant_labels
 
@@ -221,6 +221,10 @@ def complete_protocol(meeting: dict, **fields) -> None:
             status_message = "Готово. Не удалось подготовить письмо с протоколом."
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # Word generation and waiting for the writer lock can outlast a stop.
+        # Do not enqueue mail or publish a late result in that case.
+        if control.is_stopped(meeting_id):
+            raise control.ProcessingStopped()
         store.update_meeting(
             meeting_id, connection=conn, **fields, status="done", error=None, progress=100,
             status_message=status_message,

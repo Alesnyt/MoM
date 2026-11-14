@@ -8,8 +8,8 @@ _frozen: ContextVar[dict | None] = ContextVar("meeting_prompts", default=None)
 
 
 @contextmanager
-def settings_scope():
-    token = _frozen.set(snapshot())
+def settings_scope(settings: dict | None = None):
+    token = _frozen.set(snapshot() if settings is None else settings)
     try:
         yield
     finally:
