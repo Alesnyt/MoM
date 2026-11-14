@@ -81,17 +81,22 @@ async def _analyze_with_heartbeat(
     start = time.monotonic()
     stop = asyncio.Event()
 
+    def report(percent: int, message: str) -> None:
+        try:
+            progress.set(percent, message, status="analyzing", force=True)
+        except control.ProcessingStopped:
+            raise
+        except Exception:
+            # Progress is advisory; the final result still requires a durable
+            # write. A transient timer write must not discard a paid LLM reply.
+            log.warning("Не удалось обновить прогресс протокола", exc_info=True)
+
     async def beat() -> None:
         while not stop.is_set():
             elapsed = int(time.monotonic() - start)
             creep = min(8, elapsed // 20)
             try:
-                await run_sync(progress.set,
-                    88 + creep,
-                    f"{prefix} · {_clock(elapsed)}",
-                    status="analyzing",
-                    force=True,
-                )
+                await run_sync(report, 88 + creep, f"{prefix} · {_clock(elapsed)}")
             except control.ProcessingStopped:
                 return
             try:
@@ -104,12 +109,7 @@ async def _analyze_with_heartbeat(
         def on_part(index: int, total: int) -> None:
             elapsed = int(time.monotonic() - start)
             base = 88 + int((index - 1) / max(1, total) * 10)
-            progress.set(
-                min(97, base),
-                f"{config.chat_label()}: часть {index} из {total} · {_clock(elapsed)}",
-                status="analyzing",
-                force=True,
-            )
+            report(min(97, base), f"{config.chat_label()}: часть {index} из {total} · {_clock(elapsed)}")
 
         return await analyze_long_transcript(client, transcript, title, on_part=on_part, participant_roles=participant_roles,
                                              **({"corporate_terms": corporate_terms} if corporate_terms else {}),

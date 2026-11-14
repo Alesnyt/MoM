@@ -6,7 +6,6 @@ import {
   createTranscript,
   deleteMeeting,
   getAuthStatus,
-  getHealth,
   getMeeting,
   getSettings,
   getUserSession,
@@ -20,6 +19,7 @@ import { Composer, UserLogin } from "./composer";
 import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings, queuePositionLabel } from "./format";
 import { MeetingPane, stepLabel } from "./meeting";
 import { startPolling } from "./poll";
+import { useServerHealth } from "./server-health";
 import type { AdminTab, AuthStatus, Health, Meeting, UserSession } from "./types";
 
 function pathIsAdmin(): boolean {
@@ -69,7 +69,7 @@ export default function App() {
     setMeetingRows(update);
   }, []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [health, setHealth] = useState<Health | null>(null);
+  const { health, setHealth, unavailable: serverUnavailable, recheck: recheckHealth } = useServerHealth();
   const [tab, setTab] = useState<"overview" | "actions" | "mom" | "transcript">("overview");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,22 +117,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    getHealth()
-      .then(setHealth)
-      .catch(() =>
-        setHealth({
-          ok: false,
-          ffmpeg: false,
-          openai: {
-            configured: false,
-            connected: false,
-            hint: null,
-            message: "Нет связи с сервером",
-            checked_at: null,
-          },
-          theme: "classic",
-        }),
-      );
     getAuthStatus().then(setAuth).catch(() => setAuth({ configured: false, authenticated: false }));
     getUserSession()
       .then((session) => {
@@ -428,6 +412,10 @@ export default function App() {
         </aside>
 
         <main className="stage" id="main">
+          {serverUnavailable && <div className="banner" role="status">
+            Нет связи с сервером. Пробуем подключиться автоматически.{" "}
+            <button type="button" className="ghost" onClick={recheckHealth}>Проверить подключение</button>
+          </div>}
           {error && <div className="banner" role="alert">{error}</div>}
           {detailFailure?.key === detailKey && <div className="banner" role="alert">
             {detailFailure.message}{" "}
@@ -444,41 +432,38 @@ export default function App() {
               onAuth={(next) => {
                 setAuth(next);
                 if (!next.authenticated) {
-                  getHealth().then(setHealth).catch(() => undefined);
+                  recheckHealth();
                 }
               }}
               onHealth={(next) => {
                 setAdminHealth(next);
-                setHealth((current) =>
-                  current
-                    ? {
-                        ...current,
-                        ok: next.ok,
-                        ffmpeg: next.ffmpeg,
-                        theme: next.theme,
-                        queue: next.queue,
-                        smtp: { configured: Boolean(next.smtp?.configured) },
-                        ldap: {
-                          enabled: Boolean(next.ldap?.enabled),
-                          configured: Boolean(next.ldap?.configured),
-                        },
-                        disk: next.disk,
-                        openai: {
-                          ...current.openai,
-                          configured: next.openai.configured,
-                          connected: next.openai.connected,
-                          auth_rejected: next.openai.auth_rejected,
-                          rate_limited: next.openai.rate_limited,
-                          model_unavailable: next.openai.model_unavailable,
-                          message: next.openai.message,
-                          checked_at: next.openai.checked_at,
-                          provider: next.openai.provider,
-                          provider_label: next.openai.provider_label,
-                          hint: null,
-                        },
-                      }
-                    : current,
-                );
+                setHealth((current) => ({
+                  ...current,
+                  ok: next.ok,
+                  ffmpeg: next.ffmpeg,
+                  max_upload_bytes: next.max_upload_bytes ?? current?.max_upload_bytes,
+                  theme: next.theme,
+                  queue: next.queue,
+                  smtp: { configured: Boolean(next.smtp?.configured) },
+                  ldap: {
+                    enabled: Boolean(next.ldap?.enabled),
+                    configured: Boolean(next.ldap?.configured),
+                  },
+                  disk: next.disk,
+                  openai: {
+                    ...current?.openai,
+                    configured: next.openai.configured,
+                    connected: next.openai.connected,
+                    auth_rejected: next.openai.auth_rejected,
+                    rate_limited: next.openai.rate_limited,
+                    model_unavailable: next.openai.model_unavailable,
+                    message: next.openai.message,
+                    checked_at: next.openai.checked_at,
+                    provider: next.openai.provider,
+                    provider_label: next.openai.provider_label,
+                    hint: null,
+                  },
+                }));
               }}
             />
           ) : !userReady ? (
@@ -494,6 +479,7 @@ export default function App() {
           ) : showComposer ? (
             <Composer
               busy={busy}
+              serverUnavailable={serverUnavailable}
               keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
@@ -523,6 +509,7 @@ export default function App() {
           ) : (
             <Composer
               busy={busy}
+              serverUnavailable={serverUnavailable}
               keyStatus={health?.openai ?? null}
               queue={liveQueue}
               mailReady={Boolean(health?.smtp?.configured)}
