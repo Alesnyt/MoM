@@ -132,3 +132,51 @@ def test_archive_deletion_invalidates_sizes_immediately(archive):
     assert disk._recordings_bytes() == 13
     retention.purge_files('meeting')
     assert disk._recordings_bytes() == 0
+
+
+@pytest.mark.parametrize('failure', [None, ValueError('provider failed'), asyncio.CancelledError()])
+def test_heartbeat_database_failure_cannot_replace_model_outcome(monkeypatch, failure):
+    from types import SimpleNamespace
+    entered = threading.Event()
+    def fail_progress(*args, **kwargs):
+        entered.set()
+        raise OSError('temporary progress write failure')
+    async def analyze(*args, **kwargs):
+        assert await asyncio.to_thread(entered.wait, 2)
+        if failure is not None:
+            raise failure
+        return {'summary': 'Успешный результат'}
+    monkeypatch.setattr(pipeline, 'analyze_long_transcript', analyze)
+    async def scenario():
+        call = pipeline._analyze_with_heartbeat(object(), 'Текст', 'Встреча',
+                                               SimpleNamespace(set=fail_progress), 'Модель')
+        if failure is None:
+            assert await call == {'summary': 'Успешный результат'}
+        else:
+            with pytest.raises(type(failure)) as caught:
+                await call
+            assert caught.value is failure
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('stopped', [False, True])
+def test_protocol_part_progress_is_advisory_but_stop_is_not(monkeypatch, stopped):
+    from types import SimpleNamespace
+    from backend import control
+    def report(*args, **kwargs):
+        if stopped:
+            raise control.ProcessingStopped()
+        raise OSError('progress database unavailable')
+    async def analyze(*args, on_part, **kwargs):
+        await background.run_sync(on_part, 1, 2)
+        return {'summary': 'Готово'}
+    monkeypatch.setattr(pipeline, 'analyze_long_transcript', analyze)
+    async def scenario():
+        result = pipeline._analyze_with_heartbeat(object(), 'Текст', 'Встреча',
+                                                 SimpleNamespace(set=report), 'Модель')
+        if stopped:
+            with pytest.raises(control.ProcessingStopped):
+                await result
+        else:
+            assert await result == {'summary': 'Готово'}
+    asyncio.run(scenario())

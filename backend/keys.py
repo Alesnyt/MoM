@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+
+import anyio
 
 from openai import (
     APIConnectionError,
@@ -125,13 +128,28 @@ def chat_model_ids(raw_ids: list[str], *, provider: str, private: bool = False) 
     return list(dict.fromkeys(picked))
 
 
+@asynccontextmanager
+async def _checking_client(secret: str, base: str):
+    client = make_client(secret, base_url=base or None, timeout=float(config.VERIFY_TIMEOUT_SECONDS))
+    try:
+        yield client
+    finally:
+        # A disconnected browser cancels the enclosing AnyIO scope. Give the
+        # connection pool a bounded opportunity to close even in that case.
+        with anyio.move_on_after(5, shield=True):
+            try:
+                await client.close()
+            except Exception:
+                log.warning("Не удалось закрыть соединение проверки модели", exc_info=True)
+
+
 async def list_chat_models() -> list[str]:
     secret = config.get_api_key().strip()
     if not secret:
         return []
     provider = config.detect_provider()
-    client = make_client(secret, base_url=config.get_base_url() or None, timeout=float(config.VERIFY_TIMEOUT_SECONDS))
-    listed = await client.models.list()
+    async with _checking_client(secret, config.get_base_url()) as client:
+        listed = await client.models.list()
     data = getattr(listed, "data", None)
     raw = [_model_id(item) for item in (data or [])]
     names = chat_model_ids(raw, provider=provider, private=config.is_private_base())
@@ -177,8 +195,8 @@ async def verify_key(key: str | None = None) -> dict[str, Any]:
     label = config.provider_label(config.detect_provider(secret))
     result: dict[str, Any] = {"connection": connection}
     try:
-        client = make_client(secret, base_url=base, timeout=float(config.VERIFY_TIMEOUT_SECONDS))
-        await _ping(client, model)
+        async with _checking_client(secret, base) as client:
+            await _ping(client, model)
         result.update(connected=True, message=f"{label} принял ключ. Модель: {model}")
     except AuthenticationError:
         result.update(auth_rejected=True, message=f"{label} отклонил ключ. Проверьте его в админке.")

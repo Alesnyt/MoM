@@ -82,8 +82,8 @@ export async function saveDirectorySchedule(settings: {sync_ad?: boolean; sync_t
   return response.json();
 }
 
-export async function getHealth(): Promise<Health> {
-  const response = await fetch("/api/health");
+export async function getHealth(signal?: AbortSignal): Promise<Health> {
+  const response = await fetch("/api/health", { signal, cache: "no-store" });
   if (!response.ok && response.status !== 503) throw new Error(await parseError(response));
   const state = await response.json();
   // Readiness failures still carry the real capabilities needed by the UI.

@@ -10,6 +10,7 @@ export const ACCEPT = ".webm,.mkv,.mp4,.mp3,.wav,.m4a,.ogg,audio/webm,video/webm
 
 export function Composer({
   busy,
+  serverUnavailable = false,
   keyStatus,
   queue,
   mailReady,
@@ -21,6 +22,7 @@ export function Composer({
   onOpenCalendarSettings,
 }: {
   busy: boolean;
+  serverUnavailable?: boolean;
   keyStatus: OpenAIStatus | null;
   queue?: { active: number; waiting: number; limit: number };
   mailReady: boolean;
@@ -66,7 +68,7 @@ export function Composer({
   const limitReady = Number.isFinite(maxUploadBytes) && (maxUploadBytes ?? 0) > 0;
   const sizeError = mode === "audio" && file && limitReady
     ? recordingSizeError(file.size, maxUploadBytes!) : null;
-  const cannotUpload = busy || calendarPending || (mode === "audio"
+  const cannotUpload = busy || serverUnavailable || calendarPending || (mode === "audio"
     ? !file || !keyReady || !limitReady || Boolean(sizeError)
     : !file && !text.trim());
 
@@ -142,7 +144,7 @@ export function Composer({
           onChange={(event) => takeFile(event.target.files?.[0] ?? null)}
         />
         <span className="drop-kicker">{mode === "text" ? "txt, md, srt, vtt · до 1 МБ"
-          : `webm, mkv, mp4, mp3, wav · ${limitReady ? `до ${formatBytes(maxUploadBytes!)}` : "лимит загрузки пока недоступен — обновите страницу"}`}</span>
+          : `webm, mkv, mp4, mp3, wav · ${limitReady ? `до ${formatBytes(maxUploadBytes!)}` : "получаю лимит загрузки…"}`}</span>
         <strong>{file ? file.name : mode === "text" ? "Выбрать файл транскрипта" : "Перетащите запись сюда"}</strong>
         <small>
           {file
