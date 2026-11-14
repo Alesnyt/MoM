@@ -14,7 +14,8 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {cleanup(); globalThis.fetch = originalFetch;});
 const initial = {enabled:true,use_ad:true,sync_ad:true,revision:1,term_count:1,people_count:20,directory_current:true,
   search_mode:'live',search_cache_ready:false,
-  directory_policy:{fields:['job_title','department','surname'],domains:[]},sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
+  directory_policy:{fields:['job_title','department','surname'],domains:[],ldap_filter:'(!(userAccountControl:1.2.840.113556.1.4.803:=2))'},
+  sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
   ldap_configured:true,synced_at:null,imported_at:null,sync_error:null,syncing:false,matched_terms:1,
   terms:[{term:'TrueConf',aliases:['труконф'],description:'Видеоконференции',department:''}]};
 
@@ -88,7 +89,7 @@ test('context controls consumption only; toggling AD does not change cache or se
   assert.ok(await view.findByText('TrueConf'));
 });
 
-test('directory field and domain choices survive refreshes and are applied before a sync', async () => {
+test('directory fields, domains and LDAP filter survive refreshes and are applied before a sync', async () => {
   let current = {...initial}, saved, syncs = 0;
   globalThis.fetch = async (url, options) => {
     if (url === '/api/admin/directory/policy') {
@@ -105,14 +106,22 @@ test('directory field and domain choices survive refreshes and are applied befor
   assert.equal(jobTitle.checked, true);
   fireEvent.click(jobTitle);
   fireEvent.change(view.getByLabelText('Разрешённые почтовые домены'), {target:{value:'example.com; other.ru\ncompany.ru'}});
-  fireEvent.submit(view.getByRole('button', {name:'Сохранить поля и домены'}).closest('form'));
-  await waitFor(() => assert.deepEqual(saved.domains, ['example.com','other.ru','company.ru']));
+  const filter = view.getByLabelText('Дополнительный LDAP-фильтр');
+  assert.equal(filter.value, initial.directory_policy.ldap_filter);
+  const save = view.getByRole('button', {name:'Сохранить правила каталога'});
+  fireEvent.change(filter, {target:{value:'(department=IT)'}});
+  fireEvent.submit(save.closest('form'));
+  await waitFor(() => assert.deepEqual(saved, {fields:['department','surname'], domains:['example.com','other.ru','company.ru'], ldap_filter:'(department=IT)'}));
   assert.ok(await view.findByText(/Справочник нужно обновить/));
   await waitFor(() => assert.equal(view.getByRole('button', {name:'Синхронизировать AD'}).disabled, false));
   fireEvent.click(view.getByRole('button', {name:'Синхронизировать AD'}));
   await waitFor(() => assert.equal(syncs, 1));
   await view.findByText(/Сотрудников в кэше — 12/);
   assert.equal(jobTitle.checked, false);
+  assert.equal(filter.value, '(department=IT)');
+  fireEvent.change(filter, {target:{value:''}});
+  fireEvent.submit(save.closest('form'));
+  await waitFor(() => assert.equal(saved.ldap_filter, ''));
 });
 
 test('live is default; successful sync unlocks cache but only an explicit choice changes the mode', async () => {

@@ -53,6 +53,7 @@ class DirectorySettingsIn(BaseModel):
 class DirectoryPolicyIn(BaseModel):
     fields: list[str] = Field(max_length=3)
     domains: list[str] = Field(max_length=32)
+    ldap_filter: str | None = None
 
 
 class SpeakerSearchIn(BaseModel):

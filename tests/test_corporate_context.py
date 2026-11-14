@@ -334,14 +334,14 @@ def test_directory_policy_rejects_invalid_domains_atomically(db, domains):
 
 def test_directory_policy_normalizes_and_rejects_unused_fields(db):
     assert directory_scope.save_sync_policy(["surname"], [" @EXAMPLE.com ", "example.com"]) == {
-        "fields": ["surname"], "domains": ["example.com"]}
+        "fields": ["surname"], "domains": ["example.com"], "ldap_filter": directory_scope.DEFAULT_LDAP_FILTER}
     with pytest.raises(ValueError):
         directory_scope.save_sync_policy(["password"], [])
 
 
 def test_directory_policy_requests_only_selected_fields_and_enforces_domain_and_ou(db, monkeypatch):
     directory_scope.save("selected", ["OU=IT,DC=example,DC=com"])
-    directory_scope.save_sync_policy(["department"], ["example.com"])
+    directory_scope.save_sync_policy(["department"], ["example.com"], "(department=ИТ)")
     class Contractor(Entry):
         def __getitem__(self, key):
             return SimpleNamespace(value="external@contractor.com") if key == "mail" else super().__getitem__(key)
@@ -352,6 +352,8 @@ def test_directory_policy_requests_only_selected_fields_and_enforces_domain_and_
             assert kwargs["search_base"] == "OU=IT,DC=example,DC=com"
             assert set(kwargs["attributes"]) == {"mail", "cn", "displayName", "department"}
             assert "(mail=*@example.com)" in kwargs["search_filter"]
+            assert "(department=ИТ)" in kwargs["search_filter"]
+            assert "userAccountControl" not in kwargs["search_filter"]
         def unbind(self):
             pass
     conn = Connection()
@@ -371,13 +373,28 @@ def test_directory_policy_api_requires_admin_and_invalidates_old_snapshot(db):
     assert client.post(route, json=payload).status_code == 401
     store.put_session("admin", "admin", username="admin", expires=time.time() + 3600)
     client.cookies.set(auth.COOKIE_NAME, "admin")
-    cc._update(people=[{"name": "Анна"}], directory_signature=cc.directory_signature())
-    result = client.post(route, json=payload)
+    store.set_app_setting("ldap_sync_policy", payload)
+    assert directory_scope.sync_policy()["ldap_filter"] == directory_scope.DEFAULT_LDAP_FILTER
+    cc._update(people=[{"name": "Анна"}], directory_signature=cc.directory_signature(), synced_at=store.utc_now())
+    ldap_filter = r"(&(department=IT)(memberOf=CN=R\28D\29,OU=Groups,DC=example,DC=com))"
+    result = client.post(route, json={**payload, "ldap_filter": f"  {ldap_filter}  "})
     assert result.status_code == 200
-    assert result.json()["directory_policy"] == payload
+    assert result.json()["directory_policy"] == {**payload, "ldap_filter": ldap_filter}
     assert result.json()["people_count"] == 0
     assert not result.json()["directory_current"]
+    assert client.post(route, json=payload).json()["directory_policy"]["ldap_filter"] == ldap_filter
+    assert client.post(route, json={**payload, "ldap_filter": ""}).json()["directory_policy"]["ldap_filter"] == ""
     assert client.post(route, json={"fields": ["bad"], "domains": []}).status_code == 400
+
+
+@pytest.mark.parametrize("ldap_filter", ["department=IT", "(department=IT)(mail=*)", "(!(&(cn=a))(&(cn=b)))",
+                                         "(&(cn=a)())", "(foo bar=a)", "(cn=**)", r"(cn=\xx)",
+                                         "(!" * 65 + "(cn=*)" + ")" * 65])
+def test_invalid_ldap_filter_leaves_saved_policy_intact(db, ldap_filter):
+    previous = directory_scope.save_sync_policy([], ["example.com"], "(department=IT)")
+    with pytest.raises(ValueError, match="LDAP-фильтр"):
+        directory_scope.save_sync_policy(["job_title"], [], ldap_filter)
+    assert directory_scope.sync_policy() == previous
 
 
 def test_large_department_does_not_displace_dictionary_and_surnames_need_unique_matches():

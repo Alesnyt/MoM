@@ -50,10 +50,12 @@ def create_router(require_admin) -> APIRouter:
     @router.post("/api/admin/context/directory")
     def save_context_directory(payload: DirectoryPolicyIn, admin: dict = Depends(require_admin)) -> dict:
         try:
-            policy = directory_scope.save_sync_policy(payload.fields, payload.domains)
+            policy = directory_scope.save_sync_policy(payload.fields, payload.domains, payload.ldap_filter)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        store.record_audit(admin["username"], "context.directory", detail=json.dumps(policy, ensure_ascii=False))
+        detail = {key: policy[key] for key in ("fields", "domains")}
+        detail["ldap_filter_enabled"] = bool(policy["ldap_filter"])
+        store.record_audit(admin["username"], "context.directory", detail=json.dumps(detail, ensure_ascii=False))
         return corporate_context.snapshot()
 
 

@@ -1,5 +1,7 @@
 """Exercise the actual LDAP parser/paging and durable cache job lifecycle."""
 import asyncio
+import hashlib
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +36,16 @@ def test_actual_ldap_paging_empty_query_domains_and_selected_attributes(db, monk
     conn.strategy.add_entry(f"CN=Computer,{base}", {"objectClass": ["person", "computer"], "mail": "computer@example.com"})
     conn.strategy.add_entry("CN=Outside,OU=Other,DC=example,DC=com", {"objectClass": "person", "mail": "outside@example.com"})
     conn.bind()
+
+    original_search = conn.search
+
+    def search(*, search_filter, **kwargs):
+        disabled_filter = "(!(userAccountControl:1.2.840.113556.1.4.803:=2))"
+        assert disabled_filter in search_filter
+        # ldap3's mock rejects AD's extensible matching rule. Exercise paging with the other clauses.
+        return original_search(search_filter=search_filter.replace(disabled_filter, ""), **kwargs)
+
+    monkeypatch.setattr(conn, "search", search)
     monkeypatch.setattr(ldap_auth, "_service_connection", lambda **kwargs: (conn, None))
     directory_scope.save("selected", [base])
     directory_scope.save_sync_policy(["department"], ["example.com"])
@@ -45,6 +57,20 @@ def test_actual_ldap_paging_empty_query_domains_and_selected_attributes(db, monk
     assert {event["received"] for event in completed} == {500, 1000, 1005}
     assert events[-1]["pages"] == 3 and events[-1]["scopes_done"] == 1
     assert conn.closed
+
+
+def test_snapshot_from_before_disabled_account_filter_requires_sync(db, monkeypatch):
+    old_inputs = [config.ldap_configured(), config.get_ldap_url(), config.get_ldap_base_dn(),
+                  config.get_ldap_email_attr(), config.get_ldap_bind_dn(), directory_scope.search_bases()]
+    old_signature = hashlib.sha256(json.dumps(old_inputs, sort_keys=True).encode()).hexdigest()
+    cc._update(people=[{"name": "Previous"}], directory_signature=old_signature, synced_at=store.utc_now())
+
+    assert cc.snapshot()["search_cache_ready"] is False
+    assert cc.search_people("Previous")[0] == []
+
+    monkeypatch.setattr(ldap_auth, "sync_people", lambda **kwargs: [{"name": "Current"}])
+    assert cc.sync_directory()["search_cache_ready"] is True
+    assert cc.search_people("Current")[0] == [{"name": "Current"}]
 
 
 def test_bind_test_does_not_imply_bulk_read_permission(db, monkeypatch):
@@ -155,7 +181,8 @@ def test_progress_and_heartbeat_do_not_publish_partial_or_invalidate_index(db, m
     cc._update(people=[{"name": "Previous"}], directory_signature=cc.directory_signature(), synced_at=store.utc_now())
     version = store.get_app_setting("corporate_context_version")
     started, release = threading.Event(), threading.Event()
-    def download(*, progress):
+    def download(*, progress, policy):
+        assert policy["ldap_filter"] == directory_scope.DEFAULT_LDAP_FILTER
         progress({"phase": "reading", "received": 500, "pages": 1})
         started.set()
         assert release.wait(10)
@@ -184,7 +211,7 @@ def test_progress_and_heartbeat_do_not_publish_partial_or_invalidate_index(db, m
 
 def test_unexpected_error_is_logged_audited_and_preserves_snapshot(db, monkeypatch, caplog):
     cc._update(people=[{"name": "Previous"}], directory_signature=cc.directory_signature(), synced_at=store.utc_now())
-    def download(*, progress):
+    def download(*, progress, policy):
         progress({"phase": "reading", "received": 500, "pages": 1})
         raise RuntimeError("test failure detail")
     monkeypatch.setattr(ldap_auth, "sync_people", download)
