@@ -68,14 +68,14 @@ def user_filter(username: str) -> str:
     return template.replace("{username}", escape_filter(username))
 
 
-def people_filter(query: str) -> str:
+def people_filter(query: str, *, ldap_filter: str = "") -> str:
     escaped = escape_filter(query.strip())
     mail = (config.get_ldap_email_attr() or "mail").strip() or "mail"
     if not re.fullmatch(r"(?:[A-Za-z][A-Za-z0-9-]*|[0-9]+(?:\.[0-9]+)+)", mail):
         raise LdapError("Некорректное имя атрибута email")
+    person = f"(objectClass=person)(!(objectClass=computer)){ldap_filter}"
     if not escaped:
-        # Enumeration is a presence query, not a substring search for an empty name.
-        return "(&(objectClass=person)(!(objectClass=computer)))"
+        return f"(&{person})"
     clauses = [
         f"(cn=*{escaped}*)",
         f"(displayName=*{escaped}*)",
@@ -85,7 +85,7 @@ def people_filter(query: str) -> str:
     ]
     if mail.lower() != "mail":
         clauses.append(f"(mail=*{escaped}*)")
-    return "(&(objectClass=person)(!(objectClass=computer))(|" + "".join(clauses) + "))"
+    return f"(&{person}(|{''.join(clauses)}))"
 
 
 def authenticate(username: str, password: str) -> bool:
@@ -313,10 +313,12 @@ def search_people(query: str, limit: int = 20, *, for_speakers: bool = False) ->
         from ldap3 import SUBTREE, DEREF_NEVER
 
         mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-        policy = directory_scope.sync_policy() if for_speakers else {"fields": ["job_title"], "domains": []}
+        policy = directory_scope.sync_policy() if for_speakers else {"fields": ["job_title"], "domains": [], "ldap_filter": ""}
         attributes = sorted({mail_attr, "mail", "cn", "displayName"} |
                             ({"title"} if "job_title" in policy["fields"] else set()))
-        search_filter = _with_email_domains(people_filter(text), mail_attr, policy["domains"])
+        search_filter = _with_email_domains(
+            people_filter(text, ldap_filter=policy["ldap_filter"]), mail_attr, policy["domains"],
+        )
         people: list[dict[str, str]] = []
         seen: set[str] = set()
         cap = max(1, min(int(limit), 30))
@@ -358,7 +360,7 @@ def search_people(query: str, limit: int = 20, *, for_speakers: bool = False) ->
             connection.unbind()
 
 
-def sync_people(*, progress: Callable[[dict], None] | None = None) -> list[dict[str, str]]:
+def sync_people(*, progress: Callable[[dict], None] | None = None, policy: dict | None = None) -> list[dict[str, str]]:
     """Enumerate the configured people scopes, committing only a complete result."""
     from ldap3 import SUBTREE, DEREF_NEVER
 
@@ -367,13 +369,13 @@ def sync_people(*, progress: Callable[[dict], None] | None = None) -> list[dict[
     bases = directory_scope.search_bases()
     if not bases:
         raise LdapError("Не выбраны области выгрузки AD. Проверьте и сохраните домены и OU в разделе «Каталог»")
-    search_filter = people_filter("")
     mail_attr = (config.get_ldap_email_attr() or "mail").strip() or "mail"
-    policy = directory_scope.sync_policy()
+    if policy is None:
+        policy = directory_scope.sync_policy()
     fields, domains = policy["fields"], policy["domains"]
     attributes = sorted({mail_attr, "mail", "cn", "displayName"} |
                         {directory_scope.OPTIONAL_FIELDS[field][0] for field in fields})
-    search_filter = _with_email_domains(search_filter, mail_attr, domains)
+    search_filter = _with_email_domains(people_filter("", ldap_filter=policy["ldap_filter"]), mail_attr, domains)
     connection = None
     people, seen = [], set()
     state = {"phase": "connecting", "received": 0, "pages": 0, "scopes_done": 0,

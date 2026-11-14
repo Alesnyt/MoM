@@ -16,12 +16,15 @@ export function DirectoryCachePanel() {
   const [syncTime, setSyncTime] = useState("03:00");
   const [fields, setFields] = useState(AD_FIELDS.map(field => field.key));
   const [domains, setDomains] = useState("");
+  const [ldapFilter, setLdapFilter] = useState("");
   const [showScopes, setShowScopes] = useState(false);
   const savedPolicy = JSON.stringify(data?.directory_policy);
   useEffect(() => {
     if (!savedPolicy) return;
     const policy = JSON.parse(savedPolicy);
-    setFields(policy.fields); setDomains(policy.domains.join("\n"));
+    setFields(policy.fields);
+    setDomains(policy.domains.join("\n"));
+    setLdapFilter(policy.ldap_filter ?? "");
   }, [savedPolicy]);
   useEffect(() => { if (data?.sync_time) setSyncTime(data.sync_time); }, [data?.sync_time]);
 
@@ -83,11 +86,11 @@ export function DirectoryCachePanel() {
         {!data.directory_current && <p className="health-warn">Справочник нужно обновить. Сохраните ограничения и нажмите «Синхронизировать AD».</p>}
         <form className="directory-policy" onSubmit={event => {
           event.preventDefault();
-          void update(() => saveDirectoryPolicy({fields, domains: domains.split(/[\s,;]+/).filter(Boolean)}),
+          void update(() => saveDirectoryPolicy({fields, domains: domains.split(/[\s,;]+/).filter(Boolean), ldap_filter: ldapFilter}),
             "Правила сохранены. Нажмите «Синхронизировать AD», чтобы обновить справочник.");
         }}>
           <fieldset disabled={busy || data.syncing}>
-            <legend>Какие поля загружать</legend>
+            <legend>Поля и фильтры справочника AD</legend>
             <p>ФИО (displayName / cn) и email обязательны. Дополнительные поля можно отключить; остальные атрибуты AD не загружаются.</p>
             {AD_FIELDS.map(field => <label className="context-toggle" key={field.key}>
               <input type="checkbox" checked={fields.includes(field.key)} onChange={event => setFields(current =>
@@ -99,7 +102,14 @@ export function DirectoryCachePanel() {
             </label>
             <p id="ad-domain-hint">Пусто — любой почтовый домен. Перечислите через запятую или с новой строки.
               Например, company.ru включает только адреса @company.ru, без поддоменов. Сотрудник должен также входить в выбранную OU.</p>
-            <button className="ghost" type="submit">Сохранить поля и домены</button>
+            <label className="field-label">Дополнительный LDAP-фильтр
+              <textarea className="title-input" rows={3} maxLength={4096} value={ldapFilter}
+                onChange={event => setLdapFilter(event.target.value)} aria-describedby="ad-filter-hint"
+                placeholder="(department=IT)" autoCapitalize="off" spellCheck={false} />
+            </label>
+            <p id="ad-filter-hint">Применяется вместе с выбранными OU и почтовыми доменами к кэшу и живому поиску спикеров.
+              Для нескольких условий используйте одно выражение с &amp; или |. Пустое поле отключает дополнительный фильтр.</p>
+            <button className="ghost" type="submit">Сохранить правила каталога</button>
           </fieldset>
         </form>
         <button className="ghost" type="button" aria-expanded={showScopes} onClick={() => setShowScopes(value => !value)}>
