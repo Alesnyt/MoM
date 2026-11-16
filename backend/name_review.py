@@ -9,7 +9,7 @@ from typing import Any
 
 from openai import BadRequestError
 
-from . import control, prompts, store
+from . import control, prompts, store, llm_metrics
 from .background import run_sync
 from .analyze import _chat_kwargs, json_format_unsupported
 from .config import get_chat_model
@@ -89,11 +89,12 @@ async def _request(client, settings: dict, participants: list[dict], segments: l
         **_chat_kwargs(),
     }
     try:
-        response = await client.chat.completions.create(**kwargs, response_format={"type": "json_object"})
+        response = await llm_metrics.completion(client, phase="name_review", **kwargs,
+                                                response_format={"type": "json_object"})
     except BadRequestError as exc:
         if not json_format_unsupported(exc):
             raise
-        response = await client.chat.completions.create(**kwargs)
+        response = await llm_metrics.completion(client, phase="name_review", retry_reason="json_fallback", **kwargs)
     raw = (response.choices[0].message.content or "").strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)

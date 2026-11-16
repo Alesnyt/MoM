@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import threading
 import uuid
+import time
 from typing import Literal
 from pathlib import Path
 from urllib.parse import quote
@@ -52,7 +53,7 @@ from .api_schemas import (
     UserPatchIn
 )
 
-from . import audit, auth, config, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
+from . import audit, auth, config, diagnostics, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import ffmpeg_available, looks_like_audio
 from .analyze import ProtocolResult
 from . import transcript_import, upload, corporate_context, glossary, term_discovery
@@ -246,6 +247,7 @@ def _health(*, full: bool = False) -> dict:
 async def lifespan(_app: FastAPI):
     ensure_dirs()
     store.init_db()
+    await run_in_threadpool(diagnostics.initialize)
     store.requeue_interrupted_meetings()
     config.migrate_token_plan_asr()
     if config.get_api_key():
@@ -595,6 +597,28 @@ def admin_monitoring(response: Response, _admin: dict = Depends(require_admin)) 
     }
 
 
+@app.get("/api/admin/diagnostics")
+def admin_diagnostics(response: Response, days: int = Query(7, ge=1, le=14),
+                      _admin: dict = Depends(require_admin)) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return diagnostics.summary(days)
+
+
+@app.get("/api/admin/diagnostics/export")
+def export_diagnostics(days: int = Query(7, ge=1, le=14),
+                       _admin: dict = Depends(require_admin)) -> Response:
+    report = diagnostics.export_report(days)
+    if not report.get("available", False):
+        raise HTTPException(503, "Отчёт временно недоступен. Повторите скачивание.",
+                            headers={"Cache-Control": "no-store"})
+    return Response(
+        content=json.dumps(report, ensure_ascii=True, allow_nan=False, separators=(",", ":")),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store",
+                 "Content-Disposition": f'attachment; filename="mom-performance-{days}d.json"'},
+    )
+
+
 @app.get("/api/settings/prompts")
 def get_prompts(_admin: dict = Depends(require_admin)) -> dict:
     return prompts.settings_view()
@@ -877,14 +901,26 @@ async def create_meeting(
     user: dict = Depends(require_user),
 ) -> dict:
     # Dependencies run before any multipart parsing or temporary file creation.
+    received_at = time.perf_counter()
     async with upload.audio_form(request, _disk_or_507) as form:
+        received_seconds = time.perf_counter() - received_at
         if any(key not in {"file", "title", "calendar_event_id"} or len(form.getlist(key)) != 1 for key in form):
             raise HTTPException(400, "Некорректные поля загрузки записи")
         file, title = form.get("file"), form.get("title")
         if not isinstance(file, StarletteUploadFile) or (title is not None and not isinstance(title, str)):
             raise HTTPException(status_code=422, detail="Нужен файл записи и текстовое название")
         calendar_context = await run_in_threadpool(_calendar_selection, request, user, form.get("calendar_event_id"))
-        return await upload.run_file_operation(_create_audio_meeting, request, file, title, user, calendar_context=calendar_context)
+        save_started = time.perf_counter()
+        meeting = await upload.run_file_operation(_create_audio_meeting, request, file, title, user,
+                                                  calendar_context=calendar_context)
+        try:
+            await run_in_threadpool(diagnostics.record_upload, meeting["id"],
+                                   receive_seconds=received_seconds,
+                                   save_seconds=time.perf_counter() - save_started,
+                                   size_bytes=file.size)
+        except Exception:
+            log.warning("Performance upload diagnostics unavailable")
+        return meeting
 
 
 def _calendar_selection(request: Request, user: dict, event_id) -> dict | None:

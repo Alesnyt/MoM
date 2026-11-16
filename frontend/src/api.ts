@@ -1,4 +1,4 @@
-import type { AuditEvent, AuthStatus, Health, Meeting, MonitoringSnapshot, PlatformUser, ProtocolRecipient, UserSession } from "./types";
+import type { AuditEvent, AuthStatus, DiagnosticsPeriod, DiagnosticsSummary, Health, Meeting, MonitoringSnapshot, PlatformUser, ProtocolRecipient, UserSession } from "./types";
 
 import { apiRequest } from "./http";
 export { ApiError, parseError } from "./http";
@@ -226,6 +226,33 @@ export async function getSettings(): Promise<Health> {
 export async function getMonitoring(signal: AbortSignal): Promise<MonitoringSnapshot> {
   const response = await apiRequest("/api/admin/monitoring", { credentials: "include", signal });
   return response.json();
+}
+
+export async function getDiagnostics(days: DiagnosticsPeriod, signal: AbortSignal): Promise<DiagnosticsSummary> {
+  const response = await apiRequest(`/api/admin/diagnostics?days=${days}`, {
+    credentials: "include", cache: "no-store", signal,
+  });
+  return response.json();
+}
+
+export async function downloadDiagnostics(days: DiagnosticsPeriod, signal: AbortSignal): Promise<void> {
+  const response = await apiRequest(`/api/admin/diagnostics/export?days=${days}`, {
+    credentials: "include", cache: "no-store", signal,
+  });
+  const blob = await response.blob();
+  // A response may finish after logout or after the monitoring panel is closed.
+  if (signal.aborted) throw new DOMException("Скачивание отменено", "AbortError");
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `mom-performance-${days}d.json`;
+  document.body.appendChild(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
 
 export async function saveApiKey(key: string): Promise<Health> {

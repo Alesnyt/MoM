@@ -5,10 +5,11 @@ import logging
 import shutil
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import disk, store
+from . import diagnostics, disk, store
 from .background import run_sync
 from .name_review import review_names
 from .analyze import (
@@ -126,14 +127,103 @@ def has_saved_transcript(meeting: dict) -> bool:
 async def process_meeting(meeting_id: str) -> None:
     settings = await run_sync(prompts.snapshot)
     with meeting_scope(meeting_id), config.model_settings_scope(), prompts.settings_scope(settings):
-        started = time.perf_counter()
+        meeting = await run_sync(store.get_meeting, meeting_id) or {}
+        phase = "protocol" if has_saved_transcript(meeting) else "audio"
+        captured = []
+
+        def begin():
+            try:
+                captured.append(diagnostics.begin_run(
+                    meeting_id, phase, queue_wait_seconds=_queue_wait(meeting),
+                    audio_seconds=meeting.get("duration_seconds"),
+                ))
+            except Exception:
+                log.warning("Performance diagnostics unavailable")
+
         try:
-            await _process_meeting(meeting_id)
-        finally:
+            await run_sync(begin)
+        except asyncio.CancelledError:
+            # run_sync waits for its thread even on cancellation. Keep the
+            # created trace reachable so it cannot remain active indefinitely.
+            if captured:
+                await run_sync(_finish_diagnostics, captured[0], "interrupted", None)
+            raise
+        run = captured[0] if captured else None
+        with diagnostics.run_scope(run):
+            await _process_with_diagnostics(meeting_id, run)
+
+
+def _queue_wait(meeting: dict) -> float | None:
+    try:
+        queued = datetime.fromisoformat(meeting.get("queued_at") or meeting["created_at"])
+        if queued.tzinfo is None:
+            queued = queued.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - queued).total_seconds())
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def _sample_diagnostics(run, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await run_sync(diagnostics.sample_run, run)
+        except Exception:
+            log.debug("Performance resource sample unavailable")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=5)
+        except TimeoutError:
+            pass
+
+
+def _finish_diagnostics(run, status: str, audio_seconds: float | None) -> None:
+    if run is None:
+        return
+    try:
+        diagnostics.sample_run(run)
+    except Exception:
+        log.debug("Performance resource sample unavailable")
+    try:
+        diagnostics.finish_run(run, status=status, audio_seconds=audio_seconds)
+    except Exception:
+        log.warning("Performance diagnostics completion unavailable")
+
+
+async def _process_with_diagnostics(meeting_id: str, run) -> None:
+    stop = asyncio.Event()
+    sampler = asyncio.create_task(_sample_diagnostics(run, stop)) if run is not None else None
+    started = time.perf_counter()
+    outcome = "interrupted"
+    current: dict = {}
+    try:
+        await _process_meeting(meeting_id)
+        try:
             current = await run_sync(store.get_meeting, meeting_id) or {}
+        except Exception:
+            # A diagnostic read must not overwrite a successfully saved meeting
+            # with a worker error if the database is temporarily unavailable.
+            log.warning("Performance final status unavailable")
+        if control.is_stopped(meeting_id) or current.get("status_message") == "Остановлено":
+            outcome = "cancelled"
+        else:
+            outcome = current.get("status", "unknown")
+    except asyncio.CancelledError:
+        outcome = "interrupted"
+        raise
+    except Exception:
+        outcome = "error"
+        raise
+    finally:
+        stop.set()
+        try:
+            if sampler is not None:
+                await sampler
+        finally:
+            # Final sampling/persistence is off the event loop and remains
+            # independent of the main database, including cancellation paths.
+            await run_sync(_finish_diagnostics, run, outcome, current.get("duration_seconds"))
             log.info(
                 "timing stage=total seconds=%.3f status=%s audio_seconds=%s",
-                time.perf_counter() - started, current.get("status", "missing"),
+                time.perf_counter() - started, current.get("status", outcome),
                 current.get("duration_seconds"),
             )
 
@@ -154,7 +244,8 @@ async def _process_meeting(meeting_id: str) -> None:
         return
 
     asr_model = config.get_asr_model()
-    context = await run_sync(corporate_context.for_meeting, meeting)
+    with stage_timer("context_load"):
+        context = await run_sync(corporate_context.for_meeting, meeting)
     calendar_context = meeting.get("calendar_context")
     calendar_hint = calendar_service.search_text(calendar_context)
     local_audio = config.is_local_asr(asr_model)
@@ -275,7 +366,8 @@ async def _process_meeting(meeting_id: str) -> None:
                                 lambda message: progress.set(86, message, status="transcribing", force=True),
                                 prepared=audio_path if local_audio else None,
                             )
-            voiced = await run_sync(context.apply, voiced)
+            with stage_timer("context_apply"):
+                voiced = await run_sync(context.apply, voiced)
             transcript = (render_transcript(voiced) if voiced.get("segments") else voiced.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError("Транскрипт пустой — в записи нет распознанной речи")
@@ -340,12 +432,13 @@ async def _process_meeting(meeting_id: str) -> None:
             raise control.ProcessingStopped()
         title = meeting["title"] if calendar_context else (result.get("title") or meeting["title"]).strip() or meeting["title"]
         result["title"] = title
-        await run_sync(complete_protocol,
-            {**meeting, "speakers": document["speakers"]},
-            title=title,
-            result=result,
-            language=result.get("language") or meeting.get("language"),
-        )
+        with stage_timer("result_save"):
+            await run_sync(complete_protocol,
+                {**meeting, "speakers": document["speakers"]},
+                title=title,
+                result=result,
+                language=result.get("language") or meeting.get("language"),
+            )
         record_outcome("done")
         log.info("готово")
     except control.ProcessingStopped:

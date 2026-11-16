@@ -1165,6 +1165,23 @@ select.title-input {
   accent-color: var(--accent);
 }
 
+.monitor-diagnostics .monitor-metrics {
+  margin-top: 14px;
+}
+
+.diagnostics-details {
+  margin-top: 16px;
+}
+
+.diagnostics-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.diagnostics-details .audit-table-scroll {
+  margin-top: 10px;
+}
+
 .choice-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
