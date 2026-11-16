@@ -16,13 +16,14 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(store,'DB_PATH',tmp_path/'mom.db')
     monkeypatch.setattr(config,'ldap_configured',lambda:False)
     store.init_db()
+    store.create_user('owner@example.com','unused')
     monkeypatch.setitem(main.app.dependency_overrides,main.require_admin,lambda:{'username':'admin'})
     return tmp_path
 
 
 def meeting(mid='m1',text='Открой файн би, затем ДВХ.',**extra):
     doc={'segments':[{'text':text,'start':5,'end':12,**extra}]}
-    store.create_text_meeting(mid,'Тест систем',mid+'.wav','u',doc)
+    store.create_text_meeting(mid,'Тест систем',mid+'.wav',store.get_user_by_email('owner@example.com')['id'],doc)
     return doc
 
 
@@ -184,7 +185,7 @@ def test_single_worker_lease_expiry_resume_and_stop_ignore_late_result(db,monkey
 
 def test_meeting_processing_pauses_discovery_and_budget_carries_backlog(db,monkeypatch):
     meeting(text=('В системе файн би есть отчёт. '*500));td.settings(False,'03:30',1,'admin');td.queue('admin')
-    store.create_meeting('busy','Занято','x.wav','u');assert td._claim() is None
+    store.create_meeting('busy','Занято','x.wav',store.get_user_by_email('owner@example.com')['id']);assert td._claim() is None
     assert td.snapshot()['job']['status']=='paused';store.delete_meeting('busy')
     async def extract(parts):return []
     monkeypatch.setattr(td,'extract',extract)
@@ -233,7 +234,7 @@ def test_api_authorization_validation_and_audio(db,monkeypatch):
 def test_slow_model_is_cancelled_when_meeting_arrives_without_advancing_cursor(db,monkeypatch):
     meeting();td.queue('admin');cancelled=[]
     async def extract(parts):
-        store.create_meeting('busy','Новая запись','b.wav','u')
+        store.create_meeting('busy','Новая запись','b.wav',store.get_user_by_email('owner@example.com')['id'])
         try:await asyncio.sleep(20)
         finally:cancelled.append(True)
     monkeypatch.setattr(td,'extract',extract)

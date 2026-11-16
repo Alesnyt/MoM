@@ -92,17 +92,20 @@ export function MeetingPane({
 
   async function copyProtocol() {
     setMailNote(null);
-    const text =
-      tab === "transcript" && meeting.transcript
-        ? meeting.transcript
-        : await getEmailBody(meeting.id);
+    let loaded = false;
     try {
+      const text =
+        tab === "transcript" && meeting.transcript
+          ? meeting.transcript
+          : await getEmailBody(meeting.id);
+      loaded = true;
       await navigator.clipboard.writeText(text);
       setMailNote(
         tab === "transcript" ? "Транскрипт скопирован в буфер обмена." : "Протокол скопирован в буфер обмена.",
       );
-    } catch {
-      setMailNote("Не удалось скопировать. Разрешите сайту доступ к буферу обмена.");
+    } catch (err) {
+      setMailNote(loaded ? "Не удалось скопировать. Разрешите сайту доступ к буферу обмена."
+        : err instanceof Error ? err.message : "Не удалось загрузить протокол для копирования.");
     }
   }
 

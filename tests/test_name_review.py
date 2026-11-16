@@ -17,6 +17,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WHISPER_DIR", tmp_path / "whisper")
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "mom.db")
     store.init_db()
+    return store.create_user("user@example.com", "unused")
 
 
 def document():
@@ -130,7 +131,7 @@ def test_chunk_failure_discards_all_proposals(db, monkeypatch):
 
 def test_cancel_during_name_check_cannot_publish_changes(db, monkeypatch):
     doc = document()
-    meeting = store.create_text_meeting("names-stop", "Тест", "test.txt", "user", doc)
+    meeting = store.create_text_meeting("names-stop", "Тест", "test.txt", db["id"], doc)
     monkeypatch.setattr(config, "get_api_key", lambda: "fake")
 
     async def create(**kwargs):
@@ -147,7 +148,7 @@ def test_cancel_during_name_check_cannot_publish_changes(db, monkeypatch):
 
 def test_protocol_receives_corrected_text_and_metadata_is_preserved(db, monkeypatch):
     doc = document()
-    store.create_text_meeting("names-flow", "Тест", "test.txt", "user", doc)
+    store.create_text_meeting("names-flow", "Тест", "test.txt", db["id"], doc)
     monkeypatch.setattr(config, "get_api_key", lambda: "fake")
 
     async def create(**kwargs):

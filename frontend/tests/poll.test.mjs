@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadSource } from './load-source.mjs';
 const { startPolling } = loadSource('poll.ts');
+const { ApiError } = loadSource('http.ts');
 
 async function until(check) {
   for (let i = 0; i < 200; i++) {
@@ -51,4 +52,16 @@ test('failed requests retry sequentially without erasing the last value', async 
   await until(() => received.length);
   assert.equal(calls, 2);
   assert.deepEqual(received, ['online']);
+});
+
+test('expired session stops polling protected data instead of endlessly retrying 401', async () => {
+  let calls = 0;
+  const stop = startPolling(async () => {
+    calls++;
+    throw new ApiError('Войдите в профиль', 401, 'user');
+  }, () => assert.fail('Unauthorized request returned data'), 5);
+  await until(() => calls === 1);
+  await delay(30);
+  assert.equal(calls, 1);
+  stop();
 });

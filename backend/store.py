@@ -26,6 +26,10 @@ STATUSES = (
 )
 
 
+class MeetingOwnerMissing(ValueError):
+    """The profile disappeared while a recording or transcript was uploaded."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -94,6 +98,16 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at)")
+        # Keep cleanup independent of the meeting row: deleting that row must
+        # never lose the only record of files that still need to be removed.
+        conn.execute("""CREATE TABLE IF NOT EXISTS recording_cleanup (
+            meeting_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            due_at REAL NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT ''
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_recording_cleanup_due ON recording_cleanup(due_at)")
         conn.execute("""CREATE TABLE IF NOT EXISTS protocol_mail (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
@@ -198,6 +212,8 @@ def save_llm_settings(payload: dict, actor: str) -> int:
 def create_meeting(meeting_id: str, title: str, filename: str, user_id: str, *, calendar_context: dict | None = None) -> dict[str, Any]:
     now = utc_now()
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _check_meeting_owner(conn, user_id)
         conn.execute(
             """
             INSERT INTO meetings (
@@ -219,7 +235,9 @@ def create_meeting(meeting_id: str, title: str, filename: str, user_id: str, *, 
     refresh_queue_messages()
     meeting = get_meeting(meeting_id)
     if not meeting:
-        raise RuntimeError("Не удалось сохранить встречу")
+        # Profile deletion may win immediately after INSERT commits; its
+        # cleanup entry is already durable, and the HTTP layer returns 401.
+        raise MeetingOwnerMissing("Профиль удалён во время загрузки")
     return meeting
 
 
@@ -229,6 +247,8 @@ def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str
 
     now = utc_now()
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _check_meeting_owner(conn, user_id)
         conn.execute(
             """INSERT INTO meetings
                (id, title, filename, user_id, status, status_message, created_at,
@@ -238,7 +258,17 @@ def create_text_meeting(meeting_id: str, title: str, filename: str, user_id: str
              render_transcript(document), json.dumps(document, ensure_ascii=False),
              json.dumps(calendar_context, ensure_ascii=False) if calendar_context else None),
         )
-    return get_meeting(meeting_id)
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        raise MeetingOwnerMissing("Профиль удалён во время загрузки")
+    return meeting
+
+
+def _check_meeting_owner(conn: sqlite3.Connection, user_id: str) -> None:
+    # Use the same write transaction as INSERT and delete_user. An earlier
+    # successful HTTP authentication does not guarantee the owner still exists.
+    if not conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+        raise MeetingOwnerMissing("Профиль удалён во время загрузки")
 
 
 def update_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = None, **fields: Any) -> None:
@@ -357,6 +387,7 @@ def prune_user_meetings(user_id: str, *, connection: sqlite3.Connection | None =
                )""",
             (user_id, max(1, int(user["archive_limit"]))),
         ).fetchall()
+        _enqueue_recording_cleanup(conn, [row["id"] for row in expired])
         conn.executemany("DELETE FROM meetings WHERE id = ?", [(row["id"],) for row in expired])
         return [dict(row) for row in expired]
 
@@ -597,6 +628,7 @@ def delete_user(user_id: str) -> list[str] | None:
         if any(row["status"] in {"extracting", "transcribing", "analyzing"} for row in rows):
             raise ValueError("active")
         ids = [row["id"] for row in rows]
+        _enqueue_recording_cleanup(conn, ids)
         conn.execute("DELETE FROM meetings WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -605,8 +637,67 @@ def delete_user(user_id: str) -> list[str] | None:
 
 def delete_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = None) -> bool:
     with (connect() if connection is None else nullcontext(connection)) as conn:
+        if connection is None:
+            conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM meetings WHERE id = ?", (meeting_id,)).fetchone():
+            return False
+        _enqueue_recording_cleanup(conn, [meeting_id])
         cursor = conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
         return cursor.rowcount > 0
+
+
+def _enqueue_recording_cleanup(conn: sqlite3.Connection, meeting_ids: list[str]) -> None:
+    conn.executemany(
+        "INSERT OR IGNORE INTO recording_cleanup (meeting_id, created_at) VALUES (?, ?)",
+        [(meeting_id, utc_now()) for meeting_id in meeting_ids],
+    )
+
+
+def enqueue_recording_cleanup(meeting_id: str) -> None:
+    """Durably discard an upload that was never registered as a meeting."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM meetings WHERE id = ?", (meeting_id,)).fetchone():
+            raise ValueError("Нельзя очистить файлы существующей встречи")
+        _enqueue_recording_cleanup(conn, [meeting_id])
+
+
+def pending_recording_cleanup(*, limit: int = 100) -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT meeting_id FROM recording_cleanup WHERE due_at <= ? "
+            "ORDER BY due_at, created_at, meeting_id LIMIT ?",
+            (time.time(), limit),
+        ).fetchall()
+    return [row["meeting_id"] for row in rows]
+
+
+def recording_cleanup_pending(meeting_id: str) -> bool:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM recording_cleanup WHERE meeting_id = ?", (meeting_id,),
+        ).fetchone() is not None
+
+
+def complete_recording_cleanup(meeting_id: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM recording_cleanup WHERE meeting_id = ?", (meeting_id,))
+
+
+def retry_recording_cleanup(meeting_id: str, error: str) -> None:
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT attempts FROM recording_cleanup WHERE meeting_id = ?", (meeting_id,),
+        ).fetchone()
+        if row is None:
+            return
+        attempts = int(row["attempts"]) + 1
+        delay = min(3600, 30 * 2 ** min(attempts - 1, 7))
+        conn.execute(
+            "UPDATE recording_cleanup SET attempts = ?, due_at = ?, last_error = ? WHERE meeting_id = ?",
+            (attempts, time.time() + delay, error[:1000], meeting_id),
+        )
 
 
 def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:

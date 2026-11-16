@@ -221,7 +221,8 @@ def test_cleanup_preserves_generations_while_meeting_is_processing(db):
     publish(csv('DLH'),gid=gid)
     with store.connect() as conn:
         conn.execute('UPDATE glossary_generations SET created=0')
-    store.create_meeting('work','test','test.wav','test')
+    owner=store.create_user('owner@example.com','unused')
+    store.create_meeting('work','test','test.wav',owner['id'])
     store.update_meeting('work',status='transcribing')
     g.cleanup_one()
     assert old.select('DWH')[0]['description']=='Хранилище данных'

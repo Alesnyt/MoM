@@ -22,6 +22,7 @@ if [[ ! -d .venv ]]; then
   echo "Нет .venv. Сначала выполните: ./install.sh" >&2
   exit 1
 fi
+.venv/bin/python "$ROOT/backend/runtime.py"
 # shellcheck disable=SC1091
 source .venv/bin/activate
 

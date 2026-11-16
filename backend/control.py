@@ -30,6 +30,11 @@ def bind_job(meeting_id: str, task: object) -> None:
     _jobs[meeting_id] = task
 
 
+def job_running(meeting_id: str) -> bool:
+    task = _jobs.get(meeting_id)
+    return task is not None and not getattr(task, "done", lambda: True)()
+
+
 def cancel_job(meeting_id: str) -> bool:
     """Request cooperative cancellation without orphaning asyncio.to_thread work.
 
@@ -37,8 +42,7 @@ def cancel_job(meeting_id: str) -> bool:
     a thread. Keep the worker slot occupied until the old work actually exits,
     so a restarted job cannot race against its predecessor.
     """
-    task = _jobs.get(meeting_id)
-    return task is not None and not getattr(task, "done", lambda: True)()
+    return job_running(meeting_id)
 
 
 def release(meeting_id: str) -> None:
