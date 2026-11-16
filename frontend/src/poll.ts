@@ -1,3 +1,5 @@
+import { ApiError } from "./http";
+
 /** Poll only after the previous request settles; ignore responses after cleanup. */
 export function startPolling<T>(
   request: (signal: AbortSignal) => Promise<T>,
@@ -11,7 +13,8 @@ export function startPolling<T>(
     try {
       const value = await request(controller.signal);
       if (!controller.signal.aborted) onValue(value);
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError && error.session) controller.abort();
       // Preserve the last known state and retry after the normal interval.
     } finally {
       if (!controller.signal.aborted) timer = setTimeout(run, intervalMs);

@@ -1,9 +1,8 @@
-import { parseError } from "./api";
+import { apiRequest } from "./http";
 import type { CalendarEvent, CalendarStatus, ExchangeSettings } from "./calendar-types";
 
 async function call<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, { credentials: "include", ...options });
-  if (!response.ok) throw Object.assign(new Error(await parseError(response)), { status:response.status });
+  const response = await apiRequest(path, { credentials: "include", ...options });
   return response.json();
 }
 const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

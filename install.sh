@@ -38,21 +38,18 @@ as_root() {
 
 python_ok() {
   local bin="$1"
-  "$bin" - <<'PY'
-import sys
-raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
-PY
+  "$bin" "$ROOT/backend/runtime.py" >/dev/null 2>&1
 }
 
 ensure_python() {
   local candidate
-  for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+  for candidate in python3.12 python3.13 python3.14 python3.15 python3; do
     if have "$candidate" && python_ok "$candidate"; then
       PYTHON="$candidate"
       return
     fi
   done
-  echo "Нужен Python 3.10+ (лучше 3.11/3.12)." >&2
+  echo "Нужен Python 3.12 или новее. Рекомендуется Python 3.12." >&2
   exit 1
 }
 
@@ -140,6 +137,10 @@ ensure_ffmpeg() {
   exit 1
 }
 
+if [[ -d .venv ]]; then
+  .venv/bin/python "$ROOT/backend/runtime.py"
+fi
+
 log "Проверяю системные пакеты"
 if have apt-get; then
   install_apt
@@ -150,7 +151,7 @@ elif have pacman; then
 elif have brew; then
   install_brew
 else
-  echo "Неизвестный дистрибутив. Установите вручную: Python 3.10+, ffmpeg, Node.js 18+." >&2
+  echo "Неизвестный дистрибутив. Установите вручную: Python 3.12+, ffmpeg, Node.js 18+." >&2
 fi
 
 ensure_python
@@ -165,6 +166,7 @@ if [[ ! -d .venv ]]; then
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
+python "$ROOT/backend/runtime.py"
 python -m pip install -U pip wheel
 log "Ставлю Python-зависимости, включая Whisper и GigaAM (PyTorch)"
 python -m pip install -r requirements.txt

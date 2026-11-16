@@ -1,5 +1,5 @@
 
-import { useRef, useState } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import { CalendarPanel, CalendarContextCard } from "./calendar";
 import type { CalendarEvent } from "./calendar-types";
 import { loginUser } from "./api";
@@ -7,6 +7,10 @@ import { formatBytes, recordingSizeError, uploadBlockedReason } from "./format";
 import type { OpenAIStatus, UserSession } from "./types";
 
 export const ACCEPT = ".webm,.mkv,.mp4,.mp3,.wav,.m4a,.ogg,audio/webm,video/webm,video/x-matroska";
+
+export type ComposerDraft = { mode: "audio" | "text"; text: string; title: string;
+  file: File | null; calendar: CalendarEvent | null; priorTitle: string };
+export const emptyComposerDraft = (): ComposerDraft => ({ mode: "audio", text: "", title: "", file: null, calendar: null, priorTitle: "" });
 
 export function Composer({
   busy,
@@ -20,6 +24,8 @@ export function Composer({
   nextExpired,
   userEmail,
   onOpenCalendarSettings,
+  draft: savedDraft,
+  onDraftChange,
 }: {
   busy: boolean;
   serverUnavailable?: boolean;
@@ -32,22 +38,25 @@ export function Composer({
   nextExpired?: string;
   userEmail?: string;
   onOpenCalendarSettings?: () => void;
+  draft?: ComposerDraft;
+  onDraftChange?: Dispatch<SetStateAction<ComposerDraft>>;
 }) {
-  const [mode, setMode] = useState<"audio" | "text">("audio");
-  const [text, setText] = useState("");
+  const [localDraft, setLocalDraft] = useState(emptyComposerDraft);
+  const { mode, text, title, file, calendar, priorTitle } = savedDraft ?? localDraft;
+  const setDraft = onDraftChange ?? setLocalDraft;
+  const setMode = (mode: ComposerDraft["mode"]) => setDraft((old) => ({ ...old, mode }));
+  const setText = (text: string) => setDraft((old) => ({ ...old, text }));
+  const setTitle = (title: string) => setDraft((old) => ({ ...old, title }));
+  const setFile = (file: File | null) => setDraft((old) => ({ ...old, file }));
   const [fileError, setFileError] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
-  const [file, setFile] = useState<File | null>(null);
   const [over, setOver] = useState(false);
-  const [calendar, setCalendar] = useState<CalendarEvent | null>(null);
   const [calendarPending, setCalendarPending] = useState(false);
-  const priorTitle = useRef("");
   function selectCalendar(event: CalendarEvent | null) {
     if (event) {
-      if (!calendar) priorTitle.current = title;
-      setTitle(event.title);
-    } else if (calendar && title === calendar.title) setTitle(priorTitle.current);
-    setCalendar(event);
+      setDraft((old) => ({ ...old, calendar: event, title: event.title,
+        priorTitle: calendar ? priorTitle : title }));
+    } else setDraft((old) => ({ ...old, calendar: null,
+      title: calendar && title === calendar.title ? priorTitle : title }));
   }
 
   function takeFile(next: File | null) {

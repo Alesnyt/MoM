@@ -15,7 +15,8 @@ import {
   stopMeeting,
   restartMeeting,
 } from "./api";
-import { Composer, UserLogin } from "./composer";
+import { Composer, UserLogin, emptyComposerDraft } from "./composer";
+import { ApiError, onSessionExpired, sessionChanged } from "./http";
 import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings, queuePositionLabel } from "./format";
 import { MeetingPane, stepLabel } from "./meeting";
 import { startPolling } from "./poll";
@@ -73,6 +74,13 @@ export default function App() {
   const [tab, setTab] = useState<"overview" | "actions" | "mom" | "transcript">("overview");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [archiveState, setArchiveState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const archiveRequest = useRef<{ promise: Promise<Meeting[]>; controller: AbortController } | null>(null);
+  const [expired, setExpired] = useState({ user: false, admin: false });
+  const [draft, setDraft] = useState(emptyComposerDraft);
+  const draftOwner = useRef<string | undefined>();
+  const userGeneration = useRef(0);
   const [detailFailure, setDetailFailure] = useState<{ key: string; message: string } | null>(null);
   const [detailAttempt, setDetailAttempt] = useState(0);
   const [composing, setComposing] = useState(true);
@@ -80,6 +88,8 @@ export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [user, setUser] = useState<UserSession | null>(null);
   const [adminHealth, setAdminHealth] = useState<Health | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsAttempt, setSettingsAttempt] = useState(0);
   const [adminTab, setAdminTab] = useState<AdminTab>("monitoring");
   const [railOpen, setRailOpen] = useState(false);
   const [appearance, setAppearance] = useState(loadAppearance);
@@ -89,12 +99,55 @@ export default function App() {
     [meetings, selectedId],
   );
 
-  const refresh = useCallback(async () => {
-    const version = dataVersion.current;
-    const rows = await listMeetings();
-    if (version === dataVersion.current) setMeetingRows((prev) => mergeMeetings(prev, rows));
-    return rows;
+  const invalidateUserRequests = useCallback(() => {
+    userGeneration.current += 1;
+    dataVersion.current += 1;
+    archiveRequest.current?.controller.abort();
+    archiveRequest.current = null;
+    setArchiveState("idle");
+    setArchiveError(null);
+    setBusy(false);
+    setDetailFailure(null);
   }, []);
+
+  const refresh = useCallback(() => {
+    if (archiveRequest.current) return archiveRequest.current.promise;
+    const version = dataVersion.current;
+    const controller = new AbortController();
+    setArchiveState("loading");
+    const promise = listMeetings(controller.signal).then((rows) => {
+      if (!controller.signal.aborted) {
+        if (version === dataVersion.current) setMeetingRows((prev) => mergeMeetings(prev, rows));
+        setArchiveState("ready");
+        setArchiveError(null);
+      }
+      return rows;
+    }).catch((err: unknown) => {
+      if (!controller.signal.aborted && !(err instanceof ApiError && err.session)) {
+        setArchiveState("error");
+        setArchiveError(err instanceof Error ? err.message : "Не удалось загрузить архив");
+      }
+      throw err;
+    }).finally(() => {
+      if (archiveRequest.current?.controller === controller) archiveRequest.current = null;
+    });
+    archiveRequest.current = { promise, controller };
+    return promise;
+  }, []);
+
+  useEffect(() => onSessionExpired((scope) => {
+    setExpired((old) => ({ ...old, [scope]: true }));
+    if (scope === "user") {
+      invalidateUserRequests();
+      setUser((old) => ({ ...old, authenticated: false }));
+      // Calendar invitation tokens belong to the expired session; keep the text/file draft.
+      setDraft((old) => ({ ...old, calendar: null }));
+    } else {
+      setAuth((old) => ({ configured: old?.configured ?? true, authenticated: false }));
+      setAdminHealth(null);
+      setSettingsError(null);
+    }
+  }), [invalidateUserRequests]);
 
   function goApp() {
     setScreen("app");
@@ -117,14 +170,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    getAuthStatus().then(setAuth).catch(() => setAuth({ configured: false, authenticated: false }));
+    let disposed = false;
+    const generation = userGeneration.current;
+    getAuthStatus().then((next) => { sessionChanged("admin"); setAuth(next); })
+      .catch(() => setAuth({ configured: true, authenticated: false }));
     getUserSession()
       .then((session) => {
+        if (disposed || generation !== userGeneration.current) return;
+        invalidateUserRequests();
         setUser(session);
-        if (session.authenticated) refresh().catch((err: Error) => setError(err.message));
+        sessionChanged("user");
+        draftOwner.current = session.id ?? undefined;
       })
-      .catch(() => setUser({ authenticated: false }));
-  }, [refresh]);
+      .catch(() => {
+        if (!disposed && generation === userGeneration.current) setUser({ authenticated: false });
+      });
+    return () => { disposed = true; };
+  }, [invalidateUserRequests]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = health?.theme === "t2" ? "t2" : "classic";
@@ -151,6 +213,7 @@ export default function App() {
   const openai = health?.openai;
   const adminReady = auth?.authenticated === true;
   const userReady = Boolean(user?.authenticated);
+  const renderedUserGeneration = userGeneration.current;
   const showComposer = composing || meetings.length === 0;
   const liveQueue = queueFromMeetings(meetings, health?.queue?.limit || 1);
   const archived = meetings.filter(({ status }) => status === "done" || status === "error");
@@ -163,12 +226,36 @@ export default function App() {
     .join(",");
 
   useEffect(() => {
+    if (!userReady) return;
+    const reload = () => { void refresh().catch(() => undefined); };
+    window.addEventListener("online", reload);
+    window.addEventListener("focus", reload);
+    reload();
+    return () => {
+      window.removeEventListener("online", reload);
+      window.removeEventListener("focus", reload);
+      archiveRequest.current?.controller.abort();
+      archiveRequest.current = null;
+    };
+  }, [userReady, refresh]);
+
+  useEffect(() => {
+    if (!userReady || archiveState !== "error") return;
+    const timer = window.setTimeout(() => { void refresh().catch(() => undefined); }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [userReady, archiveState, refresh]);
+
+  useEffect(() => {
     if (!userReady || !processingKey) return;
     return startPolling(async (signal) => {
       const version = dataVersion.current;
       return { version, rows: await listMeetings(signal) };
     }, ({ version, rows }) => {
-      if (version === dataVersion.current) setMeetingRows((prev) => mergeMeetings(prev, rows));
+      if (version === dataVersion.current) {
+        setMeetingRows((prev) => mergeMeetings(prev, rows));
+        setArchiveState("ready");
+        setArchiveError(null);
+      }
     });
   }, [processingKey, userReady]);
 
@@ -184,14 +271,15 @@ export default function App() {
     if (!detailKey || !selectedId) return;
     const controller = new AbortController();
     const version = meetingVersions.current.get(selectedId);
+    const generation = userGeneration.current;
     setDetailFailure(null);
     void getMeeting(selectedId, controller.signal)
       .then((full) => {
-        if (controller.signal.aborted || version !== meetingVersions.current.get(selectedId)) return;
+        if (controller.signal.aborted || generation !== userGeneration.current || version !== meetingVersions.current.get(selectedId)) return;
         setMeetingRows((rows) => rows.map((row) => (row.id === full.id ? full : row)));
       })
       .catch((err: unknown) => {
-        if (!controller.signal.aborted && version === meetingVersions.current.get(selectedId)) {
+        if (!controller.signal.aborted && generation === userGeneration.current && version === meetingVersions.current.get(selectedId)) {
           setDetailFailure({ key: detailKey,
             message: err instanceof Error ? err.message : "Не удалось загрузить транскрипт" });
         }
@@ -201,74 +289,104 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== "admin" || !auth?.authenticated) return;
+    let disposed = false;
+    setSettingsError(null);
     getSettings()
-      .then(setAdminHealth)
-      .catch(() => setAuth((current) => ({ configured: current?.configured ?? true, authenticated: false })));
-  }, [screen, auth?.authenticated]);
+      .then((next) => { if (!disposed) setAdminHealth(next); })
+      .catch((err: unknown) => {
+        if (!disposed && !(err instanceof ApiError && err.session)) {
+          setSettingsError(err instanceof Error ? err.message : "Не удалось загрузить настройки");
+        }
+      });
+    return () => { disposed = true; };
+  }, [screen, auth?.authenticated, settingsAttempt]);
 
   async function onUpload(file: File | null, title: string, text?: string, calendarEventId?: string) {
+    const generation = userGeneration.current;
     setError(null);
     setBusy(true);
     try {
       const created = text !== undefined
         ? await createTranscript(file, text, title, calendarEventId)
         : await createMeeting(file!, title, calendarEventId);
+      if (generation !== userGeneration.current) return;
       setMeetings((rows) => [created, ...rows.filter((row) => row.id !== created.id)], created.id);
       setSelectedId(created.id);
       setTab("overview");
       setComposing(false);
+      setDraft(emptyComposerDraft());
       setRailOpen(false);
-      getUserSession().then(setUser).catch(() => undefined);
+      getUserSession().then((session) => {
+        if (generation !== userGeneration.current) return;
+        if (session.authenticated && session.id === draftOwner.current) setUser(session);
+        else if (!session.authenticated) {
+          invalidateUserRequests();
+          sessionChanged("user");
+          setUser(session);
+          setExpired((old) => ({ ...old, user: true }));
+        }
+      }).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось загрузить запись");
+      if (generation === userGeneration.current) setError(err instanceof Error ? err.message : "Не удалось загрузить запись");
     } finally {
-      setBusy(false);
+      if (generation === userGeneration.current) setBusy(false);
     }
   }
 
   async function onRetry(id: string) {
+    const generation = userGeneration.current;
     setError(null);
     try {
       const updated = await retryMeeting(id);
+      if (generation !== userGeneration.current) return;
       setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
       setSelectedId(id);
       goApp();
       setComposing(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось повторить обработку");
+      if (generation === userGeneration.current) setError(err instanceof Error ? err.message : "Не удалось повторить обработку");
     }
   }
 
   async function onStop(id: string) {
+    const generation = userGeneration.current;
     setError(null);
     try {
       const updated = await stopMeeting(id);
+      if (generation !== userGeneration.current) return;
       setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось остановить обработку");
+      if (generation === userGeneration.current) setError(err instanceof Error ? err.message : "Не удалось остановить обработку");
     }
   }
 
   async function onRestart(id: string) {
+    const generation = userGeneration.current;
     if (!window.confirm("Остановить текущую обработку и начать распознавание заново?")) return;
     setError(null);
     try {
       const updated = await restartMeeting(id);
+      if (generation !== userGeneration.current) return;
       setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось запустить обработку заново");
+      if (generation === userGeneration.current) setError(err instanceof Error ? err.message : "Не удалось запустить обработку заново");
     }
   }
 
   async function onDelete(id: string) {
+    const generation = userGeneration.current;
     if (!window.confirm("Удалить встречу и протокол?")) return;
     try {
       await deleteMeeting(id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось удалить встречу");
+      if (generation === userGeneration.current) setError(err instanceof Error ? err.message : "Не удалось удалить встречу");
       return;
     }
-    const rows = await refresh();
+    if (generation !== userGeneration.current) return;
+    // The deletion succeeded even if reloading the remaining archive fails.
+    setMeetings((rows) => rows.filter((row) => row.id !== id), id);
+    const rows = await refresh().catch(() => []);
+    if (generation !== userGeneration.current) return;
     setSelectedId((current) => {
       if (current !== id) return current;
       return rows[0]?.id ?? null;
@@ -349,8 +467,14 @@ export default function App() {
           <div className="rail-label">
             Архив{userReady && user?.archive_limit ? ` · ${archived.length}/${archiveLimit}` : ""}
           </div>
+          {userReady && archiveState === "loading" && <p role="status">Загружаю архив…</p>}
+          {userReady && archiveError && <div className="banner" role="alert">
+            Не удалось обновить архив. {archiveError}{" "}Повторим автоматически.{" "}
+            <button type="button" className="ghost" disabled={archiveState === "loading"}
+              onClick={() => { void refresh().catch(() => undefined); }}>Повторить загрузку архива</button>
+          </div>}
           <ul className="meeting-list">
-            {meetings.map((item) => (
+            {(userReady ? meetings : []).map((item) => (
               <li key={item.id}>
                 <button
                   className={item.id === selectedId && !showComposer && screen === "app" ? "active" : ""}
@@ -385,11 +509,20 @@ export default function App() {
               className="ghost"
               style={{ margin: "8px 16px" }}
               onClick={() => {
+                const generation = userGeneration.current;
                 void logoutUser().then((session) => {
+                  if (generation !== userGeneration.current) return;
+                  invalidateUserRequests();
+                  sessionChanged("user");
                   setUser(session);
                   setMeetings([]);
                   setSelectedId(null);
                   setComposing(false);
+                  setDraft(emptyComposerDraft());
+                  draftOwner.current = undefined;
+                  setExpired((old) => ({ ...old, user: false }));
+                }).catch((err: Error) => {
+                  if (generation === userGeneration.current) setError(err.message);
                 });
               }}
             >
@@ -417,6 +550,18 @@ export default function App() {
             <button type="button" className="ghost" onClick={recheckHealth}>Проверить подключение</button>
           </div>}
           {error && <div className="banner" role="alert">{error}</div>}
+          {screen === "app" && expired.user && <div className="banner" role="alert">
+            Сессия истекла. Войдите снова. Черновик новой встречи сохранён в этой вкладке.
+          </div>}
+          {screen === "admin" && expired.admin && <div className="banner" role="alert">
+            Сессия администратора истекла. Войдите снова.
+          </div>}
+          {screen === "admin" && adminReady && settingsError && <div className="banner" role="alert">
+            Не удалось загрузить настройки. {settingsError}{" "}
+            <button type="button" className="ghost" onClick={() => setSettingsAttempt((attempt) => attempt + 1)}>
+              Повторить загрузку настроек
+            </button>
+          </div>}
           {detailFailure?.key === detailKey && <div className="banner" role="alert">
             {detailFailure.message}{" "}
             <button type="button" className="ghost" onClick={() => setDetailAttempt((attempt) => attempt + 1)}>
@@ -430,7 +575,9 @@ export default function App() {
               tab={adminTab}
               onTab={setAdminTab}
               onAuth={(next) => {
+                sessionChanged("admin");
                 setAuth(next);
+                setExpired((old) => ({ ...old, admin: false }));
                 if (!next.authenticated) {
                   recheckHealth();
                 }
@@ -469,15 +616,25 @@ export default function App() {
           ) : !userReady ? (
             <UserLogin
               onLogin={async (session) => {
+                invalidateUserRequests();
+                sessionChanged("user");
+                const sameUser = Boolean(session.id) && draftOwner.current === session.id;
+                if (!sameUser) {
+                  setMeetings([]);
+                  setSelectedId(null);
+                  setDraft(emptyComposerDraft());
+                  setComposing(true);
+                }
+                draftOwner.current = session.id ?? undefined;
                 setUser(session);
-                setComposing(true);
+                setExpired((old) => ({ ...old, user: false }));
                 setError(null);
-                const rows = await refresh();
-                setSelectedId(rows[0]?.id ?? null);
               }}
             />
           ) : showComposer ? (
             <Composer
+              draft={draft}
+              onDraftChange={setDraft}
               busy={busy}
               serverUnavailable={serverUnavailable}
               keyStatus={health?.openai ?? null}
@@ -503,11 +660,14 @@ export default function App() {
               onRestart={() => void onRestart(selected.id)}
               onDelete={() => onDelete(selected.id)}
               onUpdated={(next) => {
+                if (renderedUserGeneration !== userGeneration.current) return;
                 setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)), next.id);
               }}
             />
           ) : (
             <Composer
+              draft={draft}
+              onDraftChange={setDraft}
               busy={busy}
               serverUnavailable={serverUnavailable}
               keyStatus={health?.openai ?? null}

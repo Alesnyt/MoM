@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, JSO
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from . import directory_search, request_origin
+from .request_limits import RequestLimitsMiddleware
 from pydantic import ValidationError
 from .api_schemas import (
     SettingsIn,
@@ -117,7 +118,13 @@ def _clear_cookie(response: Response, name: str, request: Request) -> None:
 
 def _rate_or_429(request: Request, action: str) -> None:
     if not auth.rate_allow(f"{action}:{_client_ip(request)}"):
-        raise HTTPException(status_code=429, detail="Слишком много попыток, подождите минуту")
+        raise HTTPException(status_code=429, detail="Слишком много попыток, подождите минуту", headers={"Retry-After": "60"})
+
+
+async def _early_auth_rate(request: Request, action: str) -> None:
+    # The persistent limiter uses SQLite; keep it off the event loop and run
+    # before accepting a login/setup body, including invalid JSON.
+    await run_in_threadpool(_rate_or_429, request, action)
 
 
 def _search_rate_or_429(principal: str) -> None:
@@ -274,6 +281,7 @@ async def settings_save_error(_request: Request, exc: config.SettingsSaveError):
         "Проверьте права на файл настроек и свободное место."})
 
 
+app.add_middleware(RequestLimitsMiddleware, rate_check=_early_auth_rate)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -320,7 +328,6 @@ def auth_status(mom_admin: str | None = Cookie(default=None)) -> dict:
 
 @app.post("/api/auth/setup")
 def auth_setup(payload: LoginIn, request: Request, response: Response) -> dict:
-    _rate_or_429(request, "setup")
     with _setup_lock:
         if config.admin_configured():
             raise HTTPException(status_code=409, detail="Учётная запись администратора уже создана")
@@ -340,7 +347,6 @@ def auth_setup(payload: LoginIn, request: Request, response: Response) -> dict:
 
 @app.post("/api/auth/login")
 def auth_login(payload: LoginIn, request: Request, response: Response) -> dict:
-    _rate_or_429(request, "admin")
     if not config.admin_configured():
         raise HTTPException(status_code=400, detail="Сначала создайте учётную запись администратора")
     username = payload.username.strip()
@@ -383,7 +389,6 @@ def user_session(mom_user: str | None = Cookie(default=None)) -> dict:
 
 @app.post("/api/session/login")
 def user_login(payload: UserLoginIn, request: Request, response: Response) -> dict:
-    _rate_or_429(request, "user")
     email = _normalize_email(payload.email)
     try:
         record = auth.authenticate_platform_user(email, payload.password)
@@ -563,7 +568,7 @@ def admin_delete_user(user_id: str, _admin: dict = Depends(require_admin)) -> di
     if removed is None:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     for meeting_id in removed:
-        retention.purge_files(meeting_id)
+        retention.cleanup_recording(meeting_id)
     store.record_audit(
         _actor_name(_admin),
         "user.delete",
@@ -856,10 +861,13 @@ async def import_transcript(request: Request, user: dict = Depends(require_user)
         except transcript_import.TranscriptError as exc:
             raise HTTPException(400, str(exc)) from exc
     await run_in_threadpool(_disk_or_507, len(text.encode("utf-8")) * 4)
-    meeting = await run_in_threadpool(store.create_text_meeting,
-        uuid.uuid4().hex, title.strip() or (calendar_context or {}).get("title") or (Path(original).stem[:200] if file else "Текстовая встреча"),
-        original[:255], user["user_id"], document, calendar_context=calendar_context,
-    )
+    try:
+        meeting = await run_in_threadpool(store.create_text_meeting,
+            uuid.uuid4().hex, title.strip() or (calendar_context or {}).get("title") or (Path(original).stem[:200] if file else "Текстовая встреча"),
+            original[:255], user["user_id"], document, calendar_context=calendar_context,
+        )
+    except store.MeetingOwnerMissing as exc:
+        raise HTTPException(401, "Профиль удалён во время загрузки. Войдите заново.") from exc
     return meeting
 
 
@@ -949,7 +957,11 @@ def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: st
             )
 
         display_title = (title or "").strip() or (calendar_context or {}).get("title") or Path(original).stem
-        meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"], calendar_context=calendar_context)
+        try:
+            meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"], calendar_context=calendar_context)
+        except store.MeetingOwnerMissing as exc:
+            retention.discard_upload(meeting_id)
+            raise HTTPException(401, "Профиль удалён во время загрузки. Войдите заново.") from exc
         worker.notify_work()
         return meeting
     finally:
@@ -1105,7 +1117,7 @@ def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
             )
         if not store.delete_meeting(meeting_id, connection=connection):
             raise HTTPException(status_code=404, detail="Встреча не найдена")
-    retention.purge_files(meeting_id)
+    retention.cleanup_recording(meeting_id)
     store.record_audit(_actor_name(user), "meeting.delete", meeting_id, meeting.get("title") or "")
     return {"ok": True}
 
