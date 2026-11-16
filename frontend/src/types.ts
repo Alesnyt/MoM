@@ -140,6 +140,33 @@ export type MonitoringSnapshot = {
   };
 };
 
+export type DiagnosticsPeriod = 1 | 7 | 14;
+
+export type DiagnosticsSummary = {
+  available: boolean;
+  days: number;
+  retention_days: number;
+  runs: number;
+  completed: number;
+  interrupted: number;
+  errors: number;
+  active: number;
+  stages: Record<string, { samples: number; median_seconds: number; p95_seconds: number }>;
+  recent_runs: {
+    run: string;
+    meeting: string;
+    phase: "audio" | "protocol" | "upload";
+    status: string;
+    started_at: string;
+    elapsed_seconds: number | null;
+    audio_seconds: number | null;
+    asr_rtf: number | null;
+    llm_calls: number;
+    peak_rss_bytes: number | null;
+  }[];
+  error?: "storage_unavailable";
+};
+
 export type SmtpStatus = {
   configured: boolean;
   host?: string | null;

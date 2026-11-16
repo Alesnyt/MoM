@@ -48,6 +48,7 @@ COPY backend ./backend
 COPY .env.example ./
 COPY deploy/docker-entrypoint.sh /entrypoint.sh
 COPY --from=ui /src/backend/static ./backend/static
+COPY --from=ui /src/frontend/package.json ./frontend/package.json
 RUN chmod +x /entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \

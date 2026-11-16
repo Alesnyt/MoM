@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
-import { getMonitoring } from "./api";
-import { formatBytes, formatClock } from "./format";
+import { useEffect, useRef, useState } from "react";
+import { downloadDiagnostics, getDiagnostics, getMonitoring } from "./api";
+import { formatBytes, formatClock, formatDate } from "./format";
 import { stepLabel } from "./meeting";
 import { startPolling } from "./poll";
-import type { MonitoringSnapshot } from "./types";
+import type { DiagnosticsPeriod, DiagnosticsSummary, MonitoringSnapshot } from "./types";
 
 const REFRESH_MS = 5000;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
@@ -11,6 +11,25 @@ const stageLabels = {
   queue_wait: "Ожидание в очереди", audio_prepare: "Подготовка аудио", asr: "Распознавание речи",
   asr_cloud: "Облачное распознавание", diarization: "Разделение спикеров",
   name_review: "Проверка имён", protocol: "Сборка протокола",
+};
+const diagnosticStageLabels: Record<string, string> = {
+  ...stageLabels,
+  local_slot_wait: "Ожидание распознавания",
+  gigaam_model_load: "Загрузка GigaAM",
+  whisper_model_load: "Загрузка Whisper",
+  diarization_model_load: "Загрузка модели спикеров",
+  diarization_audio_load: "Чтение аудио для спикеров",
+  diarization_inference: "Вычисление спикеров",
+  upload_receive: "Получение записи",
+  upload_save: "Сохранение записи",
+  context_load: "Загрузка справочного контекста",
+  context_apply: "Применение справочного контекста",
+  result_save: "Сохранение результата",
+};
+const runPhaseLabels = { audio: "Расшифровка", protocol: "Протокол", upload: "Загрузка" };
+const runStatusLabels: Record<string, string> = {
+  running: "В работе", done: "Готово", review: "Готово к разметке", uploaded: "Загружено",
+  error: "Ошибка", interrupted: "Прервано", stopped: "Остановлено", cancelled: "Отменено",
 };
 
 function Metric({ label, value, detail }: { label: string; value: string | number; detail: string }) {
@@ -52,7 +71,121 @@ export function MonitoringPanel() {
         </div>
       )}
       {snapshot ? <MonitoringStats snapshot={snapshot} /> : !failed && <p role="status">Загружаю показатели…</p>}
+      <DiagnosticsPanel />
     </div>
+  );
+}
+
+function DiagnosticsPanel() {
+  const [days, setDays] = useState<DiagnosticsPeriod>(7);
+  const [summary, setSummary] = useState<DiagnosticsSummary | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const download = useRef<AbortController | null>(null);
+
+  useEffect(() => () => download.current?.abort(), []);
+  useEffect(() => startPolling(async (signal) => {
+    try {
+      return await getDiagnostics(days, signal);
+    } catch (error) {
+      if (!signal.aborted) setFailed(true);
+      throw error;
+    }
+  }, (next) => {
+    setSummary(next);
+    setFailed(!next.available);
+  }, 15000, { immediate: true }), [days, refresh]);
+
+  async function exportReport() {
+    const controller = new AbortController();
+    download.current?.abort();
+    download.current = controller;
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadDiagnostics(days, controller.signal);
+    } catch {
+      if (!controller.signal.aborted) setExportError("Не удалось скачать отчёт. Повторите попытку.");
+    } finally {
+      if (!controller.signal.aborted) setExporting(false);
+    }
+  }
+
+  return (
+    <section className="monitor-diagnostics" aria-labelledby="monitor-diagnostics-title">
+      <h2 id="monitor-diagnostics-title">Диагностика производительности</h2>
+      <p className="progress-hint">Замеры новых обработок сохраняются после перезапуска. История — до 14 дней, не более 1000 запусков.
+        Распознавание и сборка протокола считаются отдельными запусками; ожидание ручной разметки в их время не входит.</p>
+      <div className="actions-row">
+        <label className="audit-size">Период отчёта
+          <select value={days} disabled={exporting} onChange={(event) => {
+            setSummary(null);
+            setFailed(false);
+            setExportError(null);
+            setDays(Number(event.target.value) as DiagnosticsPeriod);
+          }}>
+            <option value={1}>Последние сутки</option>
+            <option value={7}>7 дней</option>
+            <option value={14}>14 дней</option>
+          </select>
+        </label>
+        <button className="ghost" type="button" disabled={exporting} onClick={() => {
+          setFailed(false);
+          setRefresh((value) => value + 1);
+        }}>Обновить диагностику</button>
+        <button type="button" disabled={exporting || !summary?.available || failed} onClick={() => void exportReport()}>
+          {exporting ? "Готовлю отчёт…" : "Скачать отчёт"}
+        </button>
+      </div>
+      <p className="progress-hint">Файл JSON содержит время этапов, показатели CPU и памяти, параметры обработки и счётчики запросов LLM.
+        Тексты встреч, имена, адреса серверов и ключи не включаются. Ничего не отправляется автоматически.</p>
+      {failed && <div className="banner" role="status">Диагностика временно недоступна. {summary?.available && "Показаны последние полученные замеры. "}
+        Обработка встреч продолжается. Повторю загрузку автоматически.</div>}
+      {exportError && <div className="banner" role="alert">{exportError}</div>}
+      {!summary && !failed && <p role="status">Загружаю диагностику…</p>}
+      {summary?.available && <>
+        <dl className="monitor-metrics">
+          <Metric label="Сохранено запусков" value={summary.runs} detail="За выбранный период" />
+          <Metric label="Завершено успешно" value={summary.completed} detail="Расшифровки, протоколы и загрузки" />
+          <Metric label="С ошибкой" value={summary.errors} detail="Не завершились успешно" />
+          <Metric label="Прервано" value={summary.interrupted} detail={`Сейчас в работе: ${summary.active}`} />
+        </dl>
+        {summary.runs === 0 && <p className="monitor-empty">Замеров пока нет. Обработайте несколько встреч и скачайте отчёт.
+          Данные прежних обработок не восстанавливаются.</p>}
+        {Object.keys(summary.stages).length > 0 && <details className="diagnostics-details">
+          <summary>Время по этапам за выбранный период</summary>
+          <p className="progress-hint">Этапы могут быть вложенными: например, загрузка модели уже включена во время распознавания.
+            Складывать все строки нельзя.</p>
+          <div className="audit-table-scroll" tabIndex={0} role="region" aria-label="Время этапов диагностики">
+            <table className="monitor-jobs" aria-label="Сохранённые замеры этапов">
+              <thead><tr><th scope="col">Этап</th><th scope="col">Медиана</th><th scope="col">95% укладываются в</th><th scope="col">Замеров</th></tr></thead>
+              <tbody>{Object.entries(summary.stages).map(([stage, value]) => <tr key={stage}>
+                <th scope="row">{diagnosticStageLabels[stage] ?? "Другой этап"}</th>
+                <td>{number.format(value.median_seconds)} с</td><td>{number.format(value.p95_seconds)} с</td><td>{value.samples}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </details>}
+        {summary.recent_runs.length > 0 && <details className="diagnostics-details">
+          <summary>Последние запуски</summary>
+          <p className="progress-hint">Обозначения встреч обезличены. Память относится ко всему MoM, включая параллельные обработки.</p>
+          <div className="audit-table-scroll" tabIndex={0} role="region" aria-label="Последние запуски диагностики">
+            <table className="monitor-jobs" aria-label="История обработок">
+              <thead><tr><th scope="col">Начало</th><th scope="col">Встреча</th><th scope="col">Обработка</th><th scope="col">Результат</th>
+                <th scope="col">Время</th><th scope="col">Запросов LLM</th><th scope="col">Пик памяти MoM</th></tr></thead>
+              <tbody>{summary.recent_runs.map((run) => <tr key={run.run}>
+                <td><time dateTime={run.started_at}>{formatDate(run.started_at)}</time></td>
+                <td>{run.meeting}</td><td>{runPhaseLabels[run.phase] ?? "Обработка"}</td><td>{runStatusLabels[run.status] ?? "Неизвестно"}</td>
+                <td>{run.elapsed_seconds === null ? "—" : formatClock(run.elapsed_seconds)}</td>
+                <td>{run.llm_calls}</td><td>{run.peak_rss_bytes === null ? "—" : formatBytes(run.peak_rss_bytes)}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </details>}
+      </>}
+    </section>
   );
 }
 

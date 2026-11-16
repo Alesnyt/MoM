@@ -58,6 +58,14 @@ def stage_timer(stage: str) -> Iterator[None]:
         seconds = time.perf_counter() - started
         if outcome == "ok":
             record_timing(stage, seconds)
+        # The current run is propagated to model threads by ContextVars. Keep
+        # diagnostics advisory: disk/collector failures must not fail a meeting.
+        try:
+            from . import diagnostics
+
+            diagnostics.record_stage(stage, seconds, outcome)
+        except Exception:
+            log.debug("Performance diagnostic sample unavailable")
         log.info("timing stage=%s seconds=%.3f outcome=%s", stage, seconds, outcome)
 
 

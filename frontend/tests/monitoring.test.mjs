@@ -22,6 +22,10 @@ test('admin opens on the live monitoring tab and polling stops when leaving', as
     if (url === '/api/auth/status') return Response.json({ configured: true, authenticated: true });
     if (url === '/api/session') return Response.json({ authenticated: false });
     if (url === '/api/health' || url === '/api/settings') return Response.json(health);
+    if (url === '/api/admin/diagnostics?days=7') return Response.json({
+      available: true, days: 7, retention_days: 14, runs: 0, completed: 0, interrupted: 0, errors: 0,
+      active: 0, stages: {}, recent_runs: [],
+    });
     assert.equal(url, '/api/admin/monitoring');
     monitoringSignal = options.signal;
     if (++requests > 1) return new Response('', { status: 503 });

@@ -12,7 +12,7 @@ from typing import Any, Literal
 from openai import APIStatusError, AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import config, prompts, calendar_service, context_budget
+from . import config, prompts, calendar_service, context_budget, llm_metrics
 from .performance import stage_timer
 from .background import run_sync
 from .speakers import has_timestamps
@@ -57,7 +57,9 @@ def make_client(
         kwargs["default_headers"] = {"x-goog-api-key": api_key}
     elif config.is_openrouter_key(api_key) or (url and "openrouter.ai" in url):
         kwargs["default_headers"] = {"HTTP-Referer": "https://github.com/Alesnyt/MoM", "X-Title": "MoM"}
-    return AsyncOpenAI(**kwargs)
+    client = AsyncOpenAI(**kwargs)
+    llm_metrics.instrument_client(client)
+    return client
 
 
 def _is_asr(model: str) -> bool:
@@ -371,7 +373,7 @@ async def analyze_transcript(
     if title_hint:
         user = f"Предложенный заголовок (можно уточнить): {title_hint}\n\n" + user
     try:
-        response = await client.chat.completions.create(
+        response = await llm_metrics.completion(client,
             model=model,
             temperature=0.2,
             max_tokens=context_budget.output_tokens(),
@@ -386,7 +388,8 @@ async def analyze_transcript(
         if not json_format_unsupported(exc):
             raise
         log.warning("llm model=%s без json_object, повтор запроса", model)
-        response = await client.chat.completions.create(
+        response = await llm_metrics.completion(client,
+            retry_reason="json_fallback",
             model=model,
             temperature=0.2,
             max_tokens=context_budget.output_tokens(),
@@ -590,7 +593,9 @@ async def analyze_long_transcript(
         intro = f"Это часть {index} из {total}. Составь промежуточный протокол.\n\n" if total > 1 else ""
         prompt = roster + intro + (_SOURCE_INSTRUCTIONS if sources else "") + chunk
         try:
-            summary = await analyze_transcript(client, prompt, title_hint, system_prompt=system_prompt)
+            with llm_metrics.request_scope("protocol_part" if total > 1 else "protocol",
+                                           "context_split" if depth else "none"):
+                summary = await analyze_transcript(client, prompt, title_hint, system_prompt=system_prompt)
         except BadRequestError as exc:
             if not context_budget.context_rejected(exc):
                 raise
@@ -626,7 +631,8 @@ async def analyze_long_transcript(
                 await run_sync(on_part, total, total)
             payload = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
             try:
-                result = await analyze_transcript(client, roster + _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
+                with llm_metrics.request_scope("protocol_merge"):
+                    result = await analyze_transcript(client, roster + _MERGE_INSTRUCTIONS + payload, title_hint, system_prompt=system_prompt)
             except BadRequestError as exc:
                 if not context_budget.context_rejected(exc):
                     raise
