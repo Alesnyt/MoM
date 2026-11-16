@@ -2,29 +2,25 @@
 set -eu
 cd /app
 mkdir -p data backups
-
-if [ ! -f .env ]; then
-  cp .env.example .env
-fi
+# The directory mount permits atomic replacement. The old .env file remains a
+# read-only bootstrap source and is imported automatically on the first start.
+export MOM_ENV_PATH="${MOM_ENV_PATH:-/app/data/config/.env}"
 
 python - <<'PY'
 from pathlib import Path
-import re
 import secrets
+import os
 
-path = Path(".env")
-text = path.read_text()
-match = re.search(r"^SETUP_TOKEN=(.*)$", text, re.M)
-current = match.group(1).strip() if match else ""
+from dotenv import dotenv_values
+from backend import config
+
+source = Path(".env") if Path(".env").is_file() else Path(".env.example")
+config.initialize_env(source)
+current = os.getenv("SETUP_TOKEN", "") or dotenv_values(config.ENV_PATH, interpolate=False).get("SETUP_TOKEN", "")
 if current:
     raise SystemExit(0)
 token = secrets.token_urlsafe(18)
-line = f"SETUP_TOKEN={token}"
-if match:
-    text = re.sub(r"^SETUP_TOKEN=.*$", line, text, count=1, flags=re.M)
-else:
-    text = text.rstrip() + "\n" + line + "\n"
-path.write_text(text)
+config._upsert_env({"SETUP_TOKEN": token})
 print(f"SETUP_TOKEN={token}")
 print("Сохраните токен: он нужен для первого входа администратора.")
 PY
@@ -37,9 +33,6 @@ export PORT="${PORT:-8000}"
 # Volumes may be root-owned. Chown them, then run the server as mom.
 if [ "$(id -u)" = "0" ]; then
   chown -R mom:mom data backups
-  if [ -f .env ]; then
-    chown mom:mom .env || true
-  fi
   exec runuser -u mom -- python -m backend
 fi
 exec python -m backend

@@ -961,29 +961,32 @@ def retry_meeting(
     meeting_id: str,
     user: dict = Depends(require_user),
 ) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    if meeting["status"] not in {"error", "done"}:
-        raise HTTPException(status_code=409, detail="Эта встреча ещё обрабатывается")
-    if not keys.snapshot()["connected"]:
-        status = keys.snapshot()
-        raise HTTPException(
-            status_code=400,
-            detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-        )
-    keep_transcript = (meeting["status"] == "error" or meeting.get("source_type") == "text") and (meeting.get("transcript") or "").strip()
-    fields: dict = {
-        "status": "queued",
-        "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
-        "error": None,
-        "result": None,
-        "progress": 88 if keep_transcript else 0,
-        "queued_at": store.utc_now(),
-    }
-    if not keep_transcript:
-        fields["transcript"] = None
-        fields["transcript_segments"] = None
-        fields["language"] = None
-    store.update_meeting(meeting_id, **fields)
+    # The worker claims jobs in its own transaction. Keep the eligibility check
+    # and enqueue together so concurrent retries cannot requeue an active job.
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        if meeting["status"] not in {"error", "done"}:
+            raise HTTPException(status_code=409, detail="Эта встреча ещё обрабатывается")
+        if not keys.snapshot()["connected"]:
+            status = keys.snapshot()
+            raise HTTPException(
+                status_code=400,
+                detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
+            )
+        keep_transcript = (meeting["status"] == "error" or meeting.get("source_type") == "text") and (meeting.get("transcript") or "").strip()
+        fields: dict = {
+            "status": "queued",
+            "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
+            "error": None,
+            "result": None,
+            "progress": 88 if keep_transcript else 0,
+            "queued_at": store.utc_now(),
+        }
+        if not keep_transcript:
+            fields["transcript"] = None
+            fields["transcript_segments"] = None
+            fields["language"] = None
+        store.update_meeting(meeting_id, connection=connection, **fields)
     store.refresh_queue_messages()
     worker.notify_work()
     updated = store.get_meeting(meeting_id)
@@ -1029,25 +1032,47 @@ def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dic
     return store.get_meeting(meeting_id)
 
 
-def _halt_processing(meeting_id: str, meeting: dict, *, restart: bool) -> dict:
-    if meeting["status"] not in store.ACTIVE_STATUSES:
-        raise HTTPException(status_code=409, detail="Эта встреча сейчас не обрабатывается")
-    if restart and not keys.snapshot()["connected"]:
-        status = keys.snapshot()
-        raise HTTPException(
-            status_code=400,
-            detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-        )
+def _halt_processing(meeting_id: str, user: dict, *, restart: bool) -> dict:
     from . import control
 
-    control.request_stop(meeting_id, restart=restart)
-    if control.cancel_job(meeting_id):
-        store.update_meeting(
-            meeting_id,
-            status_message="Останавливаю, чтобы запустить заново…" if restart else "Останавливаю…",
-        )
-    else:
-        control.finish(meeting_id)
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        if meeting["status"] not in store.ACTIVE_STATUSES:
+            raise HTTPException(status_code=409, detail="Эта встреча сейчас не обрабатывается")
+        if restart and not keys.snapshot()["connected"]:
+            status = keys.snapshot()
+            raise HTTPException(
+                status_code=400,
+                detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
+            )
+        if meeting["status"] == "queued":
+            # No worker can claim this row until the transition commits. Applying
+            # queued requests here avoids cancellation flags leaking into a new job.
+            if restart:
+                keep = meeting.get("source_type") == "text"
+                fields = {} if keep else {"transcript": None, "transcript_segments": None, "language": None}
+                store.update_meeting(
+                    meeting_id, connection=connection,
+                    status="queued", status_message="Повторная обработка в очереди",
+                    error=None, result=None, progress=88 if keep else 0,
+                    queued_at=store.utc_now(), **fields,
+                )
+            else:
+                store.update_meeting(
+                    meeting_id, connection=connection,
+                    status="error", status_message="Остановлено",
+                    error="Обработка остановлена", progress=0,
+                )
+        else:
+            # A claimed job may not yet have reached control.bind_job. Its worker
+            # must acknowledge the stop; finishing here could requeue an owned job.
+            control.request_stop(meeting_id, restart=restart)
+            store.update_meeting(
+                meeting_id, connection=connection,
+                status_message="Останавливаю, чтобы запустить заново…" if restart else "Останавливаю…",
+            )
+    store.refresh_queue_messages()
+    worker.notify_work()
     updated = store.get_meeting(meeting_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Встреча не найдена")
@@ -1056,30 +1081,30 @@ def _halt_processing(meeting_id: str, meeting: dict, *, restart: bool) -> dict:
 
 @app.post("/api/meetings/{meeting_id}/stop")
 def stop_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    updated = _halt_processing(meeting_id, meeting, restart=False)
-    store.record_audit(_actor_name(user), "meeting.stop", meeting_id, meeting.get("title") or "")
+    updated = _halt_processing(meeting_id, user, restart=False)
+    store.record_audit(_actor_name(user), "meeting.stop", meeting_id, updated.get("title") or "")
     return updated
 
 
 @app.post("/api/meetings/{meeting_id}/restart")
 def restart_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    updated = _halt_processing(meeting_id, meeting, restart=True)
-    store.record_audit(_actor_name(user), "meeting.restart", meeting_id, meeting.get("title") or "")
+    updated = _halt_processing(meeting_id, user, restart=True)
+    store.record_audit(_actor_name(user), "meeting.restart", meeting_id, updated.get("title") or "")
     return updated
 
 
 @app.delete("/api/meetings/{meeting_id}")
 def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
-    meeting = _owned(store.get_meeting(meeting_id), user)
-    if meeting["status"] in store.ACTIVE_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail="Нельзя удалить встречу, пока она в очереди или в обработке",
-        )
-    if not store.delete_meeting(meeting_id):
-        raise HTTPException(status_code=404, detail="Встреча не найдена")
+    # Recheck status under the same write lock used to remove the row.
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        if meeting["status"] in store.ACTIVE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="Нельзя удалить встречу, пока она в очереди или в обработке",
+            )
+        if not store.delete_meeting(meeting_id, connection=connection):
+            raise HTTPException(status_code=404, detail="Встреча не найдена")
     retention.purge_files(meeting_id)
     store.record_audit(_actor_name(user), "meeting.delete", meeting_id, meeting.get("title") or "")
     return {"ok": True}

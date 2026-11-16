@@ -31,17 +31,26 @@ jobs:
       - name: Smoke-test running Docker service
         run: |
           set -euo pipefail
-          docker run -d --name mom-smoke -e SETUP_TOKEN=ci-stage1-setup-token -p 127.0.0.1:18080:8000 mom:ci
+          smoke_root=$(mktemp -d)
+          mkdir "$smoke_root/data"
+          printf '%s\n' 'UI_THEME=classic' 'SMTP_PASSWORD=bootstrap$literal' > "$smoke_root/.env"
+          cp "$smoke_root/.env" "$smoke_root/bootstrap.expected"
           trap 'docker logs mom-smoke || true; docker rm -f mom-smoke || true' EXIT
-          ready=0
-          for i in $(seq 1 45); do
-            if curl --fail --silent http://127.0.0.1:18080/api/health >/tmp/mom-health.json; then
-              ready=1
-              break
-            fi
-            sleep 2
-          done
-          test "$ready" -eq 1
+          start_smoke() {
+            docker run -d --name mom-smoke -e SETUP_TOKEN=ci-stage1-setup-token \
+              -v "$smoke_root/.env:/app/.env:ro" -v "$smoke_root/data:/app/data" \
+              -p 127.0.0.1:18080:8000 mom:ci
+            ready=0
+            for i in $(seq 1 45); do
+              if curl --fail --silent http://127.0.0.1:18080/api/health >/tmp/mom-health.json; then
+                ready=1
+                break
+              fi
+              sleep 2
+            done
+            test "$ready" -eq 1
+          }
+          start_smoke
           python3 - <<'PY'
           import http.cookiejar
           import json
@@ -82,6 +91,7 @@ jobs:
               "setup_token": "ci-stage1-setup-token",
           })
           assert setup["authenticated"]
+          assert call("POST", "/api/settings/theme", {"theme": "t2"})["theme"] == "t2"
           monitor = call("GET", "/api/admin/monitoring")
           assert monitor["queue"]["active"] == 0 and monitor["queue"]["jobs"] == [], monitor
           assert monitor["resources"]["rss_bytes"] > 0 and monitor["disk"]["total_bytes"] > 0, monitor
@@ -116,6 +126,36 @@ jobs:
           saved = call("GET", "/api/meetings/" + meeting["id"])
           assert saved["transcript"] == meeting["transcript"]
           assert call("DELETE", "/api/meetings/" + meeting["id"])["ok"]
+          PY
+          # Recreate with the same data and original read-only bootstrap file.
+          docker rm -f mom-smoke
+          start_smoke
+          cmp "$smoke_root/.env" "$smoke_root/bootstrap.expected"
+          python3 - <<'PY'
+          import http.cookiejar
+          import json
+          import urllib.request
+
+          root = "http://127.0.0.1:18080"
+          opener = urllib.request.build_opener(
+              urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+          )
+          with opener.open(root + "/api/health", timeout=8) as response:
+              assert json.load(response)["theme"] == "t2"
+          request = urllib.request.Request(
+              root + "/api/auth/login",
+              data=json.dumps({"username": "testadmin", "password": "container-test-password"}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with opener.open(request, timeout=8) as response:
+              assert json.load(response)["authenticated"]
+          PY
+          docker exec -i mom-smoke python - <<'PY'
+          from backend import config
+          assert config.ENV_PATH.as_posix() == "/app/data/config/.env"
+          assert config.get_ui_theme() == "t2"
+          assert config.SMTP_PASSWORD == "bootstrap$literal"
+          assert config.ENV_PATH.stat().st_mode & 0o777 == 0o600
           PY
 
   frontend:

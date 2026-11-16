@@ -240,11 +240,11 @@ def test_queue_recovers_and_health_reports_failure_during_retry(db, monkeypatch)
     idle_backgrounds(monkeypatch)
     claim = store.claim_next_meeting
     calls = 0
-    def flaky(limit):
+    def flaky(limit, **kwargs):
         nonlocal calls
         calls += 1
         if calls==1: raise OSError('temporary database failure')
-        return claim(limit)
+        return claim(limit, **kwargs)
     monkeypatch.setattr(store, 'claim_next_meeting', flaky)
     async def scenario():
         stop = asyncio.Event()

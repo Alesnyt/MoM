@@ -49,20 +49,24 @@ async def run_worker(stop: asyncio.Event) -> None:
     queue = _services["queue"]
     services = [asyncio.create_task(_services[name].supervise(run, stop), name=f"mom-{name}")
                 for name, run in jobs.items()]
-    running: set[asyncio.Task[None]] = set()
+    running: dict[asyncio.Task[None], str] = {}
     idle_since: float | None = None
     try:
         while not stop.is_set():
             try:
                 for task in list(running):
                     if task.done():
-                        running.remove(task)
+                        running.pop(task)
                         # Always observe exceptions; never leave a silently dead task.
                         if not task.cancelled() and task.exception() is not None:
                             log.error("Задача очереди завершилась с ошибкой", exc_info=task.exception())
                 limit = config.get_max_jobs()
                 while len(running) < limit and not stop.is_set():
-                    meeting_id = await asyncio.to_thread(store.claim_next_meeting, limit)
+                    # Terminal DB status is visible before a job finishes its
+                    # file/client cleanup. Retain ownership until the task exits.
+                    meeting_id = await asyncio.to_thread(
+                        store.claim_next_meeting, limit, exclude_ids=tuple(running.values()),
+                    )
                     if not meeting_id:
                         break
                     idle_since = None
@@ -70,7 +74,7 @@ async def run_worker(stop: asyncio.Event) -> None:
                     # operation may strand an extracting meeting between these steps.
                     task = asyncio.create_task(_run_job(meeting_id), name=f"mom-job-{meeting_id[:8]}")
                     control.bind_job(meeting_id, task)
-                    running.add(task)
+                    running[task] = meeting_id
                 await asyncio.to_thread(store.refresh_queue_messages)
                 queue.ready()
                 if running:
