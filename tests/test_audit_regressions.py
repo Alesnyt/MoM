@@ -131,7 +131,7 @@ def test_concurrent_settings_updates_are_preserved(tmp_path, monkeypatch):
     assert dotenv_values(target) == {f'KEY_{i}': str(i) for i in range(12)}
 
 
-def test_settings_support_docker_file_bind_mount(tmp_path, monkeypatch):
+def test_settings_reject_direct_file_bind_mount_without_truncation(tmp_path, monkeypatch):
     import errno
     target = tmp_path / '.env'
     target.write_text('UNCHANGED=ok\n')
@@ -142,12 +142,15 @@ def test_settings_support_docker_file_bind_mount(tmp_path, monkeypatch):
             raise OSError(errno.EBUSY, 'Device or resource busy')
         return real_replace(source, destination)
     monkeypatch.setattr(config.os, 'replace', mounted)
-    config._upsert_env({'SMTP_PASSWORD': 'alpha #beta'})
-    assert dotenv_values(target, interpolate=False) == {'UNCHANGED': 'ok', 'SMTP_PASSWORD': 'alpha #beta'}
+    with pytest.raises(OSError) as error:
+        config._upsert_env({'SMTP_PASSWORD': 'alpha #beta'})
+    assert error.value.errno == errno.EBUSY
+    assert target.read_text() == 'UNCHANGED=ok\n'
+    assert list(tmp_path.glob('.env-*')) == []
 
 
 
-def test_settings_writable_file_in_readonly_parent(tmp_path, monkeypatch):
+def test_settings_reject_readonly_parent_without_truncation(tmp_path, monkeypatch):
     import errno
     target = tmp_path / '.env'
     target.write_text('UNCHANGED=ok\n')
@@ -164,5 +167,6 @@ def test_settings_writable_file_in_readonly_parent(tmp_path, monkeypatch):
         return real_replace(source, destination)
     monkeypatch.setattr(config.tempfile, 'mkstemp', restricted_temp)
     monkeypatch.setattr(config.os, 'replace', restricted_replace)
-    config._upsert_env({'SMTP_PASSWORD': 'alpha #beta'})
-    assert dotenv_values(target, interpolate=False) == {'UNCHANGED': 'ok', 'SMTP_PASSWORD': 'alpha #beta'}
+    with pytest.raises(PermissionError):
+        config._upsert_env({'SMTP_PASSWORD': 'alpha #beta'})
+    assert target.read_text() == 'UNCHANGED=ok\n'

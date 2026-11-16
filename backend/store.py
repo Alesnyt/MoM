@@ -479,7 +479,10 @@ def refresh_queue_messages() -> None:
                 )
 
 
-def claim_next_meeting(max_jobs: int) -> str | None:
+def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> str | None:
+    # Jobs finishing cleanup can already be queued again by the user, but still
+    # own their files and cancellation state until their worker task exits.
+    excluded = set(exclude_ids)
     limit = max(1, int(max_jobs))
     ensure_dirs()
     conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
@@ -506,6 +509,7 @@ def claim_next_meeting(max_jobs: int) -> str | None:
             ORDER BY COALESCE(queued_at, created_at) ASC, id ASC
             """
         ).fetchall()
+        queued = [row for row in queued if row["id"] not in excluded]
         for row in queued:
             if row["user_id"] and row["user_id"] in busy_users:
                 continue
@@ -581,6 +585,8 @@ def rate_allow(key: str, window: float, limit: int) -> bool:
 
 def delete_user(user_id: str) -> list[str] | None:
     with connect() as conn:
+        # Serialize the active-job check with worker claims and meeting edits.
+        conn.execute("BEGIN IMMEDIATE")
         user = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
         if not user:
             return None
@@ -597,8 +603,8 @@ def delete_user(user_id: str) -> list[str] | None:
     return ids
 
 
-def delete_meeting(meeting_id: str) -> bool:
-    with connect() as conn:
+def delete_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = None) -> bool:
+    with (connect() if connection is None else nullcontext(connection)) as conn:
         cursor = conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
         return cursor.rowcount > 0
 
@@ -775,9 +781,8 @@ def get_session_row(token: str) -> dict[str, Any] | None:
     stored = session_id(token)
     with connect() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE token = ?", (stored,)).fetchone()
-        if row is None and token != stored:
-            row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
-    # Preserve precedence of hashed rows over legacy plaintext rows, even on expiry.
+    # Never accept the stored hash as a bearer token. Legacy plaintext sessions
+    # intentionally require a new login and expire through the normal cleanup.
     if not row or float(row["expires"]) <= now:
         return None
     return dict(row)
@@ -791,7 +796,7 @@ def purge_expired_sessions() -> int:
 def drop_session_token(token: str) -> None:
     stored = session_id(token)
     with connect() as conn:
-        conn.execute("DELETE FROM sessions WHERE token = ? OR token = ?", (stored, token))
+        conn.execute("DELETE FROM sessions WHERE token = ?", (stored,))
 
 
 def drop_sessions_for_user(user_id: str) -> None:

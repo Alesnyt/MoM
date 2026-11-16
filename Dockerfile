@@ -38,6 +38,7 @@ COPY --from=ui /src/backend/static ./backend/static
 RUN chmod +x /entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \
+    MOM_ENV_PATH=/app/data/config/.env \
     HOST=0.0.0.0 \
     PORT=8000
 

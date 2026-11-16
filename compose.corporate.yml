@@ -21,7 +21,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./backups:/app/backups
-      - ./.env:/app/.env
+      # Однократный импорт в data/config/.env; дальнейшие изменения атомарны.
+      - ./.env:/app/.env:ro
     networks:
       corporate:
         ipv4_address: ${MOM_BACKEND_IP:-172.30.88.2}

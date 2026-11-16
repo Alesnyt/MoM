@@ -3,7 +3,7 @@ from pathlib import Path
 from dotenv import load_dotenv, set_key
 import os
 import stat
-import errno
+import logging
 import ipaddress
 import tempfile
 import threading
@@ -13,13 +13,15 @@ from dataclasses import dataclass, field
 from functools import wraps
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env", interpolate=False)
+# Docker keeps the writable configuration in its directory-mounted data volume.
+# A file bind mount cannot be replaced atomically, even when it is writable.
+ENV_PATH = Path(os.getenv("MOM_ENV_PATH", "").strip() or ROOT / ".env").expanduser()
+load_dotenv(ENV_PATH, interpolate=False)
 
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 AUDIO_DIR = DATA_DIR / "audio"
 DB_PATH = DATA_DIR / "mom.db"
-ENV_PATH = ROOT / ".env"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
@@ -463,37 +465,50 @@ _env_lock = threading.Lock()
 _ldap_settings_lock = threading.Lock()
 
 
+def _replace_env(original: str, values: dict[str, str]) -> None:
+    """Stage in the target directory; never truncate the live configuration."""
+    fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(original)
+        for key, value in values.items():
+            set_key(str(temporary), key, value, quote_mode="always")
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
+        # set_key replaces its input, so sync the final staged inode, not fd.
+        with temporary.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, ENV_PATH)
+        # The rename is now committed. A directory-sync error must not report
+        # a rejected save while the new configuration is already visible.
+        if os.name == "posix":
+            try:
+                parent_fd = os.open(ENV_PATH.parent, os.O_RDONLY)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+            except OSError:
+                logging.getLogger(__name__).warning("Settings saved, but directory sync failed")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def initialize_env(source: Path) -> None:
+    """Copy bootstrap settings once; an existing persistent file always wins."""
+    with _env_lock:
+        if ENV_PATH.exists():
+            return
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _replace_env(source.read_text(encoding="utf-8"), {})
+
+
 def _upsert_env(values: dict[str, str]) -> None:
     """Serialize updates and atomically replace a correctly quoted dotenv file."""
     with _env_lock:
         source = ENV_PATH if ENV_PATH.exists() else ROOT / ".env.example"
-        original = source.read_text() if source.exists() else ""
-        try:
-            fd, name = tempfile.mkstemp(prefix=".env-", dir=ENV_PATH.parent)
-        except PermissionError:
-            # Docker grants write access to the mounted .env, not /app itself.
-            fd, name = tempfile.mkstemp(prefix="mom-env-")
-        temporary = Path(name)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                stream.write(original)
-            for key, value in values.items():
-                set_key(str(temporary), key, value, quote_mode="always")
-            restrict_path(temporary, stat.S_IRUSR | stat.S_IWUSR)
-            try:
-                os.replace(temporary, ENV_PATH)
-            except OSError as exc:
-                if exc.errno not in {errno.EBUSY, errno.EXDEV, errno.EACCES, errno.EPERM}:
-                    raise
-                # A file mount or non-writable parent prevents replacement.
-                # Write the existing writable file under the same update lock.
-                with ENV_PATH.open("w") as stream:
-                    stream.write(temporary.read_text())
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                restrict_path(ENV_PATH, stat.S_IRUSR | stat.S_IWUSR)
-        finally:
-            temporary.unlink(missing_ok=True)
+        original = source.read_text(encoding="utf-8") if source.exists() else ""
+        _replace_env(original, values)
 
 
 @_serialized

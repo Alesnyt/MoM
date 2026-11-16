@@ -42,22 +42,63 @@ def test_session_lookup_reads_while_another_writer_holds_database(db, monkeypatc
     assert not any('journal_mode' in sql for sql in statements)
 
 
-def test_expiry_legacy_tokens_and_revocation(db):
-    with store.connect() as conn:
-        conn.execute("INSERT INTO sessions(token,kind,username,expires) VALUES ('legacy','admin','boss',2000)")
-    assert auth.get_session('legacy')['username'] == 'boss'
+def test_expiry_and_user_revocation(db):
     assert auth.get_session('valid') is None  # User cookie cannot become an admin cookie.
     assert auth.get_user_session('expired') is None
     assert store.get_session_row('expired') is None
-    with store.connect() as conn:
-        assert conn.execute('SELECT count(*) FROM sessions').fetchone()[0] == 3
     assert store.purge_expired_sessions() == 1
     assert store.get_session_row('valid')
-    assert store.get_session_row('legacy')
-    store.drop_session_token('legacy')
     store.drop_sessions_for_user('u')
-    assert store.get_session_row('legacy') is None
     assert store.get_session_row('valid') is None
+
+
+@pytest.mark.parametrize('kind', ['admin', 'user'])
+def test_stored_hash_cannot_authenticate_or_revoke_session(db, kind):
+    if kind == 'admin':
+        raw = auth.create_session('boss')
+        lookup, logout = auth.get_session, auth.drop_session
+        other_lookup = auth.get_user_session
+        expected = {'username': 'boss'}
+    else:
+        raw = auth.create_user_session('u', 'u@example.com')
+        lookup, logout = auth.get_user_session, auth.drop_user_session
+        other_lookup = auth.get_session
+        expected = {'user_id': 'u', 'email': 'u@example.com'}
+    with store.connect() as conn:
+        stored = conn.execute('SELECT token FROM sessions WHERE token = ?',
+                              (store.session_id(raw),)).fetchone()['token']
+    assert stored != raw
+    assert lookup(raw) == expected
+    assert other_lookup(raw) is None
+    assert lookup(stored) is None
+    assert other_lookup(stored) is None
+    logout(stored)
+    assert lookup(raw) == expected
+    logout(raw)
+    assert lookup(raw) is None
+
+
+@pytest.mark.parametrize('kind', ['admin', 'user'])
+def test_legacy_plaintext_session_requires_new_login(db, kind, monkeypatch):
+    with store.connect() as conn:
+        conn.execute("INSERT INTO sessions(token,kind,username,user_id,email,expires) "
+                     "VALUES ('legacy',?,'boss','u','u@example.com',2000)", (kind,))
+    assert auth.get_session('legacy') is None
+    assert auth.get_user_session('legacy') is None
+    # Restarting the application must not restore acceptance of plaintext tokens.
+    store.init_db()
+    assert store.get_session_row('legacy') is None
+    with store.connect() as conn:
+        assert conn.execute('SELECT count(*) FROM sessions').fetchone()[0] == 3
+    monkeypatch.setattr(store.time, 'time', lambda: 2000)
+    assert store.purge_expired_sessions() == 3
+
+
+def test_hashed_session_survives_restart_and_expires_at_deadline(db, monkeypatch):
+    store.init_db()
+    assert auth.get_user_session('valid') == {'user_id': 'u', 'email': 'u@example.com'}
+    monkeypatch.setattr(store.time, 'time', lambda: 2000)
+    assert auth.get_user_session('valid') is None
 
 
 def test_session_cleanup_runs_off_event_loop_and_stops(db, monkeypatch):
