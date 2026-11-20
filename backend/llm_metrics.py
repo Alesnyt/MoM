@@ -5,10 +5,13 @@ import asyncio
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from openai import APIConnectionError, APITimeoutError
+from httpx2 import TimeoutException, TransportError
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
+
+from .diagnostics import MAX_SDK_ATTEMPTS
 
 
 _scope: ContextVar[tuple[str, str]] = ContextVar("llm_metric_scope", default=("protocol", "none"))
@@ -19,9 +22,59 @@ class _Attempts:
     http: int = 0
     sdk: int | None = None
     status: int | None = None
+    sends: int = 0
+    previous_end: float | None = None
+    details: list[dict] = field(default_factory=list)
+
+    def finish_send(self, started: float, status: int | None, kind: str) -> None:
+        ended = time.perf_counter()
+        self.sends += 1
+        detail = {"attempt": self.sends, "seconds": round(ended - started, 6),
+                  "http_status": status, "error_kind": kind,
+                  "gap_before_seconds": round(started - self.previous_end, 6) if self.previous_end is not None else None}
+        self.previous_end = ended
+        self.status = status
+        if len(self.details) < MAX_SDK_ATTEMPTS:
+            self.details.append(detail)
+        else:
+            self.details[-1] = detail
 
 
 _attempts: ContextVar[_Attempts | None] = ContextVar("llm_metric_attempts", default=None)
+
+
+class ObservedAsyncOpenAI(AsyncOpenAI):
+    """Observe a complete send before the pinned SDK handles retries or backoff.
+
+    Response hooks alone miss connection errors and failures while reading the body.
+    The SDK still owns the transport, timeout, redirects and retry policy.
+    """
+
+    async def _send_request(self, request, **kwargs):
+        observation = _attempts.get()
+        if observation is None:
+            return await super()._send_request(request, **kwargs)
+        started = time.perf_counter()
+        status, kind = None, "other"
+        try:
+            response = await super()._send_request(request, **kwargs)
+            status = response.status_code
+            kind = _status_kind(status)
+            return response
+        except (TimeoutException, TimeoutError):
+            kind = "timeout"
+            raise
+        except TransportError:
+            kind = "connection"
+            raise
+        except asyncio.CancelledError:
+            kind = "cancelled"
+            raise
+        finally:
+            try:
+                observation.finish_send(started, status, kind)
+            except Exception:
+                pass
 
 
 def _integer(value: Any) -> int | None:
@@ -38,6 +91,7 @@ async def _on_request(request: Any) -> None:
         if observation is None:
             return
         observation.http += 1
+        observation.status = None
         # The SDK's numeric header distinguishes retries from HTTP redirects.
         raw = request.headers.get("x-stainless-retry-count", "")
         if isinstance(raw, str) and raw.isascii() and raw.isdigit() and len(raw) <= 4:
@@ -123,13 +177,21 @@ def _error_kind(exc: Exception, status: int | None) -> str:
         return "timeout"
     if isinstance(exc, APIConnectionError):
         return "connection"
+    return _status_kind(status) if status is not None and status >= 400 else "other"
+
+
+def _status_kind(status: int) -> str:
+    if status < 400:
+        return "none"
+    if status == 408:
+        return "timeout"
     if status == 429:
         return "rate_limit"
     if status in {401, 403}:
         return "auth"
-    if status is not None and 500 <= status <= 599:
+    if 500 <= status <= 599:
         return "server"
-    if status is not None and 400 <= status <= 499:
+    if 400 <= status <= 499:
         return "request"
     return "other"
 
@@ -181,8 +243,10 @@ async def completion(client: Any, *, phase: str | None = None,
                 **_usage(response), "finish_reason": finish, "outcome": outcome,
                 "error_kind": error_kind,
                 "http_status": status if status is not None and 100 <= status <= 599 else observed.status,
-                "sdk_attempts": observed.sdk if has_hooks else None,
+                "sdk_attempts": observed.sends or (observed.sdk if has_hooks else None),
                 "http_attempts": observed.http if has_hooks else None,
+                **({"sdk_attempt_details": observed.details, "omitted_sdk_attempts": observed.sends - len(observed.details)}
+                   if observed.sends else {}),
                 "retry_reason": retry_reason or current_retry, "ttft_seconds": None,
             })
         except Exception:

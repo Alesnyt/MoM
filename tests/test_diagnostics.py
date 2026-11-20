@@ -51,6 +51,103 @@ def test_durable_summary_export_and_distinct_attempts():
     assert b"private-meeting-id" not in diag._path().read_bytes()
 
 
+def test_idle_checkpoints_belong_to_last_model_user_and_never_revive_pruned_runs(monkeypatch):
+    from backend import worker
+
+    counts = {"rss": 100, "samples": 0}
+    def point(run):
+        counts["samples"] += 1
+        return {"rss_bytes": counts["rss"], "offset_seconds": counts["samples"]}
+    monkeypatch.setattr(diag, "_memory_point", point)
+    first, last = (diag.begin_run(key, "audio") for key in ("first", "last"))
+    for run in (first, last):
+        with diag.run_scope(run):
+            diag.record_model_memory("before_diarization")
+            diag.record_model_memory("after_diarization")
+            diag.record_model_memory("before_gigaam")
+            diag.record_model_memory("after_gigaam")
+    assert counts["samples"] == 8
+    diag.finish_run(last, status="review")
+    diag.finish_run(first, status="review")
+    queue = {"active": 0, "waiting": 1}
+    monkeypatch.setattr(worker.store, "queue_stats", lambda: queue)
+    monkeypatch.setattr(worker.diarize, "unload", lambda: counts.update(rss=20))
+    monkeypatch.setattr(worker.local_asr, "unload", lambda: None)
+    monkeypatch.setattr(worker.gigaam_asr, "unload", lambda: None)
+    worker._unload_idle_asr()
+    assert counts["samples"] == 8
+    queue["waiting"] = 0
+    worker._unload_idle_asr()
+    worker._unload_idle_asr()
+    assert counts["samples"] == 10
+    newest, previous = diag.export_report()["runs"]
+    assert newest["status"] == "review"
+    assert newest["model_memory"]["before_models"] == newest["model_memory"]["before_diarization"]
+    assert newest["model_memory"]["before_models"] != newest["model_memory"]["before_gigaam"]
+    assert newest["model_memory"]["before_idle_unload"]["rss_bytes"] == 100
+    assert newest["model_memory"]["after_idle_unload"]["rss_bytes"] == 20
+    assert "after_idle_unload" not in previous["model_memory"]
+    assert diag.summary()["recent_runs"][0]["after_idle_rss_bytes"] == 20
+    orphan = diag.begin_run("pruned", "audio")
+    with diag.run_scope(orphan):
+        diag.record_model_memory("before_gigaam")
+    diag.finish_run(orphan, status="cancelled")
+    with diag._connect() as conn:
+        conn.execute("DELETE FROM runs WHERE id = ?", (orphan.id,))
+    worker._unload_idle_asr()
+    assert diag.export_report()["exported_runs"] == 2
+
+
+def test_model_memory_linux_pss_units_and_missing_proc_fallback(tmp_path, monkeypatch):
+    rollup = tmp_path / "smaps_rollup"
+    monkeypatch.setattr(diag, "SMAPS_ROLLUP", rollup)
+    rollup.write_text("Rss:       5000 kB\nPss_Anon: 2000 kB\nPss_File: 10 kB\nPss_Shmem: 0 kB\n")
+    run = SimpleNamespace(clock=diag.time.monotonic())
+    point = diag._memory_point(run)
+    assert (point["rss_bytes"], point["pss_anon_bytes"], point["pss_file_bytes"], point["pss_shmem_bytes"]) == (
+        5000 * 1024, 2000 * 1024, 10 * 1024, 0)
+    rollup.unlink()
+    point = diag._memory_point(run)
+    assert point["rss_bytes"] > 0 and "pss_anon_bytes" not in point
+
+
+def test_new_export_fields_filter_private_values_and_preserve_old_reports():
+    raw = {"phase": "audio", "status": "review"}
+    assert "model_memory" not in diag._safe_data(raw)
+    assert "gigaam_fragments" not in diag._safe_data(raw)
+    raw.update(model_memory={"before_models": {"rss_bytes": 25, "private": "private"}, "private": {}},
+               gigaam_fragments={"count": 4, "source_seconds": 3, "private": "private"},
+               llm=[{"phase": "protocol", "sdk_attempt_details": [
+                   {"attempt": 1, "seconds": .1, "http_status": 429, "error_kind": "private", "url": "private"},
+                   {"attempt": 2, "http_status": 200, "error_kind": "none"}]}])
+    safe = diag._safe_data(raw)
+    assert "private" not in json.dumps(safe)
+    assert safe["model_memory"]["before_models"] == {"rss_bytes": 25}
+    assert safe["gigaam_fragments"] == {"count": 4, "source_seconds": 3}
+    assert safe["llm"][0]["sdk_attempt_details"][0]["error_kind"] == "other"
+
+
+def test_retry_details_and_fragment_totals_survive_storage():
+    run = diag.begin_run("audio", "audio")
+    with diag.run_scope(run):
+        diag.record_gigaam_input(3200, 7200)
+        diag.record_gigaam_input(16000, 16000)
+    diag.finish_run(run, status="error")
+    protocol = diag.begin_run("protocol", "protocol")
+    with diag.run_scope(protocol):
+        diag.record_llm("protocol", {"sdk_attempts": 2, "sdk_attempt_details": [
+            {"attempt": 1, "http_status": 429, "error_kind": "rate_limit", "seconds": .5},
+            {"attempt": 2, "http_status": 200, "error_kind": "none", "seconds": .75, "gap_before_seconds": .1},
+        ], "omitted_sdk_attempts": 0})
+    diag.finish_run(protocol, status="done")
+    latest, audio = diag.export_report()["runs"]
+    assert audio["gigaam_fragments"] == {"count": 2, "under_one_second": 1, "source_seconds": 1.2,
+                                         "model_input_seconds": 1.45}
+    assert [a["http_status"] for a in latest["llm"][0]["sdk_attempt_details"]] == [429, 200]
+    assert latest["llm"][0]["omitted_sdk_attempts"] == 0
+    assert diag.summary()["recent_runs"][0]["sdk_retries"] == 1
+
+
 def test_no_sensitive_free_text_even_in_model_names_and_injected_storage(monkeypatch):
     secret = "PrivatePerson-secret-https://corp.internal/API_TOKEN"
     monkeypatch.setattr(config, "get_chat_model", lambda: f"MiniMax-M3/{secret}")

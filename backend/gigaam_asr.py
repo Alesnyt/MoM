@@ -11,7 +11,7 @@ import types
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config
+from . import config, diagnostics
 from .audio import open_pcm_audio, read_pcm_span
 from .performance import configure_torch_threads, stage_timer
 
@@ -244,6 +244,7 @@ def _transcribe_pcm(model: Any, frames: bytes) -> str:
         raise ValueError("GigaAM ожидает PCM16-фрагмент не длиннее 25 секунд")
     # Preserve short answers. Silence padding satisfies the model's minimum
     # acoustic window without leaking speech from a neighbouring speaker.
+    source_samples = len(frames) // 2
     minimum_bytes = int(0.45 * 16000) * 2
     if len(frames) < minimum_bytes:
         missing = (minimum_bytes - len(frames)) // 2
@@ -257,6 +258,7 @@ def _transcribe_pcm(model: Any, frames: bytes) -> str:
         pcm = torch.frombuffer(bytearray(frames), dtype=torch.int16).float() / 32768.0
         wav = pcm.to(device=inner._device, dtype=inner._dtype).unsqueeze(0)
         length = torch.full([1], wav.shape[-1], device=inner._device, dtype=torch.long)
+        diagnostics.record_gigaam_input(source_samples, len(frames) // 2)
         encoded, encoded_len = inner.forward(wav, length)
         text, _ = inner._decode(encoded, encoded_len, length, False)[0]
         return str(text).strip()

@@ -36,6 +36,7 @@ MAX_RUNS = 1000
 MAX_EXPORT_RUNS = 200
 MAX_EVENTS = 128
 MAX_LLM_CALLS = 256
+MAX_SDK_ATTEMPTS = 8
 MAX_SAMPLES = 360
 MAX_STORAGE_BYTES = 64 * 1024 * 1024
 MAX_REPORT_BYTES = 16 * 1024 * 1024
@@ -44,6 +45,12 @@ FLUSH_SECONDS = 15.0
 SQLITE_TIMEOUT = 0.15
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 PROC_CGROUP = Path("/proc/self/cgroup")
+SMAPS_ROLLUP = Path("/proc/self/smaps_rollup")
+MEMORY_POINTS = ("before_models", "before_gigaam", "after_gigaam", "before_whisper", "after_whisper",
+                 "before_diarization", "after_diarization",
+                 "before_idle_unload", "after_idle_unload")
+MEMORY_FIELDS = frozenset({"rss_bytes", "pss_anon_bytes", "pss_file_bytes", "pss_shmem_bytes", "offset_seconds", "torch_cpu_threads"})
+EMPTY_GIGAAM_STATS = {"count": 0, "under_one_second": 0, "source_seconds": 0., "model_input_seconds": 0.}
 
 STAGES = frozenset({
     "queue_wait", "upload_receive", "upload_save", "context_load", "context_apply",
@@ -81,6 +88,7 @@ SETTING_NUMBERS = frozenset({
 })
 _current: ContextVar[Run | None] = ContextVar("mom_diagnostic_run", default=None)
 _active: dict[str, Run] = {}
+_idle_run: Run | None = None
 _active_lock = threading.RLock()
 _storage_lock = threading.RLock()
 
@@ -377,7 +385,7 @@ def _bounded_payload(data: dict) -> str:
     return payload
 
 
-def _persist(run: Run, *, prune: bool = False) -> None:
+def _persist(run: Run, *, prune: bool = False, existing_only: bool = False) -> None:
     try:
         with _storage_lock, _connect() as conn:
             # Snapshot after acquiring the writer lock: a waiting sampler must
@@ -386,8 +394,11 @@ def _persist(run: Run, *, prune: bool = False) -> None:
                 payload = _bounded_payload(run.data)
             if len(payload) > MAX_PAYLOAD_BYTES or run.path != _path():
                 return
-            conn.execute("INSERT OR REPLACE INTO runs VALUES (?, ?, ?, ?, ?)",
-                         (run.id, run.meeting_key, run.started, time.time(), payload))
+            if existing_only:
+                conn.execute("UPDATE runs SET updated = ?, payload = ? WHERE id = ?", (time.time(), payload, run.id))
+            else:
+                conn.execute("INSERT OR REPLACE INTO runs VALUES (?, ?, ?, ?, ?)",
+                             (run.id, run.meeting_key, run.started, time.time(), payload))
             if prune:
                 _prune(conn, time.time())
     except Exception:
@@ -430,6 +441,99 @@ def run_scope(run: Run) -> Iterator[Run]:
         _current.reset(token)
 
 
+def _memory_point(run: Run) -> dict:
+    # smaps_rollup walks Linux page tables. Read only at model boundaries.
+    point = {"offset_seconds": round(max(0, time.monotonic() - run.clock), 6)}
+    fields = {"Rss": "rss_bytes", "Pss_Anon": "pss_anon_bytes",
+              "Pss_File": "pss_file_bytes", "Pss_Shmem": "pss_shmem_bytes"}
+    for name, value in re.findall(r"^(\w+):\s+(\d+) kB$", _read(SMAPS_ROLLUP), re.MULTILINE):
+        if name in fields:
+            point[fields[name]] = int(value) * 1024
+    if "rss_bytes" not in point:
+        try:
+            point["rss_bytes"] = psutil.Process().memory_info().rss
+        except (psutil.Error, OSError):
+            pass
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            point["torch_cpu_threads"] = torch.get_num_threads()
+        except Exception:
+            pass
+    return point
+
+
+def record_model_memory(point: str) -> None:
+    global _idle_run
+    run = _current.get()
+    if run is None or run.phase != "audio" or point not in MEMORY_POINTS:
+        return
+    try:
+        sample = _memory_point(run)
+        with run.lock:
+            if run.finished:
+                return
+            points = run.data.setdefault("model_memory", {})
+            if point.startswith("before_"):
+                points.setdefault("before_models", sample)
+            points[point] = sample
+            if point == "after_gigaam" and "gigaam_fragments" not in run.data:
+                run.data["gigaam_fragments"] = EMPTY_GIGAAM_STATS.copy()
+        # Called inside the shared local-model slot. Associate the next idle
+        # unload with its most recent user, even if another meeting finishes later.
+        with _active_lock:
+            _idle_run = run
+    except Exception:
+        log.debug("Model memory checkpoint unavailable")
+
+
+@contextmanager
+def idle_memory_scope() -> Iterator[None]:
+    global _idle_run
+    with _active_lock:
+        run = _idle_run
+    if run is None or not run.finished or run.path != _path():
+        yield
+        return
+    try:
+        before = _memory_point(run)
+    except Exception:
+        before = {}
+    yield  # If unloading fails, preserve the association for the next attempt.
+    with _active_lock:
+        if _idle_run is not run:
+            return
+        _idle_run = None
+    try:
+        after = _memory_point(run)
+        with run.lock:
+            points = run.data["model_memory"]
+            points["before_idle_unload"] = before
+            points["after_idle_unload"] = after
+        _persist(run, prune=True, existing_only=True)
+    except Exception:
+        log.debug("Idle memory checkpoint unavailable")
+
+
+def record_gigaam_input(source_samples: int, input_samples: int) -> None:
+    run = _current.get()
+    if run is None or run.phase != "audio":
+        return
+    try:
+        with run.lock:
+            if run.finished:
+                return
+            if "gigaam_fragments" not in run.data:
+                run.data["gigaam_fragments"] = EMPTY_GIGAAM_STATS.copy()
+            stats = run.data["gigaam_fragments"]
+            stats["count"] += 1
+            stats["under_one_second"] += int(source_samples < 16000)
+            stats["source_seconds"] += source_samples / 16000
+            stats["model_input_seconds"] += input_samples / 16000
+    except Exception:
+        log.debug("GigaAM fragment observation unavailable")
+
+
 def record_stage(stage: str, seconds: float, outcome: str = "ok") -> None:
     run = _current.get()
     value = _number(seconds)
@@ -459,6 +563,7 @@ def record_llm(phase: str, metrics: dict) -> None:
         return
     try:
         record = _numbers(metrics, LLM_NUMBERS)
+        record.update(_safe_attempts(metrics))
         for key, choices in LLM_ENUMS.items():
             if key in metrics:
                 record[key] = _enum(metrics[key], choices, LLM_ENUM_DEFAULTS[key])
@@ -473,6 +578,19 @@ def record_llm(phase: str, metrics: dict) -> None:
                 run.data["dropped"]["llm"] += 1
     except Exception:
         pass
+
+
+def _safe_attempts(event: dict) -> dict:
+    attempts = event.get("sdk_attempt_details")
+    if not isinstance(attempts, list):
+        return {}
+    result = []
+    for item in attempts[:MAX_SDK_ATTEMPTS]:
+        if isinstance(item, dict):
+            values = _numbers(item, frozenset({"attempt", "seconds", "gap_before_seconds", "http_status"}))
+            values["error_kind"] = _enum(item.get("error_kind"), LLM_ENUMS["error_kind"], "other")
+            result.append(values)
+    return {"sdk_attempt_details": result, "omitted_sdk_attempts": _number(event.get("omitted_sdk_attempts"))}
 
 
 def _resource_values() -> tuple[dict, float | None, tuple | None]:
@@ -630,6 +748,12 @@ def _safe_data(raw: dict) -> dict:
     stages = raw.get("stages")
     result["stages"] = {name: _numbers(values, frozenset({"count", "seconds", "interrupted"}))
                         for name, values in stages.items() if name in STAGES} if isinstance(stages, dict) else {}
+    memory = raw.get("model_memory")
+    if isinstance(memory, dict):
+        result["model_memory"] = {point: _numbers(memory[point], MEMORY_FIELDS) for point in MEMORY_POINTS
+                                  if isinstance(memory.get(point), dict)}
+    if isinstance(raw.get("gigaam_fragments"), dict):
+        result["gigaam_fragments"] = _numbers(raw["gigaam_fragments"], frozenset(EMPTY_GIGAAM_STATS))
     result["events"] = []
     for event in (raw.get("events") or [])[:MAX_EVENTS] if isinstance(raw.get("events"), list) else []:
         if isinstance(event, dict) and isinstance(event.get("stage"), str) and event["stage"] in STAGES:
@@ -639,6 +763,7 @@ def _safe_data(raw: dict) -> dict:
     for event in (raw.get("llm") or [])[:MAX_LLM_CALLS] if isinstance(raw.get("llm"), list) else []:
         if isinstance(event, dict) and isinstance(event.get("phase"), str) and event["phase"] in LLM_PHASES:
             record = {**_numbers(event, LLM_NUMBERS | {"offset_seconds"}), "phase": event["phase"]}
+            record.update(_safe_attempts(event))
             for key, choices in LLM_ENUMS.items():
                 if key in event:
                     record[key] = _enum(event[key], choices, LLM_ENUM_DEFAULTS[key])
@@ -708,11 +833,19 @@ def summary(days: int = 7) -> dict:
                 values.setdefault(stage, []).append(data["seconds"])
         if len(result["recent_runs"]) < 20:
             meeting = meetings.setdefault(key, f"meeting-{len(meetings) + 1:03d}")
+            calls = run["llm"]
+            retries = None
+            if calls and not run["dropped"].get("llm") and all(call.get("sdk_attempts") for call in calls):
+                retries = sum(call["sdk_attempts"] - 1 for call in calls)
             result["recent_runs"].append({"run": f"run-{result['runs']:03d}", "meeting": meeting,
                 "phase": run["phase"], "status": status, "started_at": started_at,
                 "elapsed_seconds": run.get("elapsed_seconds"), "audio_seconds": run.get("audio_seconds"),
                 "asr_rtf": run.get("asr_rtf"), "llm_calls": len(run["llm"]) + (run["dropped"].get("llm") or 0),
-                "peak_rss_bytes": run.get("peak_process_rss_bytes")})
+                "peak_rss_bytes": run.get("peak_process_rss_bytes"),
+                "after_idle_rss_bytes": run.get("model_memory", {}).get("after_idle_unload", {}).get("rss_bytes"),
+                "gigaam_fragments": run.get("gigaam_fragments", {}).get("count"),
+                "gigaam_source_seconds": run.get("gigaam_fragments", {}).get("source_seconds"),
+                "sdk_retries": retries})
     for stage, samples in values.items():
         samples.sort()
         result["stages"][stage] = {"samples": len(samples), "median_seconds": round(median(samples), 3),
@@ -728,6 +861,7 @@ def export_report(days: int = 7) -> dict:
               "exported_runs": 0, "truncated": False, "skipped_invalid_runs": 0, "runs": [],
               "limits": {"stored_runs": MAX_RUNS, "exported_runs": MAX_EXPORT_RUNS,
                          "stage_events_per_run": MAX_EVENTS, "llm_calls_per_run": MAX_LLM_CALLS,
+                         "sdk_attempt_details_per_call": MAX_SDK_ATTEMPTS,
                          "resource_samples_per_run": MAX_SAMPLES, "export_bytes": MAX_REPORT_BYTES},
               "semantics": {
                   "resources": "process_and_children_shared_by_concurrent_runs; peaks_are_sampled",
@@ -743,6 +877,9 @@ def export_report(days: int = 7) -> dict:
                   "model_refs": "opaque_hash_of_configured_model; no_paths_or_endpoint_addresses",
                   "asr_rtf": "ASR_seconds_including_model_load_divided_by_full_audio_seconds",
                   "resource_timeline": "decimated_when_bounded; peaks_include_all_samples",
+                  "model_memory": "main_process_only; before_first_local_stage_and_after_each_named_stage; idle_points_on_last_local_model_run_after_queue_idle",
+                  "gigaam_fragments": "attempted_inferences; source_PCM_and_padded_model_input_seconds; short_means_source_under_one_second",
+                  "sdk_attempt_details": "one_SDK_send_including_redirects; gap_includes_backoff_and_client_work; first_attempts_and_last_retained",
               }}
     if not available:
         report["error"] = "storage_unavailable"
