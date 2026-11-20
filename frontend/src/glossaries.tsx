@@ -6,7 +6,8 @@ import {formatDate} from './format';
 const fields: [keyof GlossaryMapping,string][] = [['term','Термин'],['description','Определение'],
   ['aliases','Синонимы и сокращения'],['department','Область / подразделение'],['replacements','Разрешённые замены в транскрипте']];
 
-export function GlossariesPanel() {
+export function GlossariesPanel({onBack}:{onBack?:()=>void}) {
+  const [view,setView] = useState<'list'|'search'|'import'>('list');
   const [data,setData] = useState<GlossaryCatalog|null>(null);
   const [query,setQuery] = useState(''); const [filter,setFilter] = useState(''); const [offset,setOffset] = useState(0);
   const [target,setTarget] = useState(''); const [file,setFile] = useState<File|null>(null);
@@ -17,7 +18,7 @@ export function GlossariesPanel() {
   useEffect(() => {
     const controller = new AbortController(); let timer: number;
     setSearching(true);
-    const refresh = () => getGlossaries(query,filter,offset,controller.signal).then(next => {
+    const refresh = () => getGlossaries(query,filter,offset,controller.signal,view==='search').then(next => {
       if (controller.signal.aborted) return;
       setData(next); setSearching(false); setLoadError('');
       if(offset>0 && offset>=next.matched_terms)setOffset(0);
@@ -28,7 +29,7 @@ export function GlossariesPanel() {
     });
     timer=window.setTimeout(refresh,query?250:0);
     return () => {controller.abort();window.clearTimeout(timer);};
-  },[query,filter,offset,reload]);
+  },[query,filter,offset,reload,view]);
 
   async function action(work: ()=>Promise<void>) {
     setBusy(true);setError('');setMessage('');
@@ -47,6 +48,15 @@ export function GlossariesPanel() {
     if (preview) await discardGlossaryPreview(preview.upload_id);
     setPreview(null);setFile(null);setFileKey(value=>value+1);setMapping({});setName('');
   }
+  function openSearch(id: string) {
+    setFilter(id);setQuery('');setOffset(0);setData(null);setView('search');setMessage('');setError('');
+  }
+  function openImport(id: string) {
+    setTarget(id);setFilter('');setQuery('');setOffset(0);setView('import');setMessage('');setError('');
+  }
+  function showList() {
+    setFilter('');setQuery('');setOffset(0);setView('list');
+  }
   function example() {
     const text='\ufeffТермин;Определение;Синонимы;Область;Замены\r\nDWH;Корпоративное хранилище данных;хранилище данных;Данные;\r\nTrueConf;Система видеоконференций;ВКС;ИТ;труконф|тру конф\r\n';
     const url=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'}));
@@ -54,18 +64,28 @@ export function GlossariesPanel() {
     window.setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
   return <section className="key-box glossary-panel">
-    <div className="glossary-heading"><div><h2>Корпоративные глоссарии</h2><p>Бизнес, данные и корпоративные термины. Каждый словарь обновляется отдельно.</p></div>
-      <button type="button" className="ghost" onClick={example}>Образец CSV</button></div>
+    {view==='list' ? onBack&&<button type="button" className="ghost" autoFocus disabled={busy} onClick={onBack}>← К контексту</button>
+      : <button type="button" className="ghost" disabled={busy} onClick={()=>{
+          if(view==='import') void action(async()=>{await reset();showList();});
+          else showList();
+        }}>{view==='import'&&preview?'Отменить загрузку и вернуться':'← К списку глоссариев'}</button>}
+    <h2>{view==='list'?'Корпоративные глоссарии':view==='import'?'Загрузить или обновить глоссарий':
+      filter?(data?.glossaries.find(g=>g.id===filter)?.name||'Термины глоссария'):'Поиск по всем глоссариям'}</h2>
     {(error||loadError)&&<div className="banner" role="alert">{error||loadError}</div>}
     {message&&<p role="status">{message}</p>}
     {!data&&!loadError&&<p role="status">Загружаю глоссарии…</p>}
-    {data&&<>
+    {view==='list'&&data&&<>
       <p>Терминов: {data.term_count.toLocaleString('ru-RU')}. Используется: {data.active_term_count.toLocaleString('ru-RU')}.</p>
+      <div className="composer-row">
+        <button type="button" className="primary" disabled={busy} onClick={()=>openImport('')}>Загрузить глоссарий</button>
+        <button type="button" className="ghost" disabled={busy} onClick={()=>openSearch('')}>Поиск по всем глоссариям</button>
+      </div>
       <div className="glossary-list">{data.glossaries.map(g=><article key={g.id} className="glossary-card">
         <label className="context-toggle"><input type="checkbox" checked={g.enabled} disabled={busy}
           onChange={event=>void action(()=>enableGlossary(g.id,event.target.checked))}/><strong>{g.name}</strong></label>
         <p>Терминов: {g.term_count.toLocaleString('ru-RU')} · {g.version?`Версия ${g.version}`:'Ещё не загружен'}{!g.enabled?' · Выключен':''}</p>
         {g.updated_at&&<small>Обновлён {formatDate(g.updated_at)}</small>}
+        <button type="button" className="ghost" disabled={busy} aria-label={`Открыть словарь «${g.name}»`} onClick={()=>openSearch(g.id)}>Открыть словарь</button>
       </article>)}</div>
       {data.jobs.slice(0,5).map(job=><div className={`glossary-job ${job.status==='error'?'health-warn':''}`} key={job.id}
         role={job.status==='error'?'alert':'status'}>
@@ -76,8 +96,8 @@ export function GlossariesPanel() {
         {job.error&&<p>{job.error}</p>}
       </div>)}
     </>}
-    <form className="glossary-import" onSubmit={event=>{event.preventDefault();void inspect();}} aria-busy={busy}>
-      <h3>Загрузить или обновить</h3>
+    {view==='import'&&<form className="glossary-import" onSubmit={event=>{event.preventDefault();void inspect();}} aria-busy={busy}>
+      <button type="button" className="ghost" onClick={example}>Образец CSV</button>
       <p>Excel (.xlsx) или CSV до 25 МБ. Всего до 100 000 терминов. Первая строка — названия столбцов.</p>
       <div className="glossary-fields">
         <label>Куда загрузить<select value={target} disabled={busy||!!preview} onChange={event=>setTarget(event.target.value)}>
@@ -108,13 +128,14 @@ export function GlossariesPanel() {
         <div className="composer-row">
           <button type="button" className="primary" disabled={busy||!mapping.term||!name.trim()} onClick={()=>void action(async()=>{
             await queueGlossary(preview,name,mapping);setPreview(null);setFile(null);setFileKey(value=>value+1);
-            setMessage('Импорт поставлен в очередь. Прогресс отображается выше.');
+            setMessage('Импорт поставлен в очередь.');showList();
           })}>{busy?'Подготавливаю…':target?'Обновить этот глоссарий':'Добавить глоссарий'}</button>
           <button type="button" className="ghost" disabled={busy} onClick={()=>void action(reset)}>Отменить загрузку</button>
         </div>
       </>}
-    </form>
-    {data&&<>
+    </form>}
+    {view==='search'&&data&&<>
+      {filter&&filter!=='discovered-terms'&&<button type="button" className="ghost" onClick={()=>openImport(filter)}>Обновить глоссарий</button>}
       <div className="glossary-fields glossary-search">
         <label>Поиск по глоссариям<input type="search" value={query} placeholder="Часть термина, сокращение или определение"
           onChange={event=>{setQuery(event.target.value);setOffset(0);}}/></label>
@@ -128,7 +149,7 @@ export function GlossariesPanel() {
           <td>{entry.description.length>350?<details><summary>{entry.description.slice(0,150)}…</summary>{entry.description}</details>:entry.description||'—'}</td>
           <td>{entry.aliases.join(', ')||'—'}</td><td>{entry.replacements.join(', ')||'—'}</td><td>{entry.department||'Общее'}</td></tr>)}</tbody>
       </table></div>
-      {!data.terms.length&&<p>{query?'Совпадений нет. Попробуйте часть названия или сокращение.':'Загрузите первый глоссарий.'}</p>}
+      {!data.terms.length&&<p>{query?'Совпадений нет. Попробуйте часть названия или сокращение.':filter?'В этом глоссарии пока нет терминов.':'В глоссариях пока нет терминов.'}</p>}
       <div className="composer-row glossary-pages"><button type="button" className="ghost" disabled={!offset||searching} onClick={()=>setOffset(value=>Math.max(0,value-100))}>Назад</button>
         <span>{data.matched_terms?`${offset+1}–${Math.min(offset+100,data.matched_terms)} из ${data.matched_terms}`:'0 терминов'}</span>
         <button type="button" className="ghost" disabled={offset+100>=data.matched_terms||searching} onClick={()=>setOffset(value=>value+100)}>Далее</button></div>

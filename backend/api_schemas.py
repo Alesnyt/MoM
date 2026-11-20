@@ -38,7 +38,7 @@ class TermReviewItem(BaseModel):
 
 class TermReviewIn(BaseModel):
     items: list[TermReviewItem] = Field(min_length=1, max_length=20)
-    action: Literal['approve', 'reject', 'defer', 'reopen']
+    action: Literal['approve', 'reject', 'defer', 'reopen', 'hide_forms', 'restore_forms']
     canonical: str = Field(default='', max_length=240)
     description: str = Field(default='', max_length=4000)
     department: str = Field(default='', max_length=120)

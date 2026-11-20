@@ -23,7 +23,8 @@ test('mapping preview queues one independent glossary and leaves existing glossa
     if(url==='/api/admin/glossaries/preview'){assert.equal(options.body.get('glossary_id'),'');return Response.json(preview);}
     assert.equal(url,'/api/admin/glossaries/import');queued=JSON.parse(options.body);return Response.json({status:'queued'},{status:202});
   };
-  const view=render(React.createElement(GlossariesPanel));await view.findByText('DWH');
+  const view=render(React.createElement(GlossariesPanel));
+  fireEvent.click(await view.findByRole('button',{name:'Загрузить глоссарий'}));
   fireEvent.change(view.getByLabelText('Файл глоссария'),{target:{files:[new window.File(['csv'],'business.csv')]}});
   fireEvent.click(view.getByRole('button',{name:'Проверить файл'}));
   assert.equal((await view.findByLabelText('Термин *')).value,'Название');
@@ -31,8 +32,9 @@ test('mapping preview queues one independent glossary and leaves existing glossa
   fireEvent.click(view.getByRole('button',{name:'Добавить глоссарий'}));
   await waitFor(()=>assert.equal(queued?.name,'Бизнес'));
   assert.deepEqual(queued.mapping,preview.mapping);
-  assert.ok(view.getByText('DWH'));
   assert.ok(await view.findByText(/Импорт поставлен в очередь/));
+  fireEvent.click(view.getByRole('button',{name:'Открыть словарь «Данные»'}));
+  assert.ok(await view.findByText('DWH'));
 });
 
 test('update targets only selected glossary and failed toggle preserves checkbox',async()=>{
@@ -42,10 +44,12 @@ test('update targets only selected glossary and failed toggle preserves checkbox
     assert.equal(url,'/api/admin/glossaries/data/enabled');
     return Response.json({detail:'Не удалось сохранить настройку'},{status:503});
   };
-  const view=render(React.createElement(GlossariesPanel));await view.findByText('DWH');
+  const view=render(React.createElement(GlossariesPanel));await view.findByRole('checkbox',{name:'Данные'});
   fireEvent.click(view.getByRole('checkbox',{name:'Данные'}));
   await view.findByRole('alert');assert.equal(view.getByRole('checkbox',{name:'Данные'}).checked,true);
-  fireEvent.change(view.getByLabelText('Куда загрузить'),{target:{value:'data'}});
+  fireEvent.click(view.getByRole('button',{name:'Открыть словарь «Данные»'}));
+  fireEvent.click(await view.findByRole('button',{name:'Обновить глоссарий'}));
+  assert.equal(view.getByLabelText('Куда загрузить').value,'data');
   fireEvent.change(view.getByLabelText('Файл глоссария'),{target:{files:[new window.File(['csv'],'data.csv')]}});
   fireEvent.click(view.getByRole('button',{name:'Проверить файл'}));
   assert.ok(await view.findByRole('button',{name:'Обновить этот глоссарий'}));
@@ -58,7 +62,9 @@ test('background import survives remount and reports failure without hiding prev
   const view=render(React.createElement(GlossariesPanel));await view.findByRole('progressbar');
   state={...state,jobs:[{...state.jobs[0],status:'error',error:'Строка 301: термин уже есть в этой области'}]};
   await waitFor(()=>assert.match(view.getByRole('alert').textContent,/Строка 301/),{timeout:3500});
-  assert.ok(view.getByText('DWH'));assert.equal(view.queryByRole('progressbar'),null);
+  assert.equal(view.queryByRole('progressbar'),null);
+  fireEvent.click(view.getByRole('button',{name:'Открыть словарь «Данные»'}));
+  assert.ok(await view.findByText('DWH'));
 });
 
 test('search ignores an obsolete response and shows a visible searching state',async()=>{
@@ -67,7 +73,8 @@ test('search ignores an obsolete response and shows a visible searching state',a
     if(String(url).includes('q=old'))return new Promise(resolve=>{resolveOld=resolve;});
     return Response.json(String(url).includes('q=new')?{...catalog,terms:[],matched_terms:0}:catalog);
   };
-  const view=render(React.createElement(GlossariesPanel));await view.findByText('DWH');
+  const view=render(React.createElement(GlossariesPanel));
+  fireEvent.click(await view.findByRole('button',{name:'Поиск по всем глоссариям'}));await view.findByText('DWH');
   const search=view.getByLabelText('Поиск по глоссариям');
   fireEvent.change(search,{target:{value:'old'}});assert.ok(await view.findByText('Поиск…'));
   await waitFor(()=>assert.ok(resolveOld));

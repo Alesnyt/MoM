@@ -23,6 +23,9 @@ test('requires selected variants and explicit spelling; correction is opt-in',as
   };
   const view=render(React.createElement(TermDiscoveryPanel));
   const approve=await view.findByRole('button',{name:'Подтвердить выбранные'});assert.equal(approve.disabled,true);
+  assert.equal(view.getByRole('button',{name:'На проверке. Вариантов — 2'}).textContent,'На проверке · 2');
+  assert.ok(view.getByText(/Варианты со сходным звучанием/));
+  assert.equal(view.queryByRole('button',{name:/Обычное слово/}),null);
   assert.equal(view.getByLabelText('Правильное написание').value,'');
   fireEvent.click(view.getByRole('checkbox',{name:/^файн би/}));
   assert.equal(approve.disabled,true);
@@ -30,6 +33,81 @@ test('requires selected variants and explicit spelling; correction is opt-in',as
   fireEvent.click(approve);await waitFor(()=>assert.ok(saved));
   assert.deepEqual(saved.items,[{id:'v1',revision:1}]);assert.equal(saved.replace_text,false);
   assert.equal(saved.canonical,'FineBI');
+});
+
+test('a word-form card hides and restores the full family with its original evidence', async () => {
+  const family = {key:'ru-project', form_label:'проект', meetings:2, variants:[
+    {...variant, id:'first', variant:'проекта', examples:[
+      {id:11, title:'Обсуждение сроков', excerpt:'Сроки проекта изменились.', start:65, audio:true}]},
+    {...variant, id:'second', variant:'проектами', examples:[]},
+  ]};
+  const actions = [];
+  let hidden = false;
+  globalThis.fetch = async (url, options) => {
+    const request = new URL(String(url), 'http://localhost');
+    if (request.pathname.endsWith('/review')) {
+      const action = JSON.parse(options.body);
+      actions.push(action);
+      hidden = action.action === 'hide_forms';
+      return Response.json({ok:true});
+    }
+    const show = request.searchParams.get('state') === (hidden ? 'ordinary' : 'pending');
+    return Response.json({...catalog, counts:{pending:hidden ? 0 : 2, ordinary:hidden ? 2 : 0},
+      group_counts:{pending:hidden ? 0 : 1, ordinary:hidden ? 1 : 0},
+      total:show ? 1 : 0, proposals:show ? [family] : []});
+  };
+  const view = render(React.createElement(TermDiscoveryPanel));
+  await view.findByRole('heading', {name:'проект'});
+  assert.equal(view.getByRole('button',{name:'На проверке. Карточек — 1'}).textContent,'На проверке · 1');
+  assert.ok(view.getByText(/Словоформы из реплик/));
+  assert.equal(view.getAllByRole('checkbox', {name:/^проект/}).length, 2);
+  fireEvent.click(view.getByRole('button', {name:/Обычное слово/}));
+  await view.findByText('В этом разделе предложений пока нет.');
+  fireEvent.click(view.getByRole('button', {name:'Скрытые слова. Карточек — 1'}));
+  const restore = await view.findByRole('button', {name:'Вернуть слово и его формы'});
+  assert.equal(view.queryByLabelText('Правильное написание'), null);
+  assert.ok(view.getByText('Сроки проекта изменились.'));
+  assert.ok(view.getByText('Обсуждение сроков · 1:05'));
+  fireEvent.click(restore);
+  await view.findByText('В этом разделе предложений пока нет.');
+  fireEvent.click(view.getByRole('button', {name:/На проверке/}));
+  await view.findByRole('heading', {name:'проект'});
+  assert.deepEqual(actions, [
+    {action:'hide_forms', items:[{id:'first', revision:1}]},
+    {action:'restore_forms', items:[{id:'first', revision:1}]},
+  ]);
+});
+
+test('can reopen the 21st rejected spelling without changing any of the first 20', async () => {
+  const first = Array.from({length:20},(_,i)=>({...variant,id:'v'+i,variant:'Форма '+i,examples:[]}));
+  const last = {...variant,id:'last',revision:2,variant:'Последняя форма',examples:[]};
+  const group = 'form:NOUN:пример';
+  let reviewed;
+  globalThis.fetch = async (url,options) => {
+    const {pathname,searchParams} = new URL(String(url),'http://localhost');
+    if (pathname.endsWith('/review')) {
+      reviewed = JSON.parse(options.body);
+      return Response.json({ok:true});
+    }
+    if (pathname.endsWith('/variants')) {
+      assert.equal(searchParams.get('group'),group);
+      assert.equal(searchParams.get('state'),'rejected');
+      assert.equal(searchParams.get('offset'),'20');
+      return Response.json({variants:reviewed ? [] : [last],has_more:false});
+    }
+    const proposals = searchParams.get('state') === 'rejected'
+      ? [{key:group,form_label:'пример',meetings:0,variants:first,has_more:!reviewed}] : [];
+    return Response.json({...catalog,proposals,total:proposals.length});
+  };
+  const view = render(React.createElement(TermDiscoveryPanel));
+  fireEvent.click(await view.findByRole('button',{name:/Отклонённые/}));
+  fireEvent.click(await view.findByRole('button',{name:'Следующие варианты'}));
+  fireEvent.click(await view.findByRole('checkbox',{name:/Последняя форма/}));
+  fireEvent.click(view.getByRole('button',{name:'Вернуть на проверку'}));
+  await view.findByRole('checkbox',{name:/^Форма 0 /});
+  assert.deepEqual(reviewed.items,[{id:'last',revision:2}]);
+  assert.equal(reviewed.action,'reopen');
+  assert.equal(view.queryByRole('button',{name:'Следующие варианты'}),null);
 });
 
 test('failed approval retains selection and draft, retry can enable correction and scope',async()=>{
@@ -57,11 +135,13 @@ test('schedule persists chosen Moscow time and shows paused progress after remou
     if(String(url).includes('term-discovery?'))return Response.json(data);
     saved=JSON.parse(opts.body);return Response.json({ok:true});
   };
-  let view=render(React.createElement(TermDiscoveryPanel));await view.findByText('Ожидаю завершения обработки встреч');
+  let view=render(React.createElement(TermDiscoveryPanel));
+  fireEvent.click(await view.findByText(/Настройки и ход анализа · Ожидаю завершения обработки встреч/));
   fireEvent.change(view.getByLabelText('Время анализа (Москва, UTC+3)'),{target:{value:'22:10'}});
   fireEvent.click(view.getByRole('button',{name:'Сохранить расписание анализа'}));await waitFor(()=>assert.equal(saved.run_time,'22:10'));
   assert.equal(saved.max_batches,100);
   view.unmount();data={...data,job:{...data.job,run_time:'22:10'}};view=render(React.createElement(TermDiscoveryPanel));
+  fireEvent.click(await view.findByText(/Настройки и ход анализа/));
   assert.equal((await view.findByLabelText('Время анализа (Москва, UTC+3)')).value,'22:10');
   assert.match(view.getByText(/Порций: 7/).textContent,/Новых вариантов: 2/);
 });
