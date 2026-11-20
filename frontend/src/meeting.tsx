@@ -32,7 +32,7 @@ export function MeetingPane({
   mailEnabled: boolean;
   directoryEnabled?: boolean;
   onTab: (tab: Tab) => void;
-  onRetry: () => void;
+  onRetry: (revision?: string) => void;
   onStop: () => void;
   onRestart: () => void;
   onDelete: () => void;
@@ -164,9 +164,15 @@ export function MeetingPane({
           )}
           {(meeting.status === "error" || meeting.status === "done") && (
             <button className="ghost" onClick={() => {
-              if (!rawResult?.edited_manually || window.confirm("Собрать протокол заново и заменить сохранённые правки?")) onRetry();
+              if (rawResult?.edited_manually) {
+                if (meeting.result_revision && window.confirm("Собрать протокол по текущей разметке и заменить сохранённые правки?")) {
+                  onRetry(meeting.result_revision);
+                }
+              } else {
+                onRetry();
+              }
             }}>
-              {(meeting.status === "error" || meeting.source_type === "text") && meeting.transcript ? "Собрать протокол" : "Повторить"}
+              {(rawResult?.edited_manually || meeting.status === "error" || meeting.source_type === "text") && meeting.transcript ? "Собрать протокол" : "Повторить"}
             </button>
           )}
           {!processing && (
@@ -196,7 +202,7 @@ export function MeetingPane({
         <div className="error-card">
           <strong>Не удалось прочитать сохранённый протокол</strong>
           <p>Ответ модели имеет неверный формат. Сформируйте протокол заново.</p>
-          <button onClick={onRetry}>Повторить обработку</button>
+          <button onClick={() => onRetry()}>Повторить обработку</button>
           <TranscriptView meeting={meeting} onUpdated={onUpdated} directoryEnabled={directoryEnabled} />
         </div>
       )}
@@ -206,6 +212,7 @@ export function MeetingPane({
           onSaved={next => { onUpdated(next); setEditing(null); setMailNote("Правки протокола сохранены."); }} />}
       {!editing && result && meeting.status === "done" && (
         <>
+          {meeting.error && <p className="banner" role="alert">Сохранена предыдущая редакция протокола. {meeting.error}</p>}
           {meeting.status_message && meeting.status_message !== "Готово" &&
             <p className="progress-hint" role="status">{meeting.status_message}</p>}
           {(meeting.speakers || []).some((speaker) => speaker.send_protocol) && <p className="progress-hint">

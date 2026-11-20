@@ -153,8 +153,8 @@ def _finish_failed_job(meeting_id: str) -> None:
         control.finish(meeting_id)
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting["status"] in {"extracting", "transcribing", "analyzing"}:
-        store.update_meeting(meeting_id, status="error", status_message="Обработка не удалась",
-                             error="Временный сбой очереди. Повторите обработку встречи.")
+        store.finish_processing_error(meeting_id, status_message="Обработка не удалась",
+                                      error="Временный сбой очереди. Повторите обработку встречи.")
 
 
 async def _run_job_scoped(meeting_id: str) -> None:
@@ -166,9 +166,8 @@ async def _run_job_scoped(meeting_id: str) -> None:
         log.exception("Обработка прервалась")
         meeting = await background.run_sync(store.get_meeting, meeting_id)
         if meeting and meeting.get("status") not in {"done", "error"}:
-            await background.run_sync(store.update_meeting,
+            await background.run_sync(store.finish_processing_error,
                 meeting_id,
-                status="error",
                 status_message="Обработка не удалась",
                 error="Внутренняя ошибка очереди",
             )
@@ -176,7 +175,7 @@ async def _run_job_scoped(meeting_id: str) -> None:
         if control.is_stopped(meeting_id):
             await background.run_sync(control.finish, meeting_id)
         meeting = await background.run_sync(store.get_meeting, meeting_id)
-        if meeting and meeting["status"] == "error":
+        if meeting and (meeting["status"] == "error" or (meeting["status"] == "done" and meeting.get("error"))):
             if meeting["status_message"] != "Остановлено":
                 record_outcome("error")
             if meeting.get("user_id"):

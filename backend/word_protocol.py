@@ -49,7 +49,7 @@ def to_docx(meeting: dict, result: dict) -> bytes:
     document.styles["Normal"].paragraph_format.space_after = Pt(6)
 
     title = _text(result["title"] or meeting["title"])
-    document.core_properties.title = title
+    document.core_properties.title = title[:255]  # OOXML core property limit; the heading keeps the full title.
     document.add_heading(title, 0)
     if result["date_hint"]:
         document.add_paragraph("Дата встречи: " + _text(result["date_hint"]))

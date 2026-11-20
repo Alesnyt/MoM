@@ -62,19 +62,9 @@ def finish(meeting_id: str) -> str:
     if not stopped and not restart:
         return ""
     if restart:
-        meeting = store.get_meeting(meeting_id) or {}
-        keep = meeting.get("source_type") == "text"
-        transcript_fields = {} if keep else {"transcript": None, "transcript_segments": None, "language": None}
-        store.update_meeting(
-            meeting_id,
-            status="queued",
-            status_message="Повторная обработка в очереди",
-            error=None,
-            result=None,
-            **transcript_fields,
-            progress=88 if keep else 0,
-            queued_at=store.utc_now(),
-        )
+        meeting = store.get_meeting(meeting_id)
+        if meeting:
+            store.queue_reprocessing(meeting)
         _applied.add(meeting_id)
         _stop.discard(meeting_id)
         _restart.discard(meeting_id)
@@ -86,9 +76,8 @@ def finish(meeting_id: str) -> str:
         return "restart"
     meeting = store.get_meeting(meeting_id)
     if meeting and meeting.get("status") != "done":
-        store.update_meeting(
+        store.finish_processing_error(
             meeting_id,
-            status="error",
             status_message="Остановлено",
             error="Обработка остановлена",
             progress=0,

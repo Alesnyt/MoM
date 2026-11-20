@@ -94,3 +94,22 @@ test('archive updates during editing keep the draft paired with the revision it 
   await view.findByRole('alert');
   assert.equal(sent.revision, 'revision1');
 });
+
+test('a manual protocol is rebuilt only after confirming the displayed revision', () => {
+  const requested = [];
+  const meeting = { ...initial, transcript: 'Текст', source_type: 'audio',
+    result: { ...initial.result, edited_manually: true } };
+  const view = render(React.createElement(MeetingPane, { meeting, tab: 'overview', onRetry: rev => requested.push(rev) }));
+  const rebuild = view.getByRole('button', { name: 'Собрать протокол' });
+  const original = window.confirm;
+  try {
+    window.confirm = () => false;
+    fireEvent.click(rebuild);
+    assert.deepEqual(requested, []);
+    window.confirm = () => true;
+    fireEvent.click(rebuild);
+    assert.deepEqual(requested, ['revision1']);
+  } finally {
+    window.confirm = original;
+  }
+});

@@ -1,7 +1,10 @@
+import asyncio
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from email import policy
+from email.parser import BytesParser
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,7 +13,7 @@ import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 
-from backend import auth, config, main, protocol_editor as editor, store
+from backend import auth, config, control, main, pipeline, protocol_editor as editor, store
 
 PATH = "/api/meetings/ready"
 ORIGINAL = {
@@ -60,6 +63,95 @@ def test_edits_reach_exports_and_preserve_evidence_only_for_unchanged_facts(api)
     doc = Document(BytesIO(client.get(PATH + "/export.docx").content))
     assert draft["summary"] in [p.text for p in doc.paragraphs]
     assert client.get(PATH + "/email.eml").status_code == 200
+
+
+@pytest.mark.parametrize("length", [255, 256, 600])
+def test_long_edited_title_in_word_and_email_attachment(api, length):
+    client, payload = api
+    title = ("Региональный план " * 40)[:length]
+    payload["result"]["title"] = title
+    assert client.patch(PATH + "/protocol", json=payload).json()["title"] == title
+    word = client.get(PATH + "/export.docx")
+    eml = client.get(PATH + "/email.eml")
+    assert word.status_code == eml.status_code == 200
+    message = BytesParser(policy=policy.default).parsebytes(eml.content)
+    for content in (word.content, next(message.iter_attachments()).get_payload(decode=True)):
+        document = Document(BytesIO(content))
+        assert document.core_properties.title == title[:255]
+        assert document.paragraphs[0].text == title
+
+
+def test_correcting_speakers_keeps_manual_protocol_until_confirmed_rebuild(api, monkeypatch):
+    client, payload = api
+    document = {"speakers": [{"id": "S1", "name": "Иван"}, {"id": "S2", "name": "Анна"}],
+                "segments": [{"speaker": "S1", "text": "Предлагаю план", "start": 0, "end": 2}]}
+    store.update_meeting("ready", transcript_segments=document)
+    manual = client.patch(PATH + "/protocol", json=payload).json()
+    changed = client.patch(PATH + "/segments", json={"segment_indexes": [0], "speaker_id": "S2"}).json()
+    renamed = client.patch(PATH + "/speakers/S1", json={"name": "Денис"}).json()
+    for meeting in (changed, renamed):
+        assert meeting["segments"][0]["speaker"] == "S2" and "Анна" in meeting["transcript"]
+        assert meeting["status"] == "done" and meeting["result"] == manual["result"]
+        assert meeting["result_revision"] == manual["result_revision"]
+    assert store.claim_next_meeting(1) is None
+
+    monkeypatch.setattr(main.keys, "snapshot", lambda: {"connected": True})
+    assert client.post(PATH + "/retry").status_code == 409
+    assert client.post(PATH + "/retry", params={"revision": payload["revision"]}).status_code == 409
+    params = {"revision": manual["result_revision"]}
+    queued = client.post(PATH + "/retry", params=params).json()
+    assert queued["status"] == "queued" and queued["result"] == manual["result"]
+    assert queued["transcript"] == renamed["transcript"]
+    assert client.post(PATH + "/restart").json()["result_revision"] == params["revision"]
+    assert client.post(PATH + "/stop").json()["status"] == "done"
+
+    # Simulate a process restart and a model failure after the queued job was claimed.
+    assert client.post(PATH + "/retry", params=params).status_code == 200
+    assert store.claim_next_meeting(1) == "ready"
+    assert store.requeue_interrupted_meetings() == 1
+    assert store.claim_next_meeting(1) == "ready"
+    monkeypatch.setattr(config, "get_api_key", lambda: "test")
+    monkeypatch.setattr(config, "smtp_configured", lambda: False)
+    monkeypatch.setattr(pipeline, "make_client", lambda key: object())
+
+    async def review(client, document, **kwargs):
+        return document
+
+    monkeypatch.setattr(pipeline, "review_names", review)
+    model = AsyncMock(side_effect=RuntimeError("model unavailable"))
+    monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", model)
+    asyncio.run(pipeline._process_meeting("ready"))
+    model.assert_awaited_once()
+    failed = client.get(PATH).json()
+    assert failed["status"] == "done" and failed["result_revision"] == params["revision"]
+    assert failed["error"] and failed["status_message"] == "Обработка не удалась"
+    assert client.get(PATH + "/export.docx").status_code == 200
+
+    assert client.post(PATH + "/retry", params=params).status_code == 200
+    assert store.claim_next_meeting(1) == "ready"
+    model.side_effect = None
+    model.return_value = {**ORIGINAL, "summary": "Новая редакция"}
+    asyncio.run(pipeline._process_meeting("ready"))
+    rebuilt = client.get(PATH).json()
+    assert rebuilt["status"] == "done" and rebuilt["error"] is None
+    assert rebuilt["result"]["summary"] == "Новая редакция" and rebuilt["result_revision"] != params["revision"]
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_stopping_running_manual_rebuild_preserves_revision_and_speakers(api, monkeypatch, restart):
+    client, payload = api
+    saved = client.patch(PATH + "/protocol", json=payload).json()
+    monkeypatch.setattr(main.keys, "snapshot", lambda: {"connected": True})
+    assert client.post(PATH + "/retry", params={"revision": saved["result_revision"]}).status_code == 200
+    assert store.claim_next_meeting(1) == "ready"
+    try:
+        control.request_stop("ready", restart=restart)
+        control.finish("ready")
+    finally:
+        control.release("ready")
+    row = client.get(PATH).json()
+    assert row["status"] == ("queued" if restart else "done")
+    assert row["result_revision"] == saved["result_revision"] and row["transcript"] == saved["transcript"]
 
 
 def test_two_simultaneous_saves_cannot_overwrite_each_other(api):
