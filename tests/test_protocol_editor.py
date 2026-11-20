@@ -254,3 +254,16 @@ def test_duplicate_proof_request_releases_slot_even_after_failure(monkeypatch):
                 with editor.proofread_slot("third"):
                     pytest.fail("Model capacity exceeded")
             assert err.value.status_code == 429
+
+
+def test_plain_legacy_summary_and_literal_markup_stay_readable_in_exports(api):
+    from backend import summary_format
+    client, payload = api
+    url = PATH + "/protocol"
+    source = "**буквально** <пример> & условия\n2. Строка исходного протокола"
+    assert client.patch(url, json={"revision": payload["revision"], "summary": source}).is_success
+    assert source in client.get(PATH + "/email.txt").text
+    word = Document(BytesIO(client.get(PATH + "/export.docx").content))
+    assert all(s in [p.text for p in word.paragraphs] for s in source.splitlines())
+    assert "&lt;пример&gt;" in summary_format.html("<пример>")
+    assert "<em>важно</em>" in summary_format.html("*важно*")

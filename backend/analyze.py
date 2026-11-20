@@ -142,6 +142,10 @@ class ProtocolResult(ProtocolModel):
         return [entry for entry in value if isinstance(entry, dict) and isinstance(entry.get("decision"), str)]
 
 
+class StoredProtocolResult(ProtocolResult):
+    summary_format: Literal["plain", "markdown"] = "plain"
+
+
 def _parse_result(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     if text.startswith("```"):

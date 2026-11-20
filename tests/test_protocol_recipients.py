@@ -529,3 +529,46 @@ def test_merge_after_manual_edit_preserves_the_authored_protocol(delivery):
     merged = client.post(f"/api/meetings/{meeting['id']}/speakers/S1/merge", json={"target_id": "S2"})
     assert merged.is_success
     assert merged.json()["result"] == result and merged.json()["status"] == "done"
+
+
+@pytest.mark.parametrize("copies", [1, 8], ids=["regional-pilot", "long-document"])
+def test_formatted_summary_roundtrip_with_nested_lists_and_group_delivery(delivery, copies):
+    from pathlib import Path
+    from docx.oxml.ns import qn
+
+    client, meeting, sent = delivery
+    mid = meeting["id"]
+    sample = (Path(__file__).parent / "fixtures/summary-pilot.md").read_text().strip()
+    source = "\n\n".join([sample] * copies) + "\n\nПоследняя строка документа."
+    original = main.ProtocolResult(title="Региональный пилот", summary="Исходный текст").model_dump()
+    mail.complete_protocol(meeting, result=original)
+    url = f"/api/meetings/{mid}"
+    revision = client.get(url).json()["result_revision"]
+    response = client.patch(url + "/protocol", json={"revision": revision, "summary": source, "summary_format": "markdown"})
+    assert response.is_success
+    saved = client.get(url).json()
+    assert saved["result"]["summary"] == source
+    assert saved["result"]["summary_format"] == "markdown"
+    assert source in client.get(url + "/export.md").text
+    assert not mail.deliver_pending() and not sent
+    addresses = ["north@example.test", "east@example.test"]
+    assert confirm(client, mid, addresses, saved["result_revision"]).is_success
+    assert mail.deliver_pending() and len(sent) == 1
+    recipients, _, body, packet = sent[0]
+    assert recipients == addresses
+    assert "  2. Сверяет даты" in body and "**" not in body and "###" not in body
+    assert "<strong>Главный вывод.</strong>" in packet["html"] and "<em>Открытый вопрос.</em>" in packet["html"]
+    assert packet["html"].count("<ol>") == 3 * copies and packet["html"].count("<ul>") == 2 * copies
+    assert "8 встреч, 2 показателя" in body and "8 встреч, 2 показателя" in packet["html"]
+    for data in [packet["attachment"][1], client.get(url + "/export.docx").content]:
+        doc = Document(BytesIO(data))
+        paragraphs = doc.paragraphs
+        assert any(p.text == "Итоги пилота в регионах" and p.style.name == "Heading 2" for p in paragraphs)
+        assert any(run.bold and run.text == "Главный вывод." for p in paragraphs for run in p.runs)
+        assert any(run.italic and run.text == "Открытый вопрос." for p in paragraphs for run in p.runs)
+        listed = [p for p in paragraphs if p._p.xpath("w:pPr/w:numPr/w:numId")]
+        assert len(listed) == 12 * copies
+        assert listed[1].paragraph_format.left_indent > listed[0].paragraph_format.left_indent
+        num_ids = [p._p.xpath("w:pPr/w:numPr/w:numId")[0].get(qn("w:val")) for p in listed]
+        assert num_ids[-1] == num_ids[-2] and num_ids[-1] != num_ids[5]
+        assert any(p.text == "Последняя строка документа." for p in paragraphs)

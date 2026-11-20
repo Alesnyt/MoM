@@ -8,6 +8,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
+from . import summary_format
 from .audio import format_duration
 
 MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -22,6 +23,34 @@ def _text(value: str) -> str:
 def docx_filename(title: str) -> str:
     name = " ".join("".join(char if char.isalnum() or char in " -_" else " " for char in title).split())[:80]
     return f"{name or 'Протокол'}.docx"
+
+
+def _add_summary(document, result: dict) -> None:
+    numbering = document.part.numbering_part.element
+    numbers = {}
+    for block in summary_format.paragraphs(result):
+        paragraph = document.add_paragraph(style="Heading 2" if block.heading else "Normal")
+        if block.depth:
+            paragraph.paragraph_format.left_indent = Cm(.65 * block.depth)
+        if block.item:
+            marker = block.item
+            if marker.list_id not in numbers:
+                style = "List Bullet" if marker.number is None else "List Number"
+                template_id = document.styles[style].element.pPr.numPr.numId.val
+                abstract_id = numbering.num_having_numId(template_id).abstractNumId.val
+                num = numbering.add_num(abstract_id)
+                num.add_lvlOverride(0).add_startOverride(marker.number if marker.number is not None else 1)
+                numbers[marker.list_id] = num.numId
+            properties = paragraph._p.get_or_add_pPr().get_or_add_numPr()
+            properties.get_or_add_ilvl().val = 0
+            properties.get_or_add_numId().val = numbers[marker.list_id]
+            paragraph.paragraph_format.first_line_indent = Cm(-.45)
+        for span in block.spans:
+            run = paragraph.add_run(_text(span.text))
+            if span.bold:
+                run.bold = True
+            if span.italic:
+                run.italic = True
 
 
 def to_docx(meeting: dict, result: dict) -> bytes:
@@ -67,9 +96,7 @@ def to_docx(meeting: dict, result: dict) -> bytes:
                 paragraph.add_run("\n" + _text(job_title))
 
     document.add_heading("Саммари", 1)
-    summary_lines = [line.strip() for line in result["summary"].splitlines() if line.strip()]
-    for line in summary_lines or ["Саммари отсутствует."]:
-        document.add_paragraph(_text(line))
+    _add_summary(document, result)
     for label, entries in (("Принятые решения", result["decisions"]), ("Контекст и открытые вопросы", result["key_points"])):
         if entries:
             document.add_heading(label, 1)

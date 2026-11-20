@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { apiRequest } from "./http";
 import { priorityLabel } from "./format";
 import type { ActionItem, AgendaItem, Meeting, MeetingResult } from "./types";
+
+const SummaryEditor = lazy(() => import("./summary-editor").then(module => ({ default: module.SummaryEditor })));
 
 type Suggestion = { field: string; before: string; after: string; reason: string };
 type Props = {
@@ -54,7 +56,7 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
       const response = await apiRequest(mode === "check" ? path + "/proofread" : path, {
         method: mode === "check" ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(summaryOnly ? { revision, summary: draft.summary } : { revision, result: draft }),
+        body: JSON.stringify(summaryOnly ? { revision, summary: draft.summary, summary_format: draft.summary_format } : { revision, result: draft }),
         signal: controller.signal,
       });
       const data = await response.json();
@@ -80,9 +82,15 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
     const props = { className: "title-input", value: text, required: options.required, lang: "ru",
       onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => change(update(e.target.value), path) };
     return <div className="editor-field" key={path}>
-      <label className="field-label">{label}
-        {options.rows ? <textarea {...props} rows={options.rows} autoFocus={summaryOnly} /> : <input {...props} />}
-      </label>
+      {path === "summary" ? <>
+        {!summaryOnly && <h3>Саммари</h3>}
+        <Suspense fallback={<p role="status">Открываю редактор…</p>}>
+          <SummaryEditor value={text} format={draft.summary_format ?? "plain"} disabled={busy !== null} autoFocus={summaryOnly}
+            onChange={summary => change({ ...draft, summary, summary_format: "markdown" }, path)} />
+        </Suspense>
+      </> : <label className="field-label">{label}
+        {options.rows ? <textarea {...props} rows={options.rows} /> : <input {...props} />}
+      </label>}
       {suggestions.filter(s => s.field === path).map((s, index) =>
         <div className="proof-suggestion" key={index}>
           <div><del>{s.before}</del> → <ins>{s.after}</ins></div><p>{s.reason}</p>
@@ -102,7 +110,7 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
     </div>;
   }
 
-  const summaryField = textField("summary", "Саммари", draft.summary, summary => ({ ...draft, summary }), { rows: summaryOnly ? 9 : 5 });
+  const summaryField = textField("summary", "Саммари", draft.summary, summary => ({ ...draft, summary }));
   return <form className="protocol-editor" aria-label={summaryOnly ? "Редактор саммари" : "Редактор протокола"} onSubmit={e => {
     e.preventDefault(); void submit("save");
   }}>

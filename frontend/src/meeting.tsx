@@ -4,6 +4,7 @@ import { copyForWord } from "./copy";
 import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
 import { isProtocolResult } from "./protocol";
 import { TranscriptView } from "./transcript";
+import { summaryMarkdown } from "./summary-markup";
 import { ProtocolEditor } from "./protocol-editor";
 import { ProtocolRecipients } from "./recipients";
 import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
@@ -464,7 +465,9 @@ function SummarySections({ result, heading: Heading, onSource, onEditSummary }: 
   return <>
     <section className="summary">
       <Heading>Саммари</Heading>
-      {paragraphs.length ? paragraphs.map((para, index) => <p key={index}>{para}</p>) : <p>Саммари отсутствует.</p>}
+      {result.summary_format === "markdown" && result.summary.trim()
+        ? <div className="summary-content" dangerouslySetInnerHTML={{ __html: summaryMarkdown.render(result.summary) }} />
+        : paragraphs.length ? paragraphs.map((para, index) => <p key={index}>{para}</p>) : <p>Саммари отсутствует.</p>}
       {onEditSummary && <button className="ghost" type="button" onClick={onEditSummary}>Редактировать саммари</button>}
     </section>
     {([

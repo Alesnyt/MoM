@@ -57,7 +57,7 @@ from .api_schemas import (
 
 from . import audit, auth, config, diagnostics, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
 from .audio import AudioError, audio_source, ffmpeg_available, looks_like_audio, playback_clip
-from .analyze import ProtocolResult
+from .analyze import ProtocolResult, StoredProtocolResult
 from . import transcript_import, upload, corporate_context, glossary, term_discovery
 from . import word_protocol, context_api, calendar_api, calendar_service
 from .exchange_ews import ExchangeError
@@ -1061,6 +1061,8 @@ def save_protocol(meeting_id: str, payload: protocol_editor.EditRequest | protoc
         _editable_protocol(meeting, payload.revision)
         if isinstance(payload, protocol_editor.SummaryEditRequest):
             result = {**meeting["result"], "summary": payload.summary, "edited_manually": True}
+            if payload.summary_format is not None:
+                result["summary_format"] = payload.summary_format
             store.update_meeting(meeting_id, connection=connection, result=result)
         else:
             result = protocol_editor.edited_result(meeting["result"], payload.result)
@@ -1324,7 +1326,7 @@ def export_word(meeting_id: str, user: dict = Depends(require_user)) -> Response
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
     try:
-        result = ProtocolResult.model_validate(meeting["result"]).model_dump()
+        result = StoredProtocolResult.model_validate(meeting["result"]).model_dump()
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
     filename = quote(word_protocol.docx_filename(result["title"] or meeting["title"]), safe="")

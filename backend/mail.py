@@ -10,8 +10,8 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate
 
-from . import config, control, protocol_email, retention, store, word_protocol
-from .analyze import ProtocolResult
+from . import config, control, protocol_email, retention, store, summary_format, word_protocol
+from .analyze import StoredProtocolResult
 from .speakers import SpeakerError, clean_speaker_email, participant_labels
 
 log = logging.getLogger("mom.mail")
@@ -40,7 +40,7 @@ def email_body(meeting: dict) -> str:
     if participants:
         lines.append(f"Участники: {', '.join(participants)}")
     lines.append("")
-    lines.append((result.get("summary") or "").strip() or "Саммари отсутствует.")
+    lines.append(summary_format.plain_text(result))
     key_points = result.get("key_points") or []
     if key_points:
         lines.append("")
@@ -77,7 +77,7 @@ class ProtocolMail:
 
 
 def prepare_protocol_mail(meeting: dict) -> ProtocolMail:
-    result = ProtocolResult.model_validate(meeting["result"]).model_dump()
+    result = StoredProtocolResult.model_validate(meeting["result"]).model_dump()
     filename = word_protocol.docx_filename(result["title"] or meeting["title"])
     public_url = protocol_email.meeting_url(config.get_public_base_url())
     body = email_body({**meeting, "result": result}) + f"\nВо вложении: {filename}\n"

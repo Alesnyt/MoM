@@ -4,6 +4,7 @@ from __future__ import annotations
 from html import escape
 from urllib.parse import urlsplit
 
+from . import summary_format
 from .audio import format_duration
 from .speakers import participant_labels
 from .word_protocol import PRIORITY_LABELS
@@ -29,8 +30,11 @@ def render_html(meeting: dict, result: dict, filename: str, public_url: str = ""
             lines.append(f'<p style="{paragraph}"><strong>{label}:</strong> {escape(value)}</p>')
 
     lines.append(f'<h2 style="{heading}">Саммари</h2>')
-    summary = [line.strip() for line in result["summary"].splitlines() if line.strip()]
-    lines.extend(f'<p style="{paragraph}">{escape(line)}</p>' for line in summary or ["Саммари отсутствует."])
+    if result.get("summary_format") == "markdown":
+        lines.append(summary_format.html(result["summary"]))
+    else:
+        summary = [line.strip() for line in result["summary"].splitlines() if line.strip()]
+        lines.extend(f'<p style="{paragraph}">{escape(line)}</p>' for line in summary or [summary_format.EMPTY])
     for label, items in (("Принятые решения", result["decisions"]),
                          ("Контекст и открытые вопросы", result["key_points"])):
         if items:

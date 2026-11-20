@@ -43,6 +43,7 @@ export type MeetingResult = {
   participants: string[];
   date_hint: string | null;
   summary: string;
+  summary_format?: "plain" | "markdown";
   key_points: string[];
   decisions: string[];
   decision_sources?: { decision: string; turns: number[] }[];
