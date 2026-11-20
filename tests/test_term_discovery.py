@@ -41,6 +41,46 @@ def decide(v,action='approve',canonical='FineBI',replace=False,department=''):
     td.review([{'id':v['id'],'revision':v['revision']}],action,canonical,'Отчётность',department,replace,'admin')
 
 
+def test_overview_and_bulk_rejection_across_pages(db, monkeypatch):
+    client = TestClient(main.app)
+    meeting()
+    pending = [(f'v{i}', f'group-{i // 2}', 'pending', 0) for i in range(50)]
+    extra = [('due', 'group-0', 'deferred', 1), ('later', 'later', 'deferred', td.time.time() + 3600),
+             ('ok', 'known', 'approved', 0), ('hidden', 'hidden', 'ordinary', 0), ('no', 'no', 'rejected', 0)]
+    with store.connect() as conn:
+        conn.executemany("""INSERT INTO term_candidates(id,normalized,variant,group_key,state,snooze_until,created_at)
+            VALUES(:id,:id,:id,:grp,:state,:until,'2026-01-01')""",
+            [dict(id=cid, grp=grp, state=state, until=until) for cid, grp, state, until in pending + extra])
+        conn.execute("INSERT INTO term_evidence(candidate_id,meeting_id,turn,excerpt) VALUES('v49','m1',0,'Пример')")
+    glossary.import_legacy([dict(term='DWH', aliases=[], description='', department='')], 'admin')
+    url = '/api/admin/context?overview=true'
+    with monkeypatch.context() as patch:
+        patch.setattr(glossary, 'catalog', lambda *a, **kw: pytest.fail('overview loaded glossary entries'))
+        patch.setattr(td, 'snapshot', lambda *a, **kw: pytest.fail('overview loaded proposal evidence'))
+        summary = client.get(url).json()
+    assert summary['pending_groups'] == 25 and summary['glossary_count'] == summary['term_count'] == 1
+    assert 'terms' not in summary and 'proposals' not in summary
+    assert client.get('/api/admin/glossaries?include_terms=false').json()['terms'] == []
+    assert client.get('/api/admin/glossaries').json()['terms'][0]['term'] == 'DWH'
+    endpoint = '/api/admin/term-discovery/reject-pending'
+    response = client.post(endpoint)
+    assert response.status_code == 200 and response.json() == {'groups': 25, 'variants': 51}
+    assert client.get(url).json()['pending_groups'] == 0
+    assert client.post(endpoint).json() == {'groups': 0, 'variants': 0}
+    with store.connect() as conn:
+        counts = dict(conn.execute('SELECT state,count(*) FROM term_candidates GROUP BY state'))
+        assert counts == {'rejected':52, 'deferred':1, 'approved':1, 'ordinary':1}
+        assert conn.execute("SELECT count(*) FROM audit_events WHERE action='terms.reject_pending' AND actor='admin'").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM term_evidence WHERE candidate_id='v49'").fetchone()[0] == 1
+    with pytest.raises(ValueError, match='изменилось'):
+        td.review([{'id':'v49','revision':1}], 'approve', 'Test', '', '', False, 'admin')
+    td.review([{'id':'v49','revision':2}], 'reopen', '', '', '', False, 'admin')
+    assert client.get(url).json()['pending_groups'] == 1
+    monkeypatch.delitem(main.app.dependency_overrides,main.require_admin)
+    assert client.post(endpoint).status_code in (401,403)
+    assert client.get(url).status_code in (401,403)
+
+
 def test_unrecognized_terms_are_proposals_only_until_explicit_approval(db):
     meeting();v=collect()
     assert not glossary.catalog()['terms']

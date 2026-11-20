@@ -89,7 +89,7 @@ def _entry(row) -> dict:
             for key in row.keys() if key not in ('search_text', 'identity', 'generation')}
 
 
-def catalog(query: str = '', glossary_id: str = '', offset: int = 0) -> dict:
+def catalog(query: str = '', glossary_id: str = '', offset: int = 0, *, include_terms: bool = True) -> dict:
     needle = normalize(query)
     with store.connect() as conn:
         conn.execute('BEGIN')
@@ -127,8 +127,10 @@ def catalog(query: str = '', glossary_id: str = '', offset: int = 0) -> dict:
                 _count_cache.move_to_end(count_key)
                 while len(_count_cache)>128: _count_cache.popitem(last=False)
         order = 'glossary_fts.rowid' if needle and indexed else 'e.id'
-        rows = conn.execute(f'SELECT e.*,g.name AS glossary_name,g.enabled FROM {join} WHERE {clause} ORDER BY {order} LIMIT 100 OFFSET ?',
-                            (*params, offset)).fetchall()
+        rows = []
+        if include_terms:
+            rows = conn.execute(f'SELECT e.*,g.name AS glossary_name,g.enabled FROM {join} WHERE {clause} ORDER BY {order} LIMIT 100 OFFSET ?',
+                                (*params, offset)).fetchall()
         jobs = [dict(row) for row in conn.execute("SELECT j.id,j.glossary_id,j.filename,j.status,j.received,j.error,j.finished_at FROM glossary_imports j WHERE j.status!='preview' AND NOT EXISTS(SELECT 1 FROM glossary_imports newer WHERE newer.glossary_id=j.glossary_id AND newer.status!='preview' AND newer.created>j.created) ORDER BY j.created DESC LIMIT 30")]
         return {'glossaries': sources, 'terms': [_entry(row) for row in rows], 'matched_terms': count,
                 'term_count': sum(s['term_count'] for s in sources),

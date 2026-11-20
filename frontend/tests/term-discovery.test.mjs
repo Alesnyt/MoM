@@ -103,11 +103,13 @@ test('schedule persists chosen Moscow time and shows paused progress after remou
     if(String(url).includes('term-discovery?'))return Response.json(data);
     saved=JSON.parse(opts.body);return Response.json({ok:true});
   };
-  let view=render(React.createElement(TermDiscoveryPanel));await view.findByText('Ожидаю завершения обработки встреч');
+  let view=render(React.createElement(TermDiscoveryPanel));
+  fireEvent.click(await view.findByText(/Настройки и ход анализа · Ожидаю завершения обработки встреч/));
   fireEvent.change(view.getByLabelText('Время анализа (Москва, UTC+3)'),{target:{value:'22:10'}});
   fireEvent.click(view.getByRole('button',{name:'Сохранить расписание анализа'}));await waitFor(()=>assert.equal(saved.run_time,'22:10'));
   assert.equal(saved.max_batches,100);
   view.unmount();data={...data,job:{...data.job,run_time:'22:10'}};view=render(React.createElement(TermDiscoveryPanel));
+  fireEvent.click(await view.findByText(/Настройки и ход анализа/));
   assert.equal((await view.findByLabelText('Время анализа (Москва, UTC+3)')).value,'22:10');
   assert.match(view.getByText(/Порций: 7/).textContent,/Новых вариантов: 2/);
 });

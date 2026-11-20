@@ -71,26 +71,35 @@ def directory_signature(policy: dict | None = None) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
-def snapshot(query: str = "") -> dict:
+def snapshot(query: str = "", *, overview: bool = False) -> dict:
     data = _read()
-    job = _sync_job(data)
     signature = directory_signature()
     matches = data.get("directory_signature") == signature
+    directory = {"enabled": data["enabled"], "use_ad": data["use_ad"], "directory_current": matches,
+                 "people_count": len(data["people"]) if matches else 0, "synced_at": data.get("synced_at")}
+    if overview:
+        from .term_discovery import pending_groups
+        with store.connect() as conn:
+            conn.execute("BEGIN")
+            sources, terms = conn.execute("""SELECT count(*), coalesce(sum(term_count),0)
+                FROM glossaries WHERE generation IS NOT NULL""").fetchone()
+            return {**directory, "glossary_count": sources, "term_count": terms,
+                    "pending_groups": pending_groups(conn)}
+    job = _sync_job(data)
     now = time.time()
     next_sync = _next_sync_at({**data, **job}, now, signature) if data["sync_ad"] and config.ldap_configured() else None
     interrupted = job.get("status") == "running" and job.get("sync_until", 0) <= now
     progress = {**job.get("progress", {}), "status": "interrupted" if interrupted else job.get("status", "idle"),
                 "started_at": job.get("started_at"), "finished_at": job.get("finished_at")}
     vocabulary = glossary.catalog(query)
-    return {"enabled": data["enabled"], "use_ad": data["use_ad"], "sync_ad": data["sync_ad"], "revision": data["revision"] + vocabulary["revision"],
+    return {**directory, "sync_ad": data["sync_ad"], "revision": data["revision"] + vocabulary["revision"],
             "sync_time": data["sync_time"], "sync_timezone": "UTC+3",
             "directory_policy": directory_scope.sync_policy(),
             "search_mode": directory_scope.speaker_search_mode(),
             "search_cache_ready": bool(matches and data.get("synced_at") and config.ldap_configured()),
             "next_sync_at": datetime.fromtimestamp(max(now, next_sync), timezone.utc).isoformat() if next_sync is not None else None,
-            "term_count": vocabulary["term_count"], "people_count": len(data["people"]) if matches else 0,
-            "directory_current": matches, "ldap_configured": config.ldap_configured(),
-            "synced_at": data.get("synced_at"), "imported_at": data.get("imported_at"),
+            "term_count": vocabulary["term_count"], "ldap_configured": config.ldap_configured(),
+            "imported_at": data.get("imported_at"),
             "sync_error": "Обновление прервано: процесс перестал отвечать. Запустите обновление снова; предыдущий кэш сохранён."
                           if interrupted else job.get("sync_error"),
             "syncing": job.get("status") == "queued" or (job.get("sync_until", 0) > now),
@@ -141,7 +150,7 @@ def search_people(query: str, limit: int = 20) -> tuple[list[dict], str | None]:
 
 
 def save_settings(enabled: bool | None, sync_ad: bool | None, actor: str, *, sync_time: str | None = None,
-                  use_ad: bool | None = None) -> dict:
+                  use_ad: bool | None = None, overview: bool = False) -> dict:
     if sync_time is not None and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", sync_time):
         raise ValueError("Укажите время синхронизации в формате ЧЧ:ММ")
     data = _read()
@@ -154,7 +163,7 @@ def save_settings(enabled: bool | None, sync_ad: bool | None, actor: str, *, syn
     _update(**changes)
     store.record_audit(actor, "ldap.schedule" if enabled is None else "context.settings",
                        detail=json.dumps(changes, ensure_ascii=False))
-    return snapshot()
+    return snapshot(overview=overview)
 
 
 def _next_sync_at(data: dict, now: float, signature: str) -> float:

@@ -390,10 +390,41 @@ async def run(stop: asyncio.Event):
         except TimeoutError: pass
 
 
+def pending_groups(conn) -> int:
+    return conn.execute("""SELECT count(DISTINCT group_key) FROM term_candidates
+        WHERE state='pending' OR (state='deferred' AND snooze_until<=?)""", (time.time(),)).fetchone()[0]
+
+
+def _resume_due(conn):
+    conn.execute("UPDATE term_candidates SET state='pending',revision=revision+1 WHERE state='deferred' AND snooze_until<=?",
+                 (time.time(),))
+
+
+def _audit_review(conn, actor: str, action: str, target: str, detail: str) -> None:
+    conn.execute('INSERT INTO audit_events(at,actor,action,target,detail) VALUES(?,?,?,?,?)',
+                 (store.utc_now(), actor, 'terms.' + action, target, detail))
+    conn.execute('DELETE FROM audit_events WHERE id NOT IN (SELECT id FROM audit_events ORDER BY id DESC LIMIT ?)',
+                 (store.AUDIT_KEEP,))
+
+
+def reject_pending(actor: str) -> dict:
+    with store.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _resume_due(conn)
+        groups = conn.execute("SELECT count(DISTINCT group_key) FROM term_candidates WHERE state='pending'").fetchone()[0]
+        now = store.utc_now()
+        variants = conn.execute("""UPDATE term_candidates SET state='rejected',revision=revision+1,
+            reviewed_at=?,actor=?,replace_text=0,snooze_until=0 WHERE state='pending'""", (now, actor)).rowcount
+        result = {"groups": groups, "variants": variants}
+        if variants:
+            _audit_review(conn, actor, 'reject_pending', 'pending', json.dumps(result))
+        return result
+
+
 def snapshot(state: str = 'pending', offset: int = 0) -> dict:
     if state not in ('pending','approved','rejected','deferred','ordinary'): raise ValueError('Неизвестный раздел предложений')
     with store.connect() as conn:
-        conn.execute("UPDATE term_candidates SET state='pending',revision=revision+1 WHERE state='deferred' AND snooze_until<=?",(time.time(),))
+        _resume_due(conn)
         job = dict(conn.execute('SELECT * FROM term_discovery').fetchone())
         job.pop('owner'); job.pop('lease')
         job['enabled'] = bool(job['enabled'])
@@ -520,7 +551,4 @@ def review(items: list[dict], action: str, canonical: str, description: str, dep
                  department if action=='approve' else row['department'],int(replace_text) if action=='approve' else 0,
                  time.time()+7*86400 if action=='defer' else 0,store.utc_now(),actor,item['id']))
         if publish: _publish_rules(conn)
-        conn.execute('INSERT INTO audit_events(at,actor,action,target,detail) VALUES(?,?,?,?,?)',
-                     (store.utc_now(),actor,'terms.'+action,','.join(i['id'] for i in items),canonical[:240]))
-        conn.execute('DELETE FROM audit_events WHERE id NOT IN (SELECT id FROM audit_events ORDER BY id DESC LIMIT ?)',
-                     (store.AUDIT_KEEP,))
+        _audit_review(conn, actor, action, ','.join(i['id'] for i in items), canonical[:240])

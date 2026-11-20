@@ -18,13 +18,16 @@ export type CorporateContext = {
     current_base?: string | null; started_at?: string | null; finished_at?: string | null};
 };
 
-export async function getCorporateContext(query: string, signal?: AbortSignal): Promise<CorporateContext> {
-  const response = await apiRequest(`/api/admin/context?q=${encodeURIComponent(query)}`, {credentials: "include", signal});
+export type ContextOverview = Pick<CorporateContext, 'enabled'|'use_ad'|'directory_current'|'people_count'|'synced_at'|'term_count'>
+  & {pending_groups:number; glossary_count:number};
+
+export async function getContextOverview(signal?: AbortSignal): Promise<ContextOverview> {
+  const response = await apiRequest('/api/admin/context?overview=true', {credentials: "include", signal});
   return response.json();
 }
 
-export async function saveCorporateContext(enabled: boolean, use_ad: boolean): Promise<CorporateContext> {
-  const response = await apiRequest("/api/admin/context/settings", {method: "POST", credentials: "include",
+export async function saveCorporateContext(enabled: boolean, use_ad: boolean): Promise<ContextOverview> {
+  const response = await apiRequest("/api/admin/context/settings?overview=true", {method: "POST", credentials: "include",
     headers: {"Content-Type": "application/json"}, body: JSON.stringify({enabled, use_ad})});
   return response.json();
 }
@@ -556,8 +559,8 @@ export type GlossaryCatalog = {glossaries: Glossary[]; terms: (CorporateTerm & {
 export type GlossaryPreview = {upload_id: string; columns: string[]; sample: string[][]; mapping: GlossaryMapping;
   sheets: string[]; sheet: string; name: string};
 
-export async function getGlossaries(query = '', glossaryId = '', offset = 0, signal?: AbortSignal): Promise<GlossaryCatalog> {
-  const response = await apiRequest(`/api/admin/glossaries?q=${encodeURIComponent(query)}&glossary_id=${encodeURIComponent(glossaryId)}&offset=${offset}`, {credentials:'include',signal});
+export async function getGlossaries(query = '', glossaryId = '', offset = 0, signal?: AbortSignal, includeTerms = true): Promise<GlossaryCatalog> {
+  const response = await apiRequest(`/api/admin/glossaries?q=${encodeURIComponent(query)}&glossary_id=${encodeURIComponent(glossaryId)}&offset=${offset}${includeTerms ? '' : '&include_terms=false'}`, {credentials:'include',signal});
   return response.json();
 }
 export async function previewGlossary(file: File, glossaryId: string, sheet: string): Promise<GlossaryPreview> {
@@ -591,4 +594,9 @@ export async function termDiscoveryAction(action:'settings'|'scan'|'stop'|'revie
   await apiRequest(`/api/admin/term-discovery/${action}`,{method:'POST',credentials:'include',
     headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
 
+}
+
+export async function rejectPendingTerms(): Promise<{groups:number; variants:number}> {
+  const response = await apiRequest('/api/admin/term-discovery/reject-pending', {method:'POST',credentials:'include'});
+  return response.json();
 }

@@ -18,14 +18,14 @@ def create_router(require_admin) -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/admin/context")
-    def get_context(q: str = Query(default="", max_length=200), _admin: dict = Depends(require_admin)) -> dict:
-        return corporate_context.snapshot(q)
+    def get_context(q: str = Query(default="", max_length=200), overview: bool = False, _admin: dict = Depends(require_admin)) -> dict:
+        return corporate_context.snapshot(q, overview=overview)
 
 
     @router.post("/api/admin/context/settings")
-    def save_context(payload: ContextSettingsIn, admin: dict = Depends(require_admin)) -> dict:
+    def save_context(payload: ContextSettingsIn, overview: bool = False, admin: dict = Depends(require_admin)) -> dict:
         return corporate_context.save_settings(payload.enabled, payload.sync_ad, admin["username"],
-                                               sync_time=payload.sync_time, use_ad=payload.use_ad)
+                                               sync_time=payload.sync_time, use_ad=payload.use_ad, overview=overview)
 
 
     @router.get("/api/admin/directory/cache")
@@ -85,8 +85,9 @@ def create_router(require_admin) -> APIRouter:
 
     @router.get("/api/admin/glossaries")
     def get_glossaries(q: str = Query(default="", max_length=200), glossary_id: str = Query(default="", max_length=64),
-                       offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)) -> dict:
-        return glossary.catalog(q, glossary_id, offset)
+                       offset: int = Query(default=0, ge=0, le=100000), include_terms: bool = True,
+                       _admin: dict = Depends(require_admin)) -> dict:
+        return glossary.catalog(q, glossary_id, offset, include_terms=include_terms)
 
 
     @router.post("/api/admin/glossaries/preview")
@@ -155,6 +156,10 @@ def create_router(require_admin) -> APIRouter:
         store.record_audit(admin['username'],'terms.stop')
         return {'ok':True}
 
+
+    @router.post('/api/admin/term-discovery/reject-pending')
+    def reject_pending_terms(admin: dict = Depends(require_admin)):
+        return term_discovery.reject_pending(admin['username'])
 
     @router.post('/api/admin/term-discovery/review')
     def review_terms(payload: TermReviewIn, admin: dict = Depends(require_admin)):

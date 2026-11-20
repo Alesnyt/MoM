@@ -12,7 +12,7 @@ const {CorporateContextPanel} = loadSource('corporate-context.tsx');
 const {DirectoryCachePanel} = loadSource('directory-cache.tsx');
 const originalFetch = globalThis.fetch;
 afterEach(() => {cleanup(); globalThis.fetch = originalFetch;});
-const initial = {enabled:true,use_ad:true,sync_ad:true,revision:1,term_count:1,people_count:20,directory_current:true,
+const initial = {enabled:true,use_ad:true,sync_ad:true,revision:1,term_count:1,glossary_count:1,pending_groups:2,people_count:20,directory_current:true,
   search_mode:'live',search_cache_ready:false,
   directory_policy:{fields:['job_title','department','surname'],domains:[],ldap_filter:'(!(userAccountControl:1.2.840.113556.1.4.803:=2))'},
   sync_time:'03:00',sync_timezone:'UTC+3',next_sync_at:'2026-11-12T00:00:00Z',
@@ -23,23 +23,79 @@ const discovery = {job:{enabled:true,run_time:'03:30',max_batches:100,next_run_a
 const vocabulary = {glossaries:[], jobs:[],term_count:1,active_term_count:1,matched_terms:1,revision:1,
   terms:initial.terms.map(e=>({...e,id:1,glossary_name:'Корпоративный',enabled:true,replacements:[]}))};
 
+test('context opens compactly and clears all pages only after confirmation', async()=>{
+  const overview='/api/admin/context?overview=true';
+  const calls=[];
+  let pending=23, rejections=0;
+  globalThis.fetch=async(url,opts)=>{
+    calls.push(url);
+    if(url===overview)return Response.json({...initial,pending_groups:pending});
+    if(url==='/api/admin/term-discovery/reject-pending'){
+      assert.equal(opts.method,'POST');
+      rejections++;
+      if(rejections===1)return Response.json({detail:'Повторите запрос'},{status:503});
+      const groups=pending;pending=0;return Response.json({groups,variants:41});
+    }
+    if(String(url).startsWith('/api/admin/term-discovery?'))return Response.json({...discovery,total:pending,
+      counts:{pending:pending?41:0},group_counts:{pending},proposals:[]});
+    if(String(url).startsWith('/api/admin/glossaries?'))return Response.json({...vocabulary,
+      glossaries:[{name:'Системы',id:'systems',version:1,enabled:true,term_count:1}]});
+    throw Error('Unexpected '+url);
+  };
+  const view=render(React.createElement(CorporateContextPanel));
+  await view.findByText('23');
+  assert.deepEqual(calls,[overview]);
+  assert.equal(view.queryByLabelText('Поиск по глоссариям'),null);
+  assert.equal(view.queryByRole('button',{name:'Отклонить все'}),null);
+  fireEvent.click(view.getByRole('button',{name:'Перейти к разбору'}));
+  fireEvent.click(await view.findByRole('button',{name:'Следующие предложения'}));
+  await waitFor(()=>assert.ok(calls.some(url=>String(url).includes('offset=20'))));
+  fireEvent.click(view.getByRole('button',{name:'Отклонить все'}));
+  fireEvent.click(view.getByRole('button',{name:'Отмена'}));
+  assert.equal(rejections,0);
+  fireEvent.click(view.getByRole('button',{name:'Отклонить все'}));
+  const confirm=()=>view.getByRole('button',{name:'Подтвердить отклонение всех'});
+  fireEvent.click(confirm());
+  await view.findByRole('alert');
+  assert.equal(pending,23);
+  fireEvent.click(confirm());
+  await view.findByText('Отклонено карточек — 23.');
+  await view.findByText('В этом разделе предложений пока нет.');
+  assert.equal(view.queryByRole('button',{name:'Отклонить все'}),null);
+  fireEvent.click(view.getByRole('button',{name:/К контексту/}));
+  await view.findByText('0');
+  assert.equal(document.activeElement,view.getByRole('button',{name:'Перейти к разбору'}));
+  fireEvent.click(view.getByRole('button',{name:'Открыть глоссарии'}));
+  const open=await view.findByRole('button',{name:'Открыть словарь «Системы»'});
+  assert.match(calls.at(-1),/include_terms=false/);
+  assert.equal(view.queryByRole('searchbox'),null);
+  assert.equal(view.queryByLabelText('Файл глоссария'),null);
+  fireEvent.click(open);
+  await view.findByRole('searchbox');
+  assert.match(calls.at(-1),/glossary_id=systems/);
+  assert.ok(!calls.at(-1).includes('include_terms=false'));
+});
+
 test('dictionary preview errors remain visible and leave previous terms usable', async () => {
   let previews=0;
   globalThis.fetch=async (url,options)=> {
     if(String(url).startsWith('/api/admin/term-discovery?'))return Response.json(discovery);
-    if(String(url).startsWith('/api/admin/context?q='))return Response.json(initial);
+    if(url==='/api/admin/context?overview=true')return Response.json(initial);
     if(String(url).startsWith('/api/admin/glossaries?'))return Response.json(vocabulary);
     assert.equal(url,'/api/admin/glossaries/preview');
     assert.equal(options.body.get('file').name,'terms.csv');previews++;
     return Response.json({detail:'Не удалось прочитать CSV'},{status:400});
   };
   const view=render(React.createElement(CorporateContextPanel));
-  await view.findByText('TrueConf');
+  fireEvent.click(await view.findByRole('button',{name:'Открыть глоссарии'}));
+  fireEvent.click(await view.findByRole('button',{name:'Загрузить глоссарий'}));
   fireEvent.change(view.getByLabelText('Файл глоссария'),{target:{files:[new window.File(['bad'],'terms.csv')]}});
   fireEvent.click(view.getByRole('button',{name:'Проверить файл'}));
   await waitFor(()=>assert.equal(previews,1));
   assert.equal((await view.findByRole('alert')).textContent,'Не удалось прочитать CSV');
-  assert.ok(view.getByText('TrueConf'));
+  fireEvent.click(view.getByRole('button',{name:/К списку глоссариев/}));
+  fireEvent.click(await view.findByRole('button',{name:'Поиск по всем глоссариям'}));
+  assert.ok(await view.findByText('TrueConf'));
 });
 
 test('admin can persist a daily sync time without changing it during other settings updates', async () => {
@@ -71,11 +127,11 @@ test('admin can persist a daily sync time without changing it during other setti
 test('context controls consumption only; toggling AD does not change cache or search settings', async () => {
   let current = {...initial}, writes = [];
   globalThis.fetch = async (url, options) => {
-    if (url === '/api/admin/context/settings') {
+    if (url === '/api/admin/context/settings?overview=true') {
       const body = JSON.parse(options.body); writes.push(body); current = {...current, ...body};
     } else if(String(url).startsWith('/api/admin/term-discovery?')) return Response.json(discovery);
     else if(String(url).startsWith('/api/admin/glossaries?')) return Response.json(vocabulary);
-    else assert.ok(String(url).startsWith('/api/admin/context?q='));
+    else assert.equal(url,'/api/admin/context?overview=true');
     return Response.json(current);
   };
   const view = render(React.createElement(CorporateContextPanel));
@@ -86,7 +142,7 @@ test('context controls consumption only; toggling AD does not change cache or se
   assert.equal(view.queryByRole('button', {name:'Синхронизировать AD'}), null);
   assert.equal(view.queryByRole('radio', {name:'Локальный кэш AD'}), null);
   assert.equal(view.queryByLabelText('Время запуска'), null);
-  assert.ok(await view.findByText('TrueConf'));
+  assert.equal(view.queryByText('TrueConf'),null);
 });
 
 test('directory fields, domains and LDAP filter survive refreshes and are applied before a sync', async () => {

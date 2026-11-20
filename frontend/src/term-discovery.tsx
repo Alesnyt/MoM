@@ -1,14 +1,15 @@
 import {useEffect,useState} from 'react';
-import {getTermDiscovery,termDiscoveryAction,getGlossaries,type TermDiscovery,type TermProposal} from './api';
+import {getTermDiscovery,termDiscoveryAction,rejectPendingTerms,getGlossaries,type TermDiscovery,type TermProposal} from './api';
 import {formatDate} from './format';
 const states=[['pending','На проверке'],['approved','Подтверждённые'],['deferred','Отложенные'],['rejected','Отклонённые'],['ordinary','Скрытые слова']];
 const labels:Record<string,string>={idle:'Ожидает запуска',queued:'В очереди',running:'Анализирую новые реплики',
   paused:'Ожидаю завершения обработки встреч',succeeded:'Прогон завершён',error:'Не удалось завершить анализ'};
 
-export function TermDiscoveryPanel({onPublish=()=>{}}:{onPublish?:()=>void}) {
+export function TermDiscoveryPanel({onBack}:{onBack?:()=>void}) {
   const [data,setData]=useState<TermDiscovery|null>(null),[error,setError]=useState('');
   const [state,setState]=useState('pending'),[offset,setOffset]=useState(0),[reload,setReload]=useState(0),[busy,setBusy]=useState(false);
   const [schedule,setSchedule]=useState<{enabled:boolean;run_time:string;max_batches:number}|null>(null);
+  const [confirmAll,setConfirmAll]=useState(false),[notice,setNotice]=useState('');
   useEffect(()=>{
     const controller=new AbortController();let timer:number;
     const refresh=()=>getTermDiscovery(state,offset,controller.signal).then(next=>{
@@ -20,16 +21,19 @@ export function TermDiscoveryPanel({onPublish=()=>{}}:{onPublish?:()=>void}) {
     void refresh();return()=>{controller.abort();window.clearTimeout(timer);};
   },[state,offset,reload]);
   async function action(work:()=>Promise<void>) {
-    setBusy(true);setError('');try{await work();setReload(v=>v+1);}catch(err){setError(err instanceof Error?err.message:'Не удалось сохранить');}
+    setBusy(true);setError('');setNotice('');try{await work();setReload(v=>v+1);}catch(err){setError(err instanceof Error?err.message:'Не удалось сохранить');}
     finally{setBusy(false);}
   }
   return <section className="key-box term-discovery">
+    {onBack&&<button type="button" className="ghost" autoFocus disabled={busy} onClick={onBack}>← К контексту</button>}
     <h2>Предложения терминов</h2>
-    <p>Раз в день ищем сокращения, названия систем и варианты произношения в новых транскриптах. Модель протоколов получает небольшие фрагменты исходного текста. Пока обрабатываются встречи, анализ ждёт.</p>
-    <p>Подтверждённые варианты попадают в отдельный справочник «Сокращения и названия систем». Правильное написание задаёт администратор.</p>
     {error&&<div className="banner" role="alert">{error}</div>}
+    {notice&&<p role="status">{notice}</p>}
     {!data&&!error&&<p role="status">Загружаю предложения…</p>}
     {data&&schedule&&<>
+      <details className="term-settings">
+      <summary>Настройки и ход анализа · {labels[data.job.status]||data.job.status}</summary>
+      <p>Модель протоколов ищет названия и сокращения в новых репликах. Подтверждённые варианты попадают в справочник «Сокращения и названия систем».</p>
       <form className="term-schedule" onSubmit={e=>{e.preventDefault();void action(()=>termDiscoveryAction('settings',schedule));}}>
         <label className="context-toggle"><input type="checkbox" checked={schedule.enabled} disabled={busy}
           onChange={e=>setSchedule({...schedule,enabled:e.target.checked})}/>Искать новые термины ежедневно</label>
@@ -54,16 +58,30 @@ export function TermDiscoveryPanel({onPublish=()=>{}}:{onPublish?:()=>void}) {
         {['queued','running','paused'].includes(data.job.status)&&<button className="ghost" disabled={busy}
           onClick={()=>void action(()=>termDiscoveryAction('stop'))}>Остановить анализ</button>}
       </div>
+      </details>
       <div className="term-tabs" aria-label="Раздел предложений">{states.map(([key,label])=>{
         const count = (data.group_counts ?? data.counts)[key] ?? 0;
         const countLabel = `${data.group_counts ? 'Карточек' : 'Вариантов'} — ${count}`;
         return <button key={key} className={state===key?'primary':'ghost'} title={countLabel} aria-label={`${label}. ${countLabel}`}
-          aria-pressed={state===key} onClick={()=>{if(key!==state||offset>0){setState(key);setOffset(0);setData(null);}}}>{label} · {count}</button>;
+          aria-pressed={state===key} disabled={busy} onClick={()=>{if(key!==state||offset>0){setConfirmAll(false);setNotice('');setState(key);setOffset(0);setData(null);}}}>{label} · {count}</button>;
       })}</div>
+      {state==='pending'&&data.total>0&&(confirmAll
+        ? <div className="bulk-term-review" role="group" aria-label="Подтверждение отклонения">
+            <p>Отклонить все карточки на проверке со всех страниц? Сейчас их {data.total.toLocaleString('ru-RU')}. Вернуть отдельные варианты можно в разделе «Отклонённые».</p>
+            <div className="composer-row">
+              <button type="button" className="ghost" autoFocus disabled={busy} onClick={()=>setConfirmAll(false)}>Отмена</button>
+              <button type="button" className="ghost danger" disabled={busy} onClick={()=>void action(async()=>{
+                const result=await rejectPendingTerms();
+                setConfirmAll(false);setOffset(0);setData(null);
+                setNotice(`Отклонено карточек — ${result.groups.toLocaleString('ru-RU')}.`);
+              })}>Подтвердить отклонение всех</button>
+            </div>
+          </div>
+        : <button type="button" className="ghost danger" disabled={busy} onClick={()=>setConfirmAll(true)}>Отклонить все</button>)}
       {state==='ordinary'&&<p className="muted">Здесь собраны слова, которые администратор скрыл вместе с их формами. Их можно вернуть в предложения.</p>}
       {!data.proposals.length&&<p>В этом разделе предложений пока нет.</p>}
       {data.proposals.map(p=><Proposal key={p.key+state} proposal={p} state={state} busy={busy}
-        onReview={payload=>action(async()=>{await termDiscoveryAction('review',payload);onPublish();})}/>) }
+        onReview={payload=>action(()=>termDiscoveryAction('review',payload))}/>) }
       <div className="composer-row"><button className="ghost" disabled={!offset} onClick={()=>setOffset(v=>Math.max(0,v-20))}>Предыдущие предложения</button>
         <span>{data.total?`${offset+1}–${Math.min(offset+20,data.total)} из ${data.total}`:'0 групп'}</span>
         <button className="ghost" disabled={offset+20>=data.total} onClick={()=>setOffset(v=>v+20)}>Следующие предложения</button></div>
