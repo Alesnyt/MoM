@@ -203,3 +203,60 @@ test('speaker results show the source actually used for each query after the adm
   assert.ok(view.getByText('Ищем сотрудника в справочнике AD…'));
   assert.ok(await view.findByText('Режим поиска: локальный кэш AD'));
 });
+
+test('playback starts on demand, follows turn boundaries and loads long turns in order', () => {
+  const value = meeting();
+  value.segments = [
+    { speaker: 'S1', start: 2, end: 61, text: 'Начало' },
+    { speaker: 'S1', start: 61, end: 76.25, text: 'Продолжение' },
+    { speaker: 'S2', start: 80, end: 81, text: 'Ответ' },
+  ];
+  const proto = window.HTMLMediaElement.prototype;
+  const {pause, load} = proto;
+  proto.pause = () => {}; proto.load = () => {};
+  try {
+    const view = mount(value);
+    const buttons = view.getAllByRole('button', {name:/Прослушать реплику/});
+    assert.equal(view.container.querySelector('audio'), null);
+    fireEvent.click(buttons[0]);
+    const audio = () => view.container.querySelector('audio');
+    assert.equal(audio().getAttribute('src'), '/api/meetings/review/turn-audio?start_ms=2000&end_ms=62000');
+    fireEvent.ended(audio());
+    assert.match(audio().src, /start_ms=62000&end_ms=76250$/);
+    fireEvent.click(buttons[1]);
+    assert.equal(view.container.querySelectorAll('audio').length, 1);
+    assert.match(audio().src, /start_ms=80000&end_ms=81000$/);
+    fireEvent.error(audio());
+    assert.ok(view.getByText('Попробовать снова'));
+    fireEvent.click(view.getByText('Попробовать снова'));
+    fireEvent.ended(audio());
+    assert.equal(audio(), null);
+  } finally {
+    cleanup(); proto.pause = pause; proto.load = load;
+  }
+});
+
+test('imported text and segments without a usable end have no audio action', () => {
+  const value = meeting();
+  const view = render(React.createElement(TranscriptView, { meeting:{ ...value, source_type:'text' }, onUpdated() {} }));
+  assert.equal(view.queryByRole('button', {name:/Прослушать реплику/}), null);
+  view.rerender(React.createElement(TranscriptView, { meeting:{ ...value, segments:[
+    {speaker:'S1', start:null, end:null, text:'Текст'}, {speaker:'S1', start:3, end:3, text:'Текст'},
+  ] }, onUpdated() {} }));
+  assert.equal(view.queryByRole('button', {name:/Прослушать реплику/}), null);
+});
+
+test('green completion uses saved labels on all turns and ignores an unused unknown roster entry', () => {
+  const value = meeting();
+  value.speakers = [{id:'S1',name:'Анна'}, {id:'S2',name:'Борис'}, {id:'unknown',name:'Неясно'}];
+  const view = render(React.createElement(TranscriptView, {meeting:value,onUpdated(){}}));
+  assert.ok(view.getByText('✓ Все спикеры размечены').classList.contains('speakers-complete'));
+  for (const next of [
+    {...value, speakers:[value.speakers[0], {id:'S2',name:'Спикер 2'}]},
+    {...value, segments:[...value.segments, {speaker:'unknown', start:10, end:11,text:'Кто-то'}]},
+    {...value, segments:[]},
+  ]) {
+    view.rerender(React.createElement(TranscriptView, {meeting:next,onUpdated(){}}));
+    assert.equal(view.queryByText(/Все спикеры размечены/), null);
+  }
+});

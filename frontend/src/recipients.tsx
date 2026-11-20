@@ -43,7 +43,7 @@ export function ProtocolRecipients({ meeting, mailEnabled, disabled, busy, submi
         <details className="protocol-recipients">
           <summary>Дополнительные получатели{selected.length ? ` · ${selected.length}` : ""}</summary>
           <fieldset disabled={disabled} aria-label="Дополнительные получатели протокола">
-            <p>Вам письмо придёт автоматически. Здесь можно добавить других получателей.</p>
+            <p>Вы и отмеченные спикеры получите общее письмо. Все адреса будут видны в поле «Кому».</p>
             <div className="recipient-list">
               {rows.map(({ speaker, choice }) => (
                 <div className="recipient-row" key={speaker.id}>

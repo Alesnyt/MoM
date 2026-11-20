@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from . import corporate_context, directory_scope, glossary, ldap_auth, store, term_discovery, upload
+from .audio import AudioError, playback_clip
 from .api_schemas import (
     ContextSettingsIn, DirectorySettingsIn, DirectoryPolicyIn, SpeakerSearchIn, GlossaryImportIn, GlossaryEnabledIn, TermScheduleIn, TermReviewIn
 )
@@ -167,7 +168,6 @@ def create_router(require_admin) -> APIRouter:
     @router.get('/api/admin/term-discovery/evidence/{evidence_id}/audio')
     def term_audio(evidence_id: int, _admin: dict = Depends(require_admin)):
         import math
-        import subprocess
         with store.connect() as conn:
             row = conn.execute('''SELECT e.*,m.filename FROM term_evidence e JOIN meetings m ON m.id=e.meeting_id
                 WHERE e.id=?''',(evidence_id,)).fetchone()
@@ -179,14 +179,10 @@ def create_router(require_admin) -> APIRouter:
         start = max(0,row['start']-2)
         end = row['end'] if row['end'] is not None and math.isfinite(row['end']) else start+30
         try:
-            result = subprocess.run(['ffmpeg','-v','error','-nostdin','-ss',str(start),'-i',str(source),
-                                     '-t',str(min(60,max(5,end-start+2))),'-vn','-ac','1','-ar','16000',
-                                     '-f','mp3','pipe:1'],capture_output=True,timeout=20)
-        except (OSError,subprocess.TimeoutExpired) as exc:
-            raise HTTPException(503,'Не удалось подготовить фрагмент записи') from exc
-        if result.returncode or not result.stdout:
-            raise HTTPException(503,'Не удалось прочитать аудиозапись')
-        return Response(result.stdout,media_type='audio/mpeg',headers={'Cache-Control':'no-store'})
+            clip = playback_clip(source, start, min(60, max(5, end - start + 2)))
+        except AudioError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return Response(clip, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
     return router

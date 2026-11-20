@@ -54,7 +54,7 @@ from .api_schemas import (
 )
 
 from . import audit, auth, config, diagnostics, directory_scope, disk, keys, ldap_auth, monitoring, people, performance, prompts, retention, store, worker
-from .audio import ffmpeg_available, looks_like_audio
+from .audio import AudioError, audio_source, ffmpeg_available, looks_like_audio, playback_clip
 from .analyze import ProtocolResult
 from . import transcript_import, upload, corporate_context, glossary, term_discovery
 from . import word_protocol, context_api, calendar_api, calendar_service
@@ -1279,6 +1279,27 @@ def reassign_meeting_segments(
         store.refresh_queue_messages()
         worker.notify_work()
     return store.get_meeting(meeting_id)
+
+
+@app.get("/api/meetings/{meeting_id}/turn-audio")
+def meeting_turn_audio(meeting_id: str, start_ms: int = Query(ge=0, le=2**53 - 1),
+                       end_ms: int = Query(gt=0, le=2**53 - 1),
+                       user: dict = Depends(require_user)) -> Response:
+    meeting = _owned(store.get_recording_info(meeting_id), user)
+    if meeting["status"] not in {"review", "done"}:
+        raise HTTPException(409, "Расшифровка ещё не готова")
+    if not 0 < end_ms - start_ms <= 60_000:
+        raise HTTPException(422, "Укажите фрагмент длительностью до минуты")
+    if (Path(meeting["filename"]).suffix.lower() or ".webm") not in ALLOWED_SUFFIXES:
+        raise HTTPException(404, "У этой встречи нет аудиозаписи")
+    source = audio_source(meeting["id"], meeting["filename"])
+    if source is None:
+        raise HTTPException(404, "Исходная запись недоступна")
+    try:
+        clip = playback_clip(source, start_ms / 1000, (end_ms - start_ms) / 1000)
+    except AudioError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return Response(clip, media_type="audio/mpeg", headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/api/meetings/{meeting_id}/export.md", response_class=PlainTextResponse)

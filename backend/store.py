@@ -305,6 +305,15 @@ def update_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = N
         conn.execute(f"UPDATE meetings SET {', '.join(sets)} WHERE id = ?", values)
 
 
+def get_recording_info(meeting_id: str) -> dict | None:
+    # The media player does not need the transcript or generated protocol.
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, user_id, filename, status FROM meetings WHERE id = ?", (meeting_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def get_meeting(meeting_id: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(f"SELECT meetings.*, {_MAIL_PENDING} FROM meetings WHERE id = ?", (meeting_id,)).fetchone()

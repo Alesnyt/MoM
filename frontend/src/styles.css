@@ -1916,3 +1916,7 @@ select.title-input {
 .proof-suggestion { border-inline-start: 3px solid var(--accent); padding: 8px 12px; margin: 8px 0; overflow-wrap: anywhere; }
 .proof-suggestion p { margin: 5px 0; color: var(--muted); }
 .proof-suggestion ins { font-weight: 600; }
+
+.speakers-complete { color: var(--ok); border: 1px solid currentColor; border-radius: 6px; padding: 8px 12px; font-weight: 600; }
+.turn-listen { padding: 4px 9px; font-size: 0.85rem; }
+.turn audio { display: block; width: 100%; max-width: 34rem; margin-top: 8px; }

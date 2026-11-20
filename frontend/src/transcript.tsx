@@ -11,6 +11,7 @@ const COLORS = ["#c9843e", "#7f9d6e", "#6e8caf", "#c46b63", "#b089c4", "#d4a017"
 type Turn = {
   speaker: string;
   start: number | null;
+  end: number | null;
   indexes: number[];
   text: string;
 };
@@ -18,8 +19,14 @@ type Turn = {
 function turnsOf(segments: TranscriptSegment[]): Turn[] {
   const turns: Turn[] = [];
   segments.forEach((segment, index) => {
+    const timed = segment.start !== null && segment.end !== null && Number.isFinite(segment.start) &&
+      Number.isFinite(segment.end) && segment.start >= 0 && segment.end > segment.start;
     const last = turns[turns.length - 1];
-    if (last && last.speaker === segment.speaker && last.indexes.length < 500) {
+    if (last && last.speaker === segment.speaker && last.indexes.length < 500 && (last.end !== null) === timed) {
+      if (timed && last.start !== null && last.end !== null) {
+        last.start = Math.min(last.start, segment.start!);
+        last.end = Math.max(last.end, segment.end!);
+      }
       last.indexes.push(index);
       last.text = `${last.text} ${segment.text}`.trim();
       return;
@@ -27,6 +34,7 @@ function turnsOf(segments: TranscriptSegment[]): Turn[] {
     turns.push({
       speaker: segment.speaker,
       start: segment.start,
+      end: timed ? segment.end : null,
       indexes: [index],
       text: segment.text,
     });
@@ -313,6 +321,7 @@ export function TranscriptView({
 
   const turns = useMemo(() => turnsOf(meeting.segments || []), [meeting.segments]);
 
+  const usedSpeakers = useMemo(() => new Set(turns.map(turn => turn.speaker)), [turns]);
   if (!segments.length) {
     return (
       <>
@@ -328,7 +337,12 @@ export function TranscriptView({
   }
 
   const namedSpeakers = speakers.filter((item) => item.id !== "unknown" && item.name !== "Неясно");
-  const hasUnclear = namedSpeakers.length !== speakers.length;
+  const labelled = new Set(namedSpeakers.filter(speaker => {
+    const name = speaker.name.trim();
+    return name && !/^(?:(?:спикер|speaker)\s*\d*|неясно|s\d+)$/i.test(name);
+  }).map(speaker => speaker.id));
+  const allLabelled = usedSpeakers.size > 0 && [...usedSpeakers].every(id => labelled.has(id));
+  const hasUnclear = usedSpeakers.has("unknown");
 
   function filterBySpeaker(speakerId: string | null) {
     setSpeakerFilter(speakerId === speakerFilter ? null : speakerId);
@@ -382,6 +396,7 @@ export function TranscriptView({
       <div className="speaker-review-grid">
         <section className="speaker-panel" aria-labelledby={speakersHeadingId}>
           <h2 id={speakersHeadingId}>Назначение спикеров</h2>
+          {allLabelled && <p className="speakers-complete" role="status">✓ Все спикеры размечены</p>}
           {namedSpeakers.length > 0
             ? <div className="speaker-instructions">
                 <p><strong>1. Назначьте имя.</strong> {directoryEnabled ? "Найдите коллегу по ФИО в корпоративном каталоге AD." : "Выберите пользователя или введите имя."}</p>
@@ -414,7 +429,7 @@ export function TranscriptView({
         <section className="speaker-panel" aria-labelledby={transcriptHeadingId}>
           <h2 id={transcriptHeadingId}>Транскрипт по спикерам</h2>
           {hasUnclear && <p className="speaker-hint">Уточняйте спикера у каждой реплики с пометкой «Неясно».</p>}
-          <TranscriptTurns key={meeting.id} turns={turns} segments={segments} speakers={speakers}
+          <TranscriptTurns key={meeting.id} recordingId={meeting.source_type === "audio" ? meeting.id : undefined} turns={turns} segments={segments} speakers={speakers}
             speakerFilter={speakerFilter} onClearFilter={() => filterBySpeaker(null)} page={page} onPageChange={setPage}
             disabled={busy || disabled} onMove={moveTurn} headingId={transcriptHeadingId} turnsId={turnsId}
             focusSegment={focusSegment} />
@@ -425,11 +440,37 @@ export function TranscriptView({
 }
 
 const TURNS_PER_PAGE = 50;
+const CLIP_MS = 60_000;
+
+function TurnPlayer({ recordingId, start, end, onClose }: {
+  recordingId: string; start: number; end: number; onClose: () => void;
+}) {
+  const [position, setPosition] = useState(start);
+  const [failed, setFailed] = useState(false);
+  const next = Math.min(position + CLIP_MS, end);
+  const player = useRef<HTMLAudioElement>(null);
+  const url = `/api/meetings/${encodeURIComponent(recordingId)}/turn-audio?start_ms=${position}&end_ms=${next}`;
+  // Release the media request when changing turns, filtering the list or leaving the meeting.
+  useEffect(() => {
+    const audio = player.current;
+    if (!audio) return;
+    audio.src = url;
+    return () => { audio.pause(); audio.removeAttribute("src"); audio.load(); };
+  }, [url, failed]);
+  if (failed) return <p className="speaker-hint" role="alert">
+    Не удалось воспроизвести фрагмент. Проверьте доступность исходной записи.{" "}
+    <button className="ghost" type="button" onClick={() => setFailed(false)}>Попробовать снова</button>
+  </p>;
+  return <audio key={position} ref={player} controls autoPlay aria-label="Аудио реплики"
+    onEnded={() => { if (next < end) setPosition(next); else onClose(); }}
+    onError={e => { if (e.currentTarget.getAttribute("src")) setFailed(true); }} />;
+}
 
 function TranscriptTurns({
-  turns, segments, speakers, speakerFilter, onClearFilter, page, onPageChange,
+  recordingId, turns, segments, speakers, speakerFilter, onClearFilter, page, onPageChange,
   disabled, onMove, headingId, turnsId, focusSegment,
 }: {
+  recordingId?: string;
   turns: Turn[];
   segments: TranscriptSegment[];
   speakers: Speaker[];
@@ -444,6 +485,7 @@ function TranscriptTurns({
   focusSegment?: number;
 }) {
   const [query, setQuery] = useState("");
+  const [playing, setPlaying] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const focusedTurn = useRef<HTMLElement>(null);
   const names = useMemo(() => new Map(speakers.map((item) => [item.id, item.name])), [speakers]);
@@ -460,7 +502,10 @@ function TranscriptTurns({
   const start = currentPage * TURNS_PER_PAGE;
   const visibleTurns = filtered.slice(start, start + TURNS_PER_PAGE);
 
-  useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0; }, [currentPage, query, speakerFilter]);
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0;
+    setPlaying(null);
+  }, [currentPage, query, speakerFilter]);
   useEffect(() => {
     focusedTurn.current?.focus({ preventScroll: true });
     focusedTurn.current?.scrollIntoView?.({ block: "nearest" });
@@ -493,6 +538,9 @@ function TranscriptTurns({
     <div ref={listRef} id={turnsId} className="turns" role="region" aria-labelledby={headingId} tabIndex={0}>
       {visibleTurns.map((turn) => {
         const name = names.get(turn.speaker) || turn.speaker;
+        const startMs = Math.round((turn.start ?? 0) * 1000);
+        const endMs = Math.round((turn.end ?? 0) * 1000);
+        const playbackKey = [turn.speaker, turn.indexes[0], startMs, endMs].join(":");
         const focused = focusSegment !== undefined && turn.indexes.includes(focusSegment);
         return (
           <article key={`${turn.speaker}-${turn.indexes[0]}`} className={`turn${focused ? " turn--focused" : ""}`}
@@ -501,6 +549,11 @@ function TranscriptTurns({
             <header className="turn-head">
               <strong className="speaker-name">{name}</strong>
               {turn.start !== null && <time>{formatClock(turn.start)}</time>}
+              {recordingId && endMs > startMs && <button type="button" className="ghost turn-listen"
+                aria-pressed={playing === playbackKey} aria-label={`${playing === playbackKey ? "Закрыть плеер" : "Прослушать реплику"}: ${name}, ${formatClock(turn.start!)}`}
+                onClick={() => setPlaying(playing === playbackKey ? null : playbackKey)}>
+                {playing === playbackKey ? "Закрыть плеер" : "Прослушать"}
+              </button>}
               <label className="speaker-move">
                 <span className="sr-only">Кто говорит эту реплику</span>
                 <select
@@ -522,6 +575,8 @@ function TranscriptTurns({
                 </select>
               </label>
             </header>
+            {recordingId && playing === playbackKey && <TurnPlayer key={playbackKey} recordingId={recordingId}
+              start={startMs} end={endMs} onClose={() => setPlaying(null)} />}
             <p>{turn.text}</p>
             {turn.indexes.some((index) => segments[index].context_original_text) &&
               <details><summary>До корпоративного словаря</summary><p className="original-transcript">
