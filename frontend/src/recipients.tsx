@@ -6,13 +6,14 @@ type Recipient = { name: string; email: string };
 const canonical = (email: string) => email.trim().toLowerCase();
 const isEmail = (email: string) => /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(email);
 
-export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEnabled, onUpdated }: {
+export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEnabled, hidden, onEditSummary, onUpdated }: {
   meeting: Meeting; revision: string; ownerEmail?: string; directoryEnabled: boolean;
+  hidden: boolean; onEditSummary: () => void;
   onUpdated: (meeting: Meeting) => void;
 }) {
   const [selected, setSelected] = useState<Recipient[]>(() => ownerEmail ? [{name: "Вы", email: canonical(ownerEmail)}] : []);
   const [draft, setDraft] = useState<Recipient[] | null>(null);
-  const [submitted, setSubmitted] = useState(false);
+  const [submittedRevision, setSubmittedRevision] = useState<string | null>(null);
   const editing = draft !== null;
   const recipients = draft ?? selected;
   const [query, setQuery] = useState("");
@@ -23,14 +24,15 @@ export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEna
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);
-  const requestId = useRef("");
+  const currentRevision = useRef(revision);
+  const pendingRequest = useRef<{ revision: string; id: string } | null>(null);
   const input = query.trim();
   const speakers = (meeting.speakers || []).filter(s => s.id !== "unknown");
   const has = (email: string) => recipients.some(r => r.email === canonical(email));
 
   useEffect(() => {
     setMatches([]); setSearchNote("");
-    if (!directoryEnabled || !editing || input.length < 2 || input.length > 200 || input.includes("@")) return;
+    if (hidden || !directoryEnabled || !editing || input.length < 2 || input.length > 200 || input.includes("@")) return;
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       setSearchNote("Ищу в каталоге…");
@@ -45,7 +47,12 @@ export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEna
       }
     }, 250);
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [directoryEnabled, editing, input]);
+  }, [hidden, directoryEnabled, editing, input]);
+
+  useEffect(() => {
+    currentRevision.current = revision;
+    setError("");
+  }, [revision]);
 
   function add(person: Recipient) {
     const email = canonical(person.email);
@@ -58,7 +65,7 @@ export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEna
 
   function finishEditing(save: boolean) {
     if (save && draft) {
-      if (draft.map(r => r.email).join(",") !== selected.map(r => r.email).join(",")) requestId.current = "";
+      if (draft.map(r => r.email).join(",") !== selected.map(r => r.email).join(",")) pendingRequest.current = null;
       setSelected(draft);
     }
     setDraft(null);
@@ -68,27 +75,32 @@ export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEna
   }
 
   async function confirm() {
-    if (sending.current || meeting.mail_pending || submitted || editing || !selected.length) return;
+    if (hidden || sending.current || meeting.mail_pending || submittedRevision === revision || editing || !selected.length) return;
     sending.current = true; setBusy(true); setError("");
     try {
       // getRandomValues also works on corporate HTTP installations.
-      if (!requestId.current) requestId.current = Array.from(crypto.getRandomValues(new Uint8Array(16)),
-        byte => byte.toString(16).padStart(2, "0")).join("");
-      const next = await sendProtocol(meeting.id, revision, selected.map(r => r.email), requestId.current);
-      setSubmitted(true);
-      onUpdated(next);
-      requestId.current = "";
+      if (pendingRequest.current?.revision !== revision) {
+        const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+        pendingRequest.current = { revision, id };
+      }
+      const next = await sendProtocol(meeting.id, revision, selected.map(r => r.email), pendingRequest.current.id);
+      setSubmittedRevision(revision);
+      if (currentRevision.current === revision) onUpdated(next);
+      pendingRequest.current = null;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось поставить письмо в очередь.");
+      if (currentRevision.current === revision) {
+        setError(err instanceof Error ? err.message : "Не удалось поставить письмо в очередь.");
+      }
     } finally {
       sending.current = false; setBusy(false);
     }
   }
 
+  if (hidden) return null;
   return <section className="protocol-recipients" aria-label="Отправка протокола по почте">
     <h2>Отправка протокола по почте</h2>
-    {meeting.mail_pending ? <p role="status">Письмо ожидает завершения доставки.</p> : submitted ?
-      <button className="ghost" type="button" onClick={() => setSubmitted(false)}>Подготовить ещё одно письмо</button> : <>
+    {meeting.mail_pending ? <p role="status">Письмо ожидает завершения доставки.</p> : submittedRevision === revision ?
+      <button className="ghost" type="button" onClick={() => setSubmittedRevision(null)}>Подготовить ещё одно письмо</button> : <>
       <p className="delivery-attachment">Вложение — сохранённый протокол в Word</p>
       <div className="delivery-to">
         <strong>Кому</strong>
@@ -137,6 +149,7 @@ export function ProtocolRecipients({ meeting, revision, ownerEmail, directoryEna
             Применить список</button>
           <button className="ghost" type="button" onClick={() => finishEditing(false)}>Отмена</button>
         </> : <>
+          <button className="ghost" type="button" disabled={busy} onClick={onEditSummary}>Редактировать саммари</button>
           <button className="ghost" type="button" disabled={busy} onClick={() => {
             setError("");
             setDraft(selected);

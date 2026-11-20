@@ -5,7 +5,7 @@ import type { ActionItem, AgendaItem, Meeting, MeetingResult } from "./types";
 
 type Suggestion = { field: string; before: string; after: string; reason: string };
 type Props = {
-  meetingId: string; initial: MeetingResult; revision: string;
+  meetingId: string; initial: MeetingResult; revision: string; summaryOnly?: boolean;
   onSaved: (meeting: Meeting) => void; onCancel: () => void; onDirtyChange?: (dirty: boolean) => void;
 };
 const lists = [
@@ -18,7 +18,7 @@ function replaceAt<T>(values: T[], index: number, updated: T) {
   return values.map((item, i) => i === index ? updated : item);
 }
 
-export function ProtocolEditor({ meetingId, initial, revision, onSaved, onCancel, onDirtyChange }: Props) {
+export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = false, onSaved, onCancel, onDirtyChange }: Props) {
   const [draft, setDraft] = useState(initial);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [note, setNote] = useState("");
@@ -54,7 +54,8 @@ export function ProtocolEditor({ meetingId, initial, revision, onSaved, onCancel
       const response = await apiRequest(mode === "check" ? path + "/proofread" : path, {
         method: mode === "check" ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ revision, result: draft }), signal: controller.signal,
+        body: JSON.stringify(summaryOnly ? { revision, summary: draft.summary } : { revision, result: draft }),
+        signal: controller.signal,
       });
       const data = await response.json();
       if (controller.signal.aborted) return;
@@ -80,7 +81,7 @@ export function ProtocolEditor({ meetingId, initial, revision, onSaved, onCancel
       onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => change(update(e.target.value), path) };
     return <div className="editor-field" key={path}>
       <label className="field-label">{label}
-        {options.rows ? <textarea {...props} rows={options.rows} /> : <input {...props} />}
+        {options.rows ? <textarea {...props} rows={options.rows} autoFocus={summaryOnly} /> : <input {...props} />}
       </label>
       {suggestions.filter(s => s.field === path).map((s, index) =>
         <div className="proof-suggestion" key={index}>
@@ -101,13 +102,15 @@ export function ProtocolEditor({ meetingId, initial, revision, onSaved, onCancel
     </div>;
   }
 
-  return <form className="protocol-editor" aria-label="Редактор протокола" onSubmit={e => {
+  const summaryField = textField("summary", "Саммари", draft.summary, summary => ({ ...draft, summary }), { rows: summaryOnly ? 9 : 5 });
+  return <form className="protocol-editor" aria-label={summaryOnly ? "Редактор саммари" : "Редактор протокола"} onSubmit={e => {
     e.preventDefault(); void submit("save");
   }}>
-    <h2>Редактирование протокола</h2>
+    <h2>{summaryOnly ? "Редактирование саммари" : "Редактирование протокола"}</h2>
+    {summaryOnly && <fieldset className="editor-body" disabled={busy !== null}>{summaryField}</fieldset>}
     <div className="editor-tools">
       <button type="submit" className="primary" disabled={!dirty || busy !== null}>
-        {busy === "save" ? "Сохраняю…" : "Сохранить протокол"}
+        {busy === "save" ? "Сохраняю…" : summaryOnly ? "Сохранить саммари" : "Сохранить протокол"}
       </button>
       <button type="button" className="ghost" disabled={busy !== null} onClick={() => void submit("check")}>
         {busy === "check" ? "Проверяю русский язык…" : "Проверить русский язык"}
@@ -118,10 +121,10 @@ export function ProtocolEditor({ meetingId, initial, revision, onSaved, onCancel
     </div>
     {note && <p role="status">{note}</p>}
     {error && <p className="banner" role="alert">{error}</p>}
-    <fieldset className="editor-body" disabled={busy !== null}>
+    {!summaryOnly && <fieldset className="editor-body" disabled={busy !== null}>
       {textField("title", "Название встречи", draft.title, title => ({ ...draft, title }), { required: true })}
       {textField("date_hint", "Дата встречи", draft.date_hint, date => ({ ...draft, date_hint: date || null }))}
-      {textField("summary", "Саммари", draft.summary, summary => ({ ...draft, summary }), { rows: 5 })}
+      {summaryField}
       {lists.map(([key, title, label]) => <section key={key}><h3>{title}</h3>
         {draft[key].map((value, i) => <div key={i} className="editor-row">
           {textField(key + "." + i, label + " " + (i + 1), value,
@@ -171,6 +174,6 @@ export function ProtocolEditor({ meetingId, initial, revision, onSaved, onCancel
       </section>
       {textField("mom.next_meeting", "Следующая встреча", draft.mom.next_meeting,
         v => ({ ...draft, mom: { ...draft.mom, next_meeting: v || null } }))}
-    </fieldset>
+    </fieldset>}
   </form>;
 }

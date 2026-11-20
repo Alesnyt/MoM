@@ -187,12 +187,15 @@ def test_partial_document_rejected(api):
     assert client.get(PATH).json()["result"] == payload["result"]
 
 
-def test_proofreading_unsaved_draft_calls_configured_model_and_never_saves(api, monkeypatch):
+@pytest.mark.parametrize("summary_only", [False, True])
+def test_proofreading_unsaved_draft_calls_configured_model_and_never_saves(api, monkeypatch, summary_only):
     client, payload = api
     monkeypatch.setattr(config, "get_api_key", lambda: "configured-key")
     monkeypatch.setattr(config, "get_chat_model", lambda: "configured-model")
     draft = payload["result"]
     draft["summary"] = "Благодаря нового плана одобрили 12 задач."
+    if summary_only:
+        payload = {"summary": draft["summary"], "revision": payload["revision"]}
     proposal = dict(field="summary", before="Благодаря нового плана", after="Благодаря новому плану",
                     reason="Предлог «благодаря» требует дательного падежа.")
     choices = [proposal, dict(proposal, field="transcript"), dict(proposal, before="чужой текст"),
@@ -211,6 +214,8 @@ def test_proofreading_unsaved_draft_calls_configured_model_and_never_saves(api, 
     assert sent["model"] == "configured-model"
     fields = json.loads(sent["messages"][1]["content"])
     assert fields["summary"] == draft["summary"]
+    if summary_only:
+        assert set(fields) == {"summary"}
     assert "Исходная реплика" not in str(fields) and "Иван" not in str(fields)
     assert client.get(PATH).json()["result"]["summary"] == ORIGINAL["summary"]
     completion.return_value.choices[0].message.content = "{}"

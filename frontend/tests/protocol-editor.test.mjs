@@ -188,3 +188,56 @@ test('an empty recipient list can be edited and cannot be sent', () => {
   fireEvent.click(view.getByText('Применить список'));
   assert.ok(button().disabled);
 });
+
+test('edit the summary before delivery, keep recipients and explicitly confirm the saved revision', async () => {
+  if (!globalThis.crypto) globalThis.crypto = (await import('node:crypto')).webcrypto;
+  const requests = [];
+  const summary = 'Согласовали дату запуска.\nОтветственные проверят план.';
+  const saved = { ...initial, result_revision: 'revision2', result: { ...initial.result, summary } };
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return reply(url.endsWith('/send') ? { ...saved, mail_pending: true } : saved);
+  };
+  function App() {
+    const [meeting, update] = React.useState(initial);
+    const [tab, onTab] = React.useState('overview');
+    return React.createElement(MeetingPane, { meeting, onUpdated: update, tab, onTab, mailEnabled: true, ownerEmail: 'owner@example.com' });
+  }
+  const view = render(React.createElement(App));
+  const card = () => within(view.getByRole('region', { name: 'Отправка протокола по почте' }));
+  fireEvent.click(card().getByText('Изменить получателей'));
+  fireEvent.change(view.getByLabelText('Добавить email получателя'), { target: { value: 'extra@example.com' } });
+  fireEvent.click(view.getByText('Добавить адрес'));
+  fireEvent.click(view.getByText('Применить список'));
+  fireEvent.click(card().getByText('Редактировать саммари'));
+  const input = view.getByRole('textbox', { name: 'Саммари' });
+  assert.equal(input, document.activeElement);
+  assert.equal(input.value, initial.result.summary);
+  assert.equal(view.queryByText('Подтвердить и отправить'), null);
+  fireEvent.change(input, { target: { value: summary } });
+  fireEvent.click(view.getByText('Сохранить саммари'));
+  await view.findByText('Саммари сохранено.');
+  assert.deepEqual(requests, [{ url: '/api/meetings/one/protocol', body: { revision: 'revision1', summary } }]);
+  assert.ok(view.getByText('Ответственные проверят план.'));
+  assert.match(card().getByRole('list').textContent, /extra@example.com/);
+  fireEvent.click(card().getByText('Подтвердить и отправить'));
+  await view.findByText('Письмо ожидает завершения доставки.');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].url, '/api/meetings/one/protocol/send');
+  assert.equal(requests[1].body.revision, 'revision2');
+  assert.deepEqual(requests[1].body.recipients, ['owner@example.com', 'extra@example.com']);
+});
+
+test('summary can be edited and discarded from the overview with mail disabled', () => {
+  globalThis.fetch = () => assert.fail('discarding the draft must not save it');
+  const view = render(React.createElement(MeetingPane, { meeting: initial, tab: 'overview', onTab() {}, mailEnabled: false }));
+  fireEvent.click(view.getByText('Редактировать саммари'));
+  assert.equal(view.queryByLabelText('Название встречи'), null);
+  fireEvent.change(view.getByLabelText('Саммари'), { target: { value: 'Черновик' } });
+  const previous = window.confirm;
+  try {
+    window.confirm = () => true;
+    fireEvent.click(view.getByText('Отмена'));
+    assert.ok(view.getByText(initial.result.summary));
+  } finally { window.confirm = previous; }
+});

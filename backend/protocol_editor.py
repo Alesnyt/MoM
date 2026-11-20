@@ -35,9 +35,16 @@ class ProtocolDraft(ProtocolResult):
     mom: DraftMinutes
 
 
-class EditRequest(BaseModel):
+class EditRevision(BaseModel):
     revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class EditRequest(EditRevision):
     result: ProtocolDraft
+
+
+class SummaryEditRequest(EditRevision):
+    summary: str
 
 
 def edited_result(current: dict, draft: ProtocolDraft) -> dict:
@@ -79,7 +86,7 @@ def prose_fields(result: ProtocolDraft) -> dict[str, str]:
     for i, row in enumerate(result.mom.agenda):
         for key in ("topic", "discussion", "outcome"):
             fields[f"mom.agenda.{i}.{key}"] = getattr(row, key)
-    return {key: value for key, value in fields.items() if value and re.search("[А-Яа-яЁё]", value)}
+    return {key: value for key, value in fields.items() if value}
 
 
 def batches(fields: dict[str, str]) -> Iterator[dict[str, str]]:
@@ -151,8 +158,8 @@ def proofread_slot(user_id: str):
             _active_users.remove(user_id)
 
 
-async def proofread(draft: ProtocolDraft, disconnected: Callable[[], Awaitable[bool]]) -> list[dict]:
-    fields = prose_fields(draft)
+async def proofread(fields: dict[str, str], disconnected: Callable[[], Awaitable[bool]]) -> list[dict]:
+    fields = {key: value for key, value in fields.items() if re.search("[А-Яа-яЁё]", value)}
     if not fields:
         return []
     with config.model_settings_scope() as settings:

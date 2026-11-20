@@ -8,6 +8,8 @@ import { ProtocolEditor } from "./protocol-editor";
 import { ProtocolRecipients } from "./recipients";
 import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
 
+type EditMode = "protocol" | "summary";
+
 export const STEPS: { id: MeetingStatus; label: string }[] = [
   { id: "extracting", label: "Аудио" },
   { id: "transcribing", label: "Расшифровка" },
@@ -50,11 +52,18 @@ export function MeetingPane({
     return role ? `${name} — ${role}` : name;
   }) };
   const wide = meeting.status === "review" || (meeting.status === "done" && (tab === "transcript" || !result));
-  const [editing, setEditing] = useState<{ initial: MeetingResult; revision: string } | null>(null);
+  const [editing, setEditing] = useState<{ mode: EditMode; initial: MeetingResult; revision: string } | null>(null);
   const [mailNote, setMailNote] = useState<string | null>(null);
   const wordContent = useRef<HTMLElement>(null);
   const [downloading, setDownloading] = useState(false);
   const [focusSegment, setFocusSegment] = useState<number | undefined>();
+
+  function openEditor(mode: EditMode) {
+    if (!rawResult || !meeting.result_revision) return;
+    setMailNote(null);
+    onTab(mode === "summary" ? "overview" : "mom");
+    setEditing({ mode, initial: rawResult, revision: meeting.result_revision });
+  }
 
   function openSource(turn: number) {
     setFocusSegment(turn - 1);
@@ -131,10 +140,8 @@ export function MeetingPane({
         {!editing && <div className="pane-actions">
           {meeting.status === "done" && result && (
             <>
-              {rawResult && meeting.result_revision && <button className="ghost" type="button" onClick={() => {
-                if (!meeting.result_revision) return;
-                setMailNote(null); onTab("mom"); setEditing({ initial: rawResult, revision: meeting.result_revision });
-              }}>Редактировать протокол</button>}
+              {meeting.result_revision && <button className="ghost" type="button"
+                onClick={() => openEditor("protocol")}>Редактировать протокол</button>}
               <button className={mailEnabled && meeting.result_revision ? "ghost" : "primary"}
                 type="button" disabled={downloading} onClick={() => void download("docx")}>
                 Скачать протокол в Word (.docx)
@@ -210,17 +217,25 @@ export function MeetingPane({
         </div>
       )}
       {editing &&
-        <ProtocolEditor meetingId={meeting.id} initial={editing.initial} revision={editing.revision}
+        <ProtocolEditor meetingId={meeting.id} initial={editing.initial} revision={editing.revision} summaryOnly={editing.mode === "summary"}
           onDirtyChange={onEditorDirty} onCancel={() => setEditing(null)}
-          onSaved={next => { onUpdated(next); setEditing(null); setMailNote("Правки протокола сохранены."); }} />}
+          onSaved={next => {
+            onUpdated(next);
+            setEditing(null);
+            setMailNote(editing.mode === "summary" ? "Саммари сохранено." : "Правки протокола сохранены.");
+          }} />}
       {!editing && result && meeting.status === "done" && (
         <>
           {meeting.error && <p className="banner" role="alert">Сохранена предыдущая редакция протокола. {meeting.error}</p>}
           {meeting.status_message && meeting.status_message !== "Готово" &&
             <p className="progress-hint" role="status">{meeting.status_message}</p>}
-          {mailEnabled && meeting.result_revision && <ProtocolRecipients key={meeting.id + meeting.result_revision}
-            meeting={meeting} revision={meeting.result_revision} ownerEmail={ownerEmail} directoryEnabled={directoryEnabled}
-            onUpdated={onUpdated} />}
+        </>
+      )}
+      {result && meeting.status === "done" && mailEnabled && meeting.result_revision &&
+        <ProtocolRecipients key={meeting.id} meeting={meeting} revision={meeting.result_revision} ownerEmail={ownerEmail}
+          directoryEnabled={directoryEnabled} hidden={Boolean(editing)} onEditSummary={() => openEditor("summary")} onUpdated={onUpdated} />}
+      {!editing && result && meeting.status === "done" && (
+        <>
           {meeting.name_review && (tab !== "transcript" || !meeting.segments?.length) && <p className="progress-hint">{meeting.name_review.message} Подробности — во вкладке «Транскрипт».</p>}
           <nav className="tabs">
             <TabButton id="overview" tab={tab} onTab={onTab} label="Саммари" />
@@ -233,7 +248,8 @@ export function MeetingPane({
             <TabButton id="mom" tab={tab} onTab={onTab} label="Протокол" />
             <TabButton id="transcript" tab={tab} onTab={onTab} label="Транскрипт" />
           </nav>
-          {tab === "overview" && <Overview result={result} onSource={openSource} />}
+          {tab === "overview" && <Overview result={result} onSource={openSource}
+            onEditSummary={meeting.result_revision ? () => openEditor("summary") : undefined} />}
           {tab === "actions" && <Actions result={result} onSource={openSource} />}
           {tab === "mom" && <>
             <button className="ghost word-copy" type="button" onClick={() => void copyWord()}>Копировать для Word</button>
@@ -420,13 +436,15 @@ function fallbackProgress(status: MeetingStatus): number {
   return 0;
 }
 
-function Overview({ result, onSource }: { result: MeetingResult; onSource: (turn: number) => void }) {
+function Overview({ result, onSource, onEditSummary }: {
+  result: MeetingResult; onSource: (turn: number) => void; onEditSummary?: () => void;
+}) {
   return (
     <div className="overview">
       {result.participants.length > 0 && (
         <p className="people">Участники: {result.participants.join(", ")}</p>
       )}
-      <SummarySections result={result} heading="h2" onSource={onSource} />
+      <SummarySections result={result} heading="h2" onSource={onSource} onEditSummary={onEditSummary} />
     </div>
   );
 }
@@ -438,8 +456,8 @@ function SourceButtons({ turns, onSource }: { turns?: number[]; onSource?: (turn
   ))}</span>;
 }
 
-function SummarySections({ result, heading: Heading, onSource }: {
-  result: MeetingResult; heading: "h2" | "h3"; onSource?: (turn: number) => void;
+function SummarySections({ result, heading: Heading, onSource, onEditSummary }: {
+  result: MeetingResult; heading: "h2" | "h3"; onSource?: (turn: number) => void; onEditSummary?: () => void;
 }) {
   const paragraphs = result.summary.split(/\r?\n/).map((para) => para.trim()).filter(Boolean);
   const sources = Array.isArray(result.decision_sources) ? result.decision_sources : [];
@@ -447,6 +465,7 @@ function SummarySections({ result, heading: Heading, onSource }: {
     <section className="summary">
       <Heading>Саммари</Heading>
       {paragraphs.length ? paragraphs.map((para, index) => <p key={index}>{para}</p>) : <p>Саммари отсутствует.</p>}
+      {onEditSummary && <button className="ghost" type="button" onClick={onEditSummary}>Редактировать саммари</button>}
     </section>
     {([
       ["Принятые решения", result.decisions, true],

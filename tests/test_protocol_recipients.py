@@ -446,13 +446,18 @@ def test_final_send_freezes_the_confirmed_edit_and_deduplicates_retries(delivery
     client, meeting, sent = delivery
     mid = meeting["id"]
     path = f"/api/meetings/{mid}/protocol"
-    draft = main.ProtocolResult(title="План", summary="Первая версия").model_dump()
+    draft = main.ProtocolResult(title="План", summary="Первая версия", participants=["Анна"],
+                                decisions=["Назначить пилот"],
+                                decision_sources=[{"decision": "Назначить пилот", "turns": [2]}]).model_dump()
     mail.complete_protocol(meeting, result=draft)
     original = store.get_meeting(mid)["result_revision"]
     draft["summary"] = "Отредактированная версия"
-    saved = client.patch(path, json={"revision": original, "result": draft})
+    saved = client.patch(path, json={"revision": original, "summary": draft["summary"]})
     assert saved.is_success, saved.text
+    assert saved.json()["result"] == {**draft, "edited_manually": True}
     revision = saved.json()["result_revision"]
+    assert client.patch(path, json={"revision": original, "summary": "Устаревшая правка"}).status_code == 409
+    assert not mail.deliver_pending() and not sent
     addresses = ["Colleague@example.com", "additional@example.com", "colleague@example.com"]
     assert confirm(client, mid, addresses, original).status_code == 409
     assert confirm(client, mid, addresses, revision).is_success
@@ -468,6 +473,7 @@ def test_final_send_freezes_the_confirmed_edit_and_deduplicates_retries(delivery
     assert mail.deliver_pending() and not mail.deliver_pending()
     assert len(sent) == 1 and sent[0][0] == ["colleague@example.com", "additional@example.com"]
     assert "Отредактированная версия" in sent[0][2] and "Следующая редакция" not in sent[0][2]
+    assert "Отредактированная версия" in sent[0][3]["html"] and "Следующая редакция" not in sent[0][3]["html"]
     paragraphs = Document(BytesIO(sent[0][3]["attachment"][1])).paragraphs
     assert any("Отредактированная версия" in p.text for p in paragraphs)
     assert confirm(client, mid, addresses, revision).is_success

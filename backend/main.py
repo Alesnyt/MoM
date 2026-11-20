@@ -1054,23 +1054,31 @@ def _editable_protocol(meeting: dict, revision: str) -> None:
 
 
 @app.patch("/api/meetings/{meeting_id}/protocol")
-def save_protocol(meeting_id: str, payload: protocol_editor.EditRequest, user: dict = Depends(require_user)) -> dict:
+def save_protocol(meeting_id: str, payload: protocol_editor.EditRequest | protocol_editor.SummaryEditRequest,
+                  user: dict = Depends(require_user)) -> dict:
     with store.edit_meeting(meeting_id) as (connection, row):
         meeting = _owned(row, user)
         _editable_protocol(meeting, payload.revision)
-        result = protocol_editor.edited_result(meeting["result"], payload.result)
-        store.update_meeting(meeting_id, connection=connection, result=result, title=result["title"])
+        if isinstance(payload, protocol_editor.SummaryEditRequest):
+            result = {**meeting["result"], "summary": payload.summary, "edited_manually": True}
+            store.update_meeting(meeting_id, connection=connection, result=result)
+        else:
+            result = protocol_editor.edited_result(meeting["result"], payload.result)
+            store.update_meeting(meeting_id, connection=connection, result=result, title=result["title"])
     store.record_audit(_actor_name(user), "protocol.edit", meeting_id)
     return _owned(store.get_meeting(meeting_id), user)
 
 
 @app.post("/api/meetings/{meeting_id}/protocol/proofread")
-async def proofread_protocol(meeting_id: str, payload: protocol_editor.EditRequest, request: Request,
+async def proofread_protocol(meeting_id: str, payload: protocol_editor.EditRequest | protocol_editor.SummaryEditRequest,
+                             request: Request,
                              user: dict = Depends(require_user)) -> dict:
     meeting = _owned(await run_in_threadpool(store.get_meeting, meeting_id), user)
     _editable_protocol(meeting, payload.revision)
     with protocol_editor.proofread_slot(user["user_id"]):
-        return {"suggestions": await protocol_editor.proofread(payload.result, request.is_disconnected)}
+        fields = ({"summary": payload.summary} if isinstance(payload, protocol_editor.SummaryEditRequest)
+                  else protocol_editor.prose_fields(payload.result))
+        return {"suggestions": await protocol_editor.proofread(fields, request.is_disconnected)}
 
 
 @app.post("/api/meetings/{meeting_id}/protocol")
