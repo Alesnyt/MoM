@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from zipfile import BadZipFile, ZipFile
 
 from . import config, directory_scope, glossary, ldap_auth, store
+from .known_term_forms import GlossaryFormIndex
 
 log = logging.getLogger("mom.context")
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -449,6 +450,7 @@ class Context:
         self.entries = terms if owned else [dict(entry) for entry in terms]
         for entry in self.entries:
             entry.update(source="dictionary", description=entry.get("description", ""))
+        self.discovery_forms = GlossaryFormIndex(self.entries)
         self.definition_loader = None
         self.entries = self.entries + [{"term": person["name"], "aliases": [], "source": "ad",
                              "description": person.get("job_title", ""), "department": person.get("department", "")}

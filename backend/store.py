@@ -176,10 +176,10 @@ def init_db() -> None:
 
         from .glossary import init_schema
         init_schema(conn)
-        from .term_discovery import init_schema as init_discovery
+        from .term_discovery import init_schema as init_discovery, regroup_existing
         init_discovery(conn)
 
-
+    regroup_existing()
 
 def get_app_setting(key: str) -> dict | None:
     with connect() as conn:

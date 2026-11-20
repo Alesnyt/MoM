@@ -579,10 +579,10 @@ export async function enableGlossary(id: string, enabled: boolean): Promise<void
 
 export type TermVariant = {id:string;revision:number;variant:string;canonical:string;description:string;department:string;
   replace_text:number;meetings:number;state:string;examples:{id:number;meeting_id:string;title:string;excerpt:string;start:number|null;audio:boolean}[]};
-export type TermProposal = {key:string;meetings:number;variants:TermVariant[]};
+export type TermProposal = {key:string;form_label:string|null;meetings:number;variants:TermVariant[]};
 export type TermDiscovery = {job:{enabled:boolean;run_time:string;max_batches:number;next_run_at:string;
   status:string;batches:number;found:number;pending_meetings:number;error:string|null;started_at:string|null;finished_at:string|null;model:string|null};
-  counts:Record<string,number>;proposals:TermProposal[];total:number};
+  counts:Record<string,number>;group_counts?:Record<string,number>;proposals:TermProposal[];total:number};
 export async function getTermDiscovery(state:string,offset:number,signal?:AbortSignal):Promise<TermDiscovery> {
   const response=await apiRequest(`/api/admin/term-discovery?state=${encodeURIComponent(state)}&offset=${offset}`,{credentials:'include',signal});
   return response.json();

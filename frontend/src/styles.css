@@ -1849,6 +1849,7 @@ select.title-input {
 .term-proposal > label input:not([type=checkbox]) { display: block; width: 100%; margin-top: .4rem; }
 .term-proposal .context-toggle { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .term-variant { padding: .7rem 0; }
+.term-hide-forms { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin-top: .75rem; }
 .term-variant blockquote { margin: .5rem 0 .7rem 1.6rem; padding: .6rem .9rem; border-left: 2px solid var(--line); }
 .term-variant blockquote p { margin: 0 0 .5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-variant blockquote small { display: block; margin-bottom: .4rem; }

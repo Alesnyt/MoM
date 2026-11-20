@@ -1,7 +1,7 @@
 import {useEffect,useState} from 'react';
 import {getTermDiscovery,termDiscoveryAction,getGlossaries,type TermDiscovery,type TermProposal} from './api';
 import {formatDate} from './format';
-const states=[['pending','На проверке'],['approved','Подтверждённые'],['deferred','Отложенные'],['rejected','Отклонённые']];
+const states=[['pending','На проверке'],['approved','Подтверждённые'],['deferred','Отложенные'],['rejected','Отклонённые'],['ordinary','Скрытые слова']];
 const labels:Record<string,string>={idle:'Ожидает запуска',queued:'В очереди',running:'Анализирую новые реплики',
   paused:'Ожидаю завершения обработки встреч',succeeded:'Прогон завершён',error:'Не удалось завершить анализ'};
 
@@ -54,9 +54,13 @@ export function TermDiscoveryPanel({onPublish=()=>{}}:{onPublish?:()=>void}) {
         {['queued','running','paused'].includes(data.job.status)&&<button className="ghost" disabled={busy}
           onClick={()=>void action(()=>termDiscoveryAction('stop'))}>Остановить анализ</button>}
       </div>
-      <div className="term-tabs" aria-label="Раздел предложений">{states.map(([key,label])=><button key={key} className={state===key?'primary':'ghost'}
-        aria-pressed={state===key} onClick={()=>{setState(key);setOffset(0);setData(null);}}>{label} · {data.counts[key]||0}</button>)}</div>
-      <p className="muted">Сначала показаны варианты из нескольких встреч. Группировка по звучанию приблизительная — проверьте каждый выбранный вариант.</p>
+      <div className="term-tabs" aria-label="Раздел предложений">{states.map(([key,label])=>{
+        const count = (data.group_counts ?? data.counts)[key] ?? 0;
+        const countLabel = `${data.group_counts ? 'Карточек' : 'Вариантов'} — ${count}`;
+        return <button key={key} className={state===key?'primary':'ghost'} title={countLabel} aria-label={`${label}. ${countLabel}`}
+          aria-pressed={state===key} onClick={()=>{if(key!==state||offset>0){setState(key);setOffset(0);setData(null);}}}>{label} · {count}</button>;
+      })}</div>
+      {state==='ordinary'&&<p className="muted">Здесь собраны слова, которые администратор скрыл вместе с их формами. Их можно вернуть в предложения.</p>}
       {!data.proposals.length&&<p>В этом разделе предложений пока нет.</p>}
       {data.proposals.map(p=><Proposal key={p.key+state} proposal={p} state={state} busy={busy}
         onReview={payload=>action(async()=>{await termDiscoveryAction('review',payload);onPublish();})}/>) }
@@ -80,11 +84,23 @@ function Proposal({proposal,state,busy,onReview}:{proposal:TermProposal;state:st
   },[canonical]);
   const selectedItems=proposal.variants.filter(v=>selected.includes(v.id)).map(({id,revision})=>({id,revision}));
   function review(action:string){return onReview({items:selectedItems,action,canonical,description,department,replace_text:replace});}
+  const hidden = state === 'ordinary';
+  function reviewForms(action:'hide_forms'|'restore_forms') {
+    const [variant] = proposal.variants;
+    if (variant) return onReview({action, items:[{id:variant.id, revision:variant.revision}]});
+  }
   return <article className="term-proposal">
-    <h3>{proposal.variants.map(v=>v.variant).join(' / ')}</h3><p>Встреч с примерами: {proposal.meetings}</p>
+    <h3>{proposal.form_label || proposal.variants.map(v=>v.variant).join(' / ')}</h3>
+    <p>
+      {proposal.form_label && 'Словоформы из реплик · '}
+      {!proposal.form_label && proposal.variants.length > 1 && 'Варианты со сходным звучанием · '}
+      Встреч с примерами: {proposal.meetings}
+    </p>
     {proposal.variants.map(v=><div className="term-variant" key={v.id}>
-      <label className="context-toggle"><input type="checkbox" checked={selected.includes(v.id)} disabled={busy}
+      {hidden ? <div className="context-toggle"><strong>{v.variant}</strong><small>Встреч: {v.meetings}</small></div>
+      : <label className="context-toggle"><input type="checkbox" checked={selected.includes(v.id)} disabled={busy}
         onChange={e=>setSelected(old=>e.target.checked?[...old,v.id]:old.filter(id=>id!==v.id))}/><strong>{v.variant}</strong><small>Встреч: {v.meetings}</small></label>
+      }
       {state==='approved'&&<p>→ {v.canonical} · {v.replace_text?'Разрешена замена':'Только поиск контекста'}{v.department?` · ${v.department}`:''}</p>}
       {!v.examples.length&&<p className="muted">Встречи с примерами уже удалены из архива.</p>}
       {v.examples.map(e=><blockquote key={e.id}><p>{e.excerpt}</p><small>{e.title}{e.start!==null?` · ${Math.floor(e.start/60)}:${String(Math.floor(e.start%60)).padStart(2,'0')}`:''}</small>
@@ -93,7 +109,7 @@ function Proposal({proposal,state,busy,onReview}:{proposal:TermProposal;state:st
       </blockquote>)}
     </div>)}
     {audioError&&<p role="alert">{audioError}</p>}
-    {state!=='approved'&&<>
+    {!hidden&&state!=='approved'&&<>
       <div className="glossary-fields"><label>Правильное написание<input type="text" value={canonical} maxLength={240} list={`terms-${proposal.key}`} disabled={busy}
         placeholder="Введите название или найдите существующий термин" onChange={e=>setCanonical(e.target.value)}/>
         <datalist id={`terms-${proposal.key}`}>{matches.map(term=><option key={term} value={term}/>)}</datalist></label>
@@ -103,11 +119,16 @@ function Proposal({proposal,state,busy,onReview}:{proposal:TermProposal;state:st
       <p className="muted">По умолчанию варианты помогают только подбору контекста. Если указано подразделение, замены действуют для встреч его сотрудников по данным AD.</p>
     </>}
     <div className="composer-row">
-      {state!=='approved'&&<button className="primary" disabled={busy||!selectedItems.length||!canonical.trim()} onClick={()=>void review('approve')}>Подтвердить выбранные</button>}
+      {!hidden&&state!=='approved'&&<button className="primary" disabled={busy||!selectedItems.length||!canonical.trim()} onClick={()=>void review('approve')}>Подтвердить выбранные</button>}
       {state==='pending'&&<><button className="ghost" disabled={busy||!selectedItems.length} onClick={()=>void review('defer')}>Отложить на неделю</button>
         <button className="ghost" disabled={busy||!selectedItems.length} onClick={()=>void review('reject')}>Отклонить выбранные</button></>}
-      {state!=='pending'&&<button className="ghost" disabled={busy||!selectedItems.length} onClick={()=>void review('reopen')}>
+      {!hidden&&state!=='pending'&&<button className="ghost" disabled={busy||!selectedItems.length} onClick={()=>void review('reopen')}>
         {state==='approved'?'Отозвать и пересмотреть':'Вернуть на проверку'}</button>}
+      {hidden&&<button className="ghost" disabled={busy} onClick={()=>void reviewForms('restore_forms')}>Вернуть слово и его формы</button>}
     </div>
+    {proposal.form_label&&(state==='pending'||state==='deferred')&&<div className="term-hide-forms">
+      <button className="ghost" disabled={busy} onClick={()=>void reviewForms('hide_forms')}>Обычное слово — скрыть его формы</button>
+      <small className="muted">Действует и для будущих предложений. Отменить можно в разделе «Скрытые слова».</small>
+    </div>}
   </article>;
 }

@@ -128,7 +128,7 @@ def create_router(require_admin) -> APIRouter:
 
 
     @router.get('/api/admin/term-discovery')
-    def get_term_discovery(state: Literal['pending','approved','rejected','deferred'] = 'pending',
+    def get_term_discovery(state: Literal['pending','approved','rejected','deferred','ordinary'] = 'pending',
                            offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)):
         return term_discovery.snapshot(state,offset)
 

@@ -306,3 +306,167 @@ def test_candidate_evidence_is_bounded_and_contains_late_match():
     p=next(p for p in parts if 'ФайнБи' in p['text'])
     found=td.validate_candidates({'candidates':[{'turn':p['id'],'term':'ФайнБи'}]},parts)
     assert len(found[0]['excerpt'])<500 and 'ФайнБи' in found[0]['excerpt']
+
+
+def scan_terms(mid, text, terms):
+    meeting(mid, text)
+    td.queue('admin')
+    owner = td._claim()
+    batch = td._batch(owner)
+    assert batch['meeting_id'] == mid
+    candidates = td.validate_candidates({'candidates': [{'turn': 0, 'term': term} for term in terms]}, batch['parts'])
+    td._save(owner, batch, candidates)
+    with store.connect() as conn:
+        conn.execute("UPDATE term_discovery SET status='succeeded'")
+    return td.snapshot()
+
+
+def test_russian_forms_share_a_card_and_hide_restore_from_admin_api(db):
+    forms = ['проект', 'проекта', 'проектов', 'проектами']
+    snapshot = scan_terms('m1', 'Обсудим ' + ', '.join(forms), forms)
+    [group] = snapshot['proposals']
+    assert group['form_label'] == 'проект' and snapshot['counts']['pending'] == 4
+    assert snapshot['group_counts']['pending'] == 1
+    assert group['meetings'] == 1 and {v['variant'] for v in group['variants']} == set(forms)
+    assert all(v['examples'][0]['start'] == 5 for v in group['variants'])
+
+    client = TestClient(main.app)
+    first = group['variants'][0]
+    def review(v, action):
+        return client.post('/api/admin/term-discovery/review', json={
+            'action': action, 'items': [{'id': v['id'], 'revision': v['revision']}]})
+
+    assert review(first, 'hide_forms').status_code == 200
+    assert review(first, 'hide_forms').status_code == 409
+    store.init_db()
+    assert not scan_terms('m2', 'Вернёмся к проекту.', ['проекту'])['proposals']
+    hidden = client.get('/api/admin/term-discovery?state=ordinary').json()
+    assert hidden['total'] == 1 and hidden['group_counts']['ordinary'] == 1
+    [group] = hidden['proposals']
+    assert group['meetings'] == 1 and len(group['variants']) == 4
+    assert review(group['variants'][0], 'restore_forms').status_code == 200
+    [group] = scan_terms('m3', 'Вернёмся к проекту.', ['проекту'])['proposals']
+    assert group['meetings'] == 2 and len(group['variants']) == 5
+    assert not td.snapshot('ordinary')['proposals']
+
+
+def test_hidden_ordinary_word_does_not_hide_protected_context_or_capitalization(db):
+    [card] = scan_terms('m1', 'Проверили контур.', ['контур'])['proposals']
+    decide(card['variants'][0], 'hide_forms')
+    [protected] = scan_terms('m2', 'Заявку завели в системе контур.', ['контур'])['proposals']
+    assert protected['form_label'] is None
+    assert protected['variants'][0]['id'] != card['variants'][0]['id']
+    [protected] = scan_terms('m3', 'Заявку завели в системе Контур.', ['Контур'])['proposals']
+    assert {v['variant'] for v in protected['variants']} == {'контур', 'Контур'}
+    with pytest.raises(ValueError, match='словарной формы'):
+        decide(protected['variants'][0], 'hide_forms')
+    assert not glossary.catalog()['terms']
+
+
+def test_known_glossary_inflection_and_new_forms_preserve_transcript(db):
+    glossary.import_legacy([dict(term='витрина данных', aliases=[], description='', department='')], 'admin')
+    snapshot = scan_terms('m1', 'Обратимся к витрине данных, затем к проекту.', ['к витрине данных', 'проекту'])
+    [card] = snapshot['proposals']
+    [variant] = card['variants']
+    assert variant['variant'] == 'проекту'
+    with pytest.raises(ValueError, match='падеж'):
+        decide(variant, canonical='проект', replace=True)
+    with pytest.raises(ValueError, match='падеж'):
+        decide(variant, canonical='Проект', replace=True)
+    decide(variant, canonical='проект', replace=False)
+    document = {'segments': [{'text': 'Обратимся к витрине данных, затем к проекту.'}]}
+    assert cc.for_meeting({}).apply(document)['segments'] == document['segments']
+
+
+def test_upgrade_regroups_stored_queue_without_rescanning_and_preserves_review_decisions(db):
+    meeting(text='Обсудим проект, проекта, проектами.')
+    fixtures = [('v1', 'проект', 'pending'), ('v2', 'проекта', 'deferred'),
+                ('v3', 'проектами', 'rejected'), ('v4', 'контур', 'pending')]
+    with store.connect() as conn:
+        conn.execute("UPDATE term_scan_progress SET cursor=1,dirty=0,complete=1")
+        for cid, variant, state in fixtures:
+            conn.execute('''INSERT INTO term_candidates(id,normalized,variant,group_key,state,created_at,snooze_until)
+                VALUES(?,?,?,?,?,?,?)''', (cid, variant, variant, td.group_key(variant),
+                                           state, store.utc_now(), td.time.time()+3600 if state == 'deferred' else 0))
+            excerpt = 'Работаем в системе контур' if variant == 'контур' else 'Обсудим проект, проекта, проектами.'
+            conn.execute('''INSERT INTO term_evidence(candidate_id,meeting_id,turn,excerpt,start)
+                            VALUES(?, 'm1', 0, ?, 3)''', (cid, excerpt))
+    store.init_db()
+    store.init_db()
+    cards = td.snapshot()['proposals']
+    assert {(g['variants'][0]['id'], g['form_label']) for g in cards} == {('v1', 'проект'), ('v4', None)}
+    v1 = next(g['variants'][0] for g in cards if g['form_label'])
+    assert v1['revision'] == 2 and v1['examples'][0]['start'] == 3
+    assert td.snapshot()['job']['pending_meetings'] == 0
+    decide(v1, 'hide_forms')
+    assert len(td.snapshot('ordinary')['proposals'][0]['variants']) == 2
+    assert td.snapshot('rejected')['proposals'][0]['variants'][0]['id'] == 'v3'
+    decide(td.snapshot('ordinary')['proposals'][0]['variants'][0], 'restore_forms')
+    assert td.snapshot('deferred')['proposals'][0]['variants'][0]['id'] == 'v2'
+
+
+def test_mixed_usages_in_one_long_turn_keep_the_named_example_after_hiding(db):
+    text = 'Проверили контур. ' + 'Подробности обсудим позже. ' * 18 + 'Оставили заявку в системе контур.'
+    [group] = scan_terms('m1', 'Обсудили контур.', ['контур'])['proposals']
+    decide(group['variants'][0], 'hide_forms')
+    [named] = scan_terms('m2', text, ['контур'])['proposals']
+    assert named['form_label'] is None
+    [evidence] = named['variants'][0]['examples']
+    assert 'в системе контур' in evidence['excerpt'] and evidence['turn'] == 0
+
+
+def test_restore_respects_queue_limit_and_keeps_rule_on_failure(db, monkeypatch):
+    [card] = scan_terms('m1', 'Несколько проектов и один проект', ['проектов','проект'])['proposals']
+    decide(card['variants'][0], 'hide_forms')
+    scan_terms('m2', 'Смотрим ДВХ.', ['ДВХ'])
+    monkeypatch.setattr(td, 'MAX_CANDIDATES', 2)
+    hidden = td.snapshot('ordinary')['proposals'][0]['variants'][0]
+    with pytest.raises(ValueError, match='места'):
+        decide(hidden, 'restore_forms')
+    again = td.snapshot('ordinary')
+    assert again['counts']['ordinary'] == 2 and again['counts']['pending'] == 1
+    assert not glossary.catalog()['terms']
+
+
+def test_rolling_upgrade_preserves_ids_and_evidence_for_a_conflicting_spelling(db):
+    [active] = scan_terms('m1', 'Закончим проект.', ['проект'])['proposals']
+    with store.connect() as conn:
+        conn.execute("""INSERT INTO term_candidates(id,normalized,variant,group_key,state,created_at)
+            VALUES('old','проект','проект','prkt','rejected','2025-01-01')""")
+        conn.execute("""INSERT INTO term_evidence(candidate_id,meeting_id,turn,excerpt)
+            VALUES('old','m1',7,'Старый проект.')""")
+    store.init_db()
+    assert td.snapshot()['proposals'][0]['variants'][0]['id'] == active['variants'][0]['id']
+    [reviewed] = td.snapshot('rejected')['proposals'][0]['variants']
+    assert reviewed['id'] == 'old' and reviewed['examples'][0]['turn'] == 7
+
+
+def test_legacy_worker_cannot_reintroduce_hidden_pending_or_deferred_forms(db):
+    [group] = scan_terms('m1', 'Начали проект.', ['проект'])['proposals']
+    decide(group['variants'][0], 'hide_forms')
+    deadline = td.time.time() + 3600
+    with store.connect() as conn:
+        for variant, state, snooze in [('проектов', 'pending', 0), ('проекта', 'deferred', deadline)]:
+            conn.execute('''INSERT INTO term_candidates(id,normalized,variant,group_key,state,snooze_until,created_at)
+                VALUES(?,?,?,?,?,?,?)''', (variant, variant, variant, td.group_key(variant), state, snooze, store.utc_now()))
+            conn.execute("""INSERT INTO term_evidence(candidate_id,meeting_id,turn,excerpt)
+                VALUES(?, 'm1', 8, ?)""", (variant, variant))
+    store.init_db()
+    assert not td.snapshot()['proposals'] and not td.snapshot('deferred')['proposals']
+    [group] = td.snapshot('ordinary')['proposals']
+    assert {v['variant'] for v in group['variants']} == {'проект', 'проекта', 'проектов'}
+    assert all(v['examples'] for v in group['variants'])
+    decide(group['variants'][0], 'restore_forms')
+    assert td.snapshot('deferred')['proposals'][0]['variants'][0]['snooze_until'] == deadline
+    assert td.snapshot()['counts']['pending'] == 2
+
+
+def test_naming_cue_at_part_boundary_preserves_old_fingerprint_and_protects_name():
+    text = 'а ' * 595 + 'в системе контур'
+    digest, parts = td.original_parts(json.dumps({'segments': [{'text': text}]}))
+    assert len(parts) == 2 and parts[0]['text'].endswith('в системе ') and parts[1]['text'] == 'контур'
+    old_parts = [{k: v for k, v in part.items() if k != 'prefix'} for part in parts]
+    import hashlib
+    assert digest == hashlib.sha256(json.dumps(old_parts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    [item] = td.validate_candidates({'candidates': [{'turn': 1, 'term': 'контур'}]}, [parts[1]])
+    assert item['name_context'] and 'в системе контур' in item['excerpt']

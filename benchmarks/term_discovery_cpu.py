@@ -21,9 +21,10 @@ def main():
     args=parser.parse_args()
     with tempfile.TemporaryDirectory() as folder:
         config.DATA_DIR=Path(folder);store.DB_PATH=config.DATA_DIR/'mom.db';store.init_db()
+        owner = store.create_user('benchmark@example.test', 'unused', archive_limit=100)
         for index in range(args.meetings):
             segments=[{'text':f'В системе файн би строим отчёт. В ДВХ проверим таблицу номер {turn}.', 'start':turn*10,'end':turn*10+8} for turn in range(120)]
-            store.create_text_meeting(f'm{index}',f'Встреча {index}','test.wav','benchmark',{'segments':segments})
+            store.create_text_meeting(f'm{index}',f'Встреча {index}','test.wav',owner['id'],{'segments':segments})
         td.settings(False,'03:30',500,'benchmark');td.queue('benchmark')
         calls=0
         async def stub(parts):
