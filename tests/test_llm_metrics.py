@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, BadRequestError
+from openai import APIConnectionError, APITimeoutError, BadRequestError
 from openai import _base_client
 
 # Use the SDK's HTTP implementation (OpenAI 3 uses httpx2, older releases httpx).
@@ -146,7 +146,7 @@ def test_actual_sdk_retry_is_observed_without_network(observations):
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
             })
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-            async with AsyncOpenAI(api_key="private-key", base_url="https://private.test/v1",
+            async with llm_metrics.ObservedAsyncOpenAI(api_key="private-key", base_url="https://private.test/v1",
                                    http_client=http, max_retries=1) as client:
                 llm_metrics.instrument_client(client)
                 llm_metrics.instrument_client(client)
@@ -159,6 +159,12 @@ def test_actual_sdk_retry_is_observed_without_network(observations):
     data = observations[0][1]
     assert data["http_attempts"] == data["sdk_attempts"] == 2
     assert data["http_status"] == 200 and data["outcome"] == "ok"
+    details = data["sdk_attempt_details"]
+    assert [(a["attempt"], a["http_status"], a["error_kind"]) for a in details] == [
+        (1, 429, "rate_limit"), (2, 200, "none")]
+    assert all(a["seconds"] >= 0 for a in details)
+    assert details[0]["gap_before_seconds"] is None and details[1]["gap_before_seconds"] >= 0
+    assert data["omitted_sdk_attempts"] == 0
     assert len(observations) == 1
     assert "private" not in json.dumps(observations)
 
@@ -183,6 +189,40 @@ def test_overlapping_calls_keep_attempts_and_phases_separate(observations):
     asyncio.run(scenario())
     counts = {phase: data["sdk_attempts"] for phase, data in observations}
     assert counts == {"protocol_part": 2, "name_review": 1}
+
+
+def test_network_failures_on_intermediate_and_final_sends(observations):
+    async def scenario():
+        outcomes = iter(("timeout", "server", "connection"))
+        async def transport(request):
+            outcome = next(outcomes)
+            if outcome == "timeout":
+                raise httpx.ReadTimeout("private details", request=request)
+            if outcome == "server":
+                return httpx.Response(503, headers={"retry-after-ms": "1"})
+            raise httpx.ConnectError("private endpoint", request=request)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            async with llm_metrics.ObservedAsyncOpenAI(api_key="private", base_url="https://private.test",
+                                                      http_client=http, max_retries=2) as client:
+                llm_metrics.instrument_client(client)
+                with pytest.raises(APIConnectionError):
+                    await llm_metrics.completion(client, messages=[], model="private")
+    asyncio.run(scenario())
+    data = observations[0][1]
+    assert data["http_status"] is None and data["http_attempts"] == data["sdk_attempts"] == 3
+    assert [(a["http_status"], a["error_kind"]) for a in data["sdk_attempt_details"]] == [
+        (None, "timeout"), (503, "server"), (None, "connection")]
+    assert "private" not in json.dumps(observations)
+
+
+def test_attempt_details_keep_first_and_final_send_with_bounded_storage(monkeypatch):
+    monkeypatch.setattr(llm_metrics, "MAX_SDK_ATTEMPTS", 2)
+    attempts = llm_metrics._Attempts()
+    for status in (500, 429, 200):
+        attempts.finish_send(llm_metrics.time.perf_counter(), status, llm_metrics._status_kind(status))
+    assert attempts.sends == 3
+    assert [a["http_status"] for a in attempts.details] == [500, 200]
+    assert attempts.details[-1]["attempt"] == 3
 
 
 def test_make_client_installs_observers_and_closes_normally(monkeypatch):

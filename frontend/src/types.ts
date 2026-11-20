@@ -165,6 +165,10 @@ export type DiagnosticsSummary = {
     asr_rtf: number | null;
     llm_calls: number;
     peak_rss_bytes: number | null;
+    after_idle_rss_bytes?: number | null;
+    gigaam_fragments?: number | null;
+    gigaam_source_seconds?: number | null;
+    sdk_retries?: number | null;
   }[];
   error?: "storage_unavailable";
 };

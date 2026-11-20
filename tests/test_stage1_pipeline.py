@@ -248,6 +248,14 @@ def test_parallel_gigaam_uses_a_single_model_slot(
     asyncio.run(scenario())
     assert peak == 1, "Two simultaneous GigaAM calls share the same model"
     assert [store.get_meeting(mid)["status"] for mid in ids] == ["review", "review"]
+    runs = pipeline.diagnostics.export_report()["runs"]
+    assert len(runs) == 2
+    for run in runs:
+        points = run["model_memory"]
+        assert points["before_models"] == points["before_diarization"]
+        order = [points[key]["offset_seconds"] for key in (
+            "before_diarization", "after_diarization", "before_gigaam", "after_gigaam")]
+        assert order == sorted(order)
 
 
 @pytest.mark.parametrize("engine", ["local-whisper", "gigaam-multilingual"])
