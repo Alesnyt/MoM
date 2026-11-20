@@ -20,6 +20,8 @@ const AUDIT_LABELS: Record<string, string> = {
   "prompts.save": "Сохранены промпты LLM",
   "speaker.rename": "Переименован спикер",
   "speaker.reassign": "Реплики перенесены",
+  "email.confirm": "Отправка протокола подтверждена",
+  "speaker.merge": "Спикеры объединены",
   "email.send": "Протокол отправлен",
   "email.open": "Открыт черновик письма",
   "email.fail": "Письмо не ушло",

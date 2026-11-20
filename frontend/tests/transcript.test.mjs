@@ -260,3 +260,32 @@ test('green completion uses saved labels on all turns and ignores an unused unkn
     assert.equal(view.queryByText(/Все спикеры размечены/), null);
   }
 });
+
+
+test('merge previews the destination and moves the active speaker filter with the turns', async () => {
+  const value = meeting();
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push([url, init.method, JSON.parse(init.body)]);
+    return response({...value, speakers: [value.speakers[1]],
+      segments: value.segments.map(s => ({...s, speaker: 'S2'}))});
+  };
+  const view = mount(value);
+  fireEvent.click(view.getByRole('button', {name: 'Показать реплики: Спикер 1'}));
+  fireEvent.click(view.getByText('Объединить спикеров'));
+  const confirm = view.getByRole('button', {name: 'Подтвердить объединение'});
+  assert.ok(confirm.disabled);
+  fireEvent.change(view.getByLabelText('Чьи реплики перенести'), {target: {value: 'S1'}});
+  const target = view.getByLabelText('Кому передать все реплики');
+  assert.deepEqual(Array.from(target.options, o => o.value), ['', 'S2']);
+  fireEvent.change(target, {target: {value: 'S2'}});
+  assert.ok(view.getByText(/Все реплики «Спикер 1» перейдут к «Спикер 2»/));
+  assert.deepEqual(requests, []);
+  fireEvent.click(confirm);
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.speaker-card').length, 1));
+  assert.deepEqual(requests, [['/api/meetings/review/speakers/S1/merge', 'POST', {target_id:'S2'}]]);
+  assert.equal(view.getByRole('button', {name: 'Сбросить фильтр: Спикер 2'}).getAttribute('aria-pressed'), 'true');
+  const turns = view.container.querySelector('.turns');
+  assert.ok(Array.from(turns.querySelectorAll('.speaker-name')).every(e => e.textContent === 'Спикер 2'));
+  for (const s of value.segments) assert.ok(turns.textContent.includes(s.text));
+});

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import errno
+import hashlib
 import logging
 import sqlite3
 import threading
@@ -43,7 +44,8 @@ from .api_schemas import (
     DirectoryScopeIn,
     LdapTestIn,
     SpeakerNameIn,
-    ProtocolRecipientIn,
+    ProtocolSendIn,
+    MergeSpeakersIn,
     ProtocolIn,
     SpeakerAssignIn,
     SmtpTestIn,
@@ -61,9 +63,9 @@ from . import word_protocol, context_api, calendar_api, calendar_service
 from .exchange_ews import ExchangeError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from .config import AUDIO_DIR, UPLOAD_DIR, ensure_dirs
-from .mail import build_eml, email_body, send_mail, smtp_snapshot
+from .mail import prepare_protocol_mail, queue_protocol_mail, build_eml, email_body, send_mail, smtp_snapshot
 from .pipeline import format_duration
-from .speakers import SpeakerError, participant_labels, reassign_segments, rename_speaker, render_transcript, replace_speaker_label, select_protocol_recipients
+from .speakers import SpeakerError, clean_speaker_email, merge_speakers, participant_labels, reassign_segments, rename_speaker, render_transcript, replace_speaker_label
 
 log = logging.getLogger("mom.api")
 
@@ -1027,6 +1029,7 @@ def retry_meeting(
                 status_code=400,
                 detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
             )
+        _check_mail_queue(connection, meeting_id)
         store.queue_reprocessing(meeting, connection=connection,
                                  resume_transcript=meeting["status"] == "error")
     store.refresh_queue_messages()
@@ -1037,11 +1040,17 @@ def retry_meeting(
     return updated
 
 
+def _check_mail_queue(connection: sqlite3.Connection, meeting_id: str) -> None:
+    if connection.execute("SELECT 1 FROM protocol_mail WHERE meeting_id=? AND state IN ('pending','sending') LIMIT 1",
+                          (meeting_id,)).fetchone():
+        raise HTTPException(409, "Предыдущее письмо ещё в очереди. Дождитесь результата отправки.")
+
+
 def _editable_protocol(meeting: dict, revision: str) -> None:
     if meeting["status"] != "done" or not isinstance(meeting.get("result"), dict):
-        raise HTTPException(409, "Доступен для редактирования только готовый протокол.")
+        raise HTTPException(409, "Дождитесь готовности протокола.")
     if meeting["result_revision"] != revision:
-        raise HTTPException(409, "Протокол уже изменился. Скопируйте нужные правки, обновите страницу и снова откройте встречу.")
+        raise HTTPException(409, "Протокол уже изменился. Проверьте актуальную версию встречи.")
 
 
 @app.patch("/api/meetings/{meeting_id}/protocol")
@@ -1078,24 +1087,10 @@ def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dic
                 status_code=400,
                 detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
             )
-        recipients = [item.model_dump() for item in payload.recipients] if payload else []
-        if recipients and not config.smtp_configured():
-            raise HTTPException(status_code=400, detail="Для отправки протокола спикерам настройте SMTP в админке")
-        document = {
-            "speakers": meeting.get("speakers") or [],
-            "segments": meeting.get("segments") or [],
-            "note": meeting.get("diarization_note"),
-            "name_review": meeting.get("name_review"),
-            "corporate_context": meeting.get("corporate_context"),
-            "source_type": meeting.get("source_type", "audio"),
-        }
-        try:
-            document = select_protocol_recipients(document, recipients)
-        except SpeakerError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not store.queue_review_protocol(meeting_id, document, connection=connection):
+        if payload and payload.recipients:
+            raise HTTPException(400, "Выберите получателей в готовом протоколе и подтвердите отправку.")
+        if not store.queue_review_protocol(meeting_id, connection=connection):
             raise HTTPException(status_code=409, detail="Протокол уже поставлен в очередь")
-    store.record_audit(_actor_name(user), "protocol.recipients", meeting_id, f"Дополнительных получателей: {len(recipients)}")
     store.refresh_queue_messages()
     worker.notify_work()
     return store.get_meeting(meeting_id)
@@ -1195,6 +1190,7 @@ def _save_segments(
     if result is not None and not store.is_manual_protocol(result) and replace_from and replace_to:
         fields["result"] = replace_speaker_label(result, replace_from, replace_to)
     if rebuild:
+        _check_mail_queue(connection, meeting_id)
         fields["result"] = None
         fields.update(status="queued", status_message="Обновляю протокол после правки спикеров",
                       error=None, progress=88, queued_at=store.utc_now())
@@ -1227,6 +1223,25 @@ def rename_meeting_speaker(
         )
     if old_name != new_name:
         store.record_audit(_actor_name(user), "speaker.rename", meeting_id, f"{old_name} → {new_name}")
+    return store.get_meeting(meeting_id)
+
+
+@app.post("/api/meetings/{meeting_id}/speakers/{speaker_id}/merge")
+def merge_meeting_speakers(meeting_id: str, speaker_id: str, payload: MergeSpeakersIn,
+                           user: dict = Depends(require_user)) -> dict:
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        document = _segments_doc(meeting)
+        try:
+            updated = merge_speakers(document, speaker_id, payload.target_id)
+        except SpeakerError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        rebuild = meeting["status"] != "review" and not store.is_manual_protocol(meeting.get("result"))
+        _save_segments(connection, meeting_id, updated, None, rebuild=rebuild)
+    if rebuild:
+        store.refresh_queue_messages()
+        worker.notify_work()
+    store.record_audit(_actor_name(user), "speaker.merge", meeting_id, f"{speaker_id} → {payload.target_id}")
     return store.get_meeting(meeting_id)
 
 
@@ -1311,6 +1326,53 @@ def export_word(meeting_id: str, user: dict = Depends(require_user)) -> Response
     })
 
 
+@app.post("/api/meetings/{meeting_id}/protocol/send")
+def confirm_protocol_mail(meeting_id: str, payload: ProtocolSendIn, user: dict = Depends(require_user)) -> dict:
+    meeting = _owned(store.get_meeting(meeting_id), user)
+    try:
+        addresses = list(dict.fromkeys(clean_speaker_email(value) for value in payload.recipients))
+    except SpeakerError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    recipients_hash = hashlib.sha256("\n".join(addresses).encode()).hexdigest()
+
+    def was_confirmed(conn: sqlite3.Connection) -> bool:
+        previous = conn.execute(
+            "SELECT revision, recipients_hash FROM protocol_send_requests WHERE meeting_id=? AND request_id=?",
+            (meeting_id, payload.request_id),
+        ).fetchone()
+        if previous and tuple(previous) != (payload.revision, recipients_hash):
+            raise HTTPException(409, "Список адресов или версия изменились. Подтвердите отправку заново.")
+        return previous is not None
+
+    with store.connect() as conn:
+        if was_confirmed(conn):
+            return meeting
+    _editable_protocol(meeting, payload.revision)
+    if not config.smtp_configured():
+        raise HTTPException(400, "Настройте SMTP для отправки протокола")
+    try:
+        packet = prepare_protocol_mail(meeting)
+    except ValidationError as exc:
+        raise HTTPException(409, "Не удалось прочитать сохранённый протокол") from exc
+    # Render outside the writer lock, then atomically verify the version and publish one envelope.
+    with store.edit_meeting(meeting_id) as (conn, row):
+        current = _owned(row, user)
+        replay = was_confirmed(conn)
+        if not replay:
+            _editable_protocol(current, payload.revision)
+            _check_mail_queue(conn, meeting_id)
+            if current["speakers"] != meeting["speakers"]:
+                raise HTTPException(409, "Разметка изменилась. Проверьте участников и повторите отправку.")
+            queue_protocol_mail(conn, meeting, packet, addresses)
+            conn.execute(
+                "INSERT INTO protocol_send_requests (meeting_id, request_id, revision, recipients_hash) VALUES (?, ?, ?, ?)",
+                (meeting_id, payload.request_id, payload.revision, recipients_hash),
+            )
+    if not replay:
+        store.record_audit(_actor_name(user), "email.confirm", meeting_id, f"Получателей: {len(addresses)}")
+    return _owned(store.get_meeting(meeting_id), user)
+
+
 @app.get("/api/meetings/{meeting_id}/email.txt", response_class=PlainTextResponse)
 def meeting_email_text(meeting_id: str, user: dict = Depends(require_user)) -> str:
     meeting = _owned(store.get_meeting(meeting_id), user)
@@ -1325,7 +1387,12 @@ def download_meeting_email(meeting_id: str, user: dict = Depends(require_user)) 
     if meeting["status"] != "done" or not meeting.get("result"):
         raise HTTPException(status_code=409, detail="Протокол ещё не готов")
     try:
-        draft = build_eml(meeting)
+        with store.connect() as conn:
+            recipients = [r[0] for r in conn.execute("""
+                SELECT recipient FROM protocol_mail WHERE meeting_id=? AND ?=(
+                    SELECT revision FROM protocol_send_requests WHERE meeting_id=? ORDER BY rowid DESC LIMIT 1
+                ) ORDER BY id""", (meeting_id, meeting["result_revision"], meeting_id))]
+        draft = build_eml(meeting, recipients)
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail="Не удалось прочитать сохранённый протокол") from exc
     store.record_audit(_actor_name(user), "email.open", meeting_id, "скачан черновик с протоколом")

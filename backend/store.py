@@ -126,6 +126,13 @@ def init_db() -> None:
             filename TEXT NOT NULL,
             docx BLOB NOT NULL
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS protocol_send_requests (
+            meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+            request_id TEXT NOT NULL,
+            revision TEXT NOT NULL,
+            recipients_hash TEXT NOT NULL,
+            PRIMARY KEY(meeting_id, request_id)
+        )""")
         user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "auth_mode" not in user_columns:
             conn.execute(
@@ -364,14 +371,14 @@ def edit_meeting(meeting_id: str) -> Iterator[tuple[sqlite3.Connection, dict | N
         yield conn, _serialize(row) if row else None
 
 
-def queue_review_protocol(meeting_id: str, document: dict, *, connection: sqlite3.Connection | None = None) -> bool:
-    """Save explicitly selected recipients and claim review in one transaction."""
+def queue_review_protocol(meeting_id: str, *, connection: sqlite3.Connection | None = None) -> bool:
+    """Claim the reviewed transcript for protocol generation."""
     with (connect() if connection is None else nullcontext(connection)) as conn:
         cursor = conn.execute(
             """UPDATE meetings SET status='queued', status_message='Собираю протокол',
-               error=NULL, result_json=NULL, progress=88, queued_at=?, segments_json=?
+               error=NULL, result_json=NULL, progress=88, queued_at=?
                WHERE id=? AND status='review'""",
-            (utc_now(), json.dumps(document, ensure_ascii=False), meeting_id),
+            (utc_now(), meeting_id),
         )
         return cursor.rowcount == 1
 

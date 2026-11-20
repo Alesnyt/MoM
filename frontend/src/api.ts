@@ -1,4 +1,4 @@
-import type { AuditEvent, AuthStatus, DiagnosticsPeriod, DiagnosticsSummary, Health, Meeting, MonitoringSnapshot, PlatformUser, ProtocolRecipient, UserSession } from "./types";
+import type { AuditEvent, AuthStatus, DiagnosticsPeriod, DiagnosticsSummary, Health, Meeting, MonitoringSnapshot, PlatformUser, UserSession } from "./types";
 
 import { apiRequest } from "./http";
 export { ApiError, parseError } from "./http";
@@ -409,11 +409,27 @@ export async function deleteMeeting(id: string): Promise<void> {
   await apiRequest(`/api/meetings/${id}`, { method: "DELETE", credentials: "include" });
 }
 
-export async function startProtocol(id: string, recipients: ProtocolRecipient[] = []): Promise<Meeting> {
+export async function startProtocol(id: string): Promise<Meeting> {
   const response = await apiRequest(`/api/meetings/${id}/protocol`, {
     method: "POST", credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recipients }),
+    body: JSON.stringify({}),
+  });
+  return response.json();
+}
+
+export async function sendProtocol(id: string, revision: string, recipients: string[], requestId: string): Promise<Meeting> {
+  const response = await apiRequest(`/api/meetings/${id}/protocol/send`, {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ revision, recipients, request_id: requestId }),
+  });
+  return response.json();
+}
+
+export async function mergeSpeakers(id: string, source: string, target: string): Promise<Meeting> {
+  const response = await apiRequest(`/api/meetings/${id}/speakers/${encodeURIComponent(source)}/merge`, {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_id: target }),
   });
   return response.json();
 }

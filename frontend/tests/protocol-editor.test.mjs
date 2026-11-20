@@ -113,3 +113,53 @@ test('a manual protocol is rebuilt only after confirming the displayed revision'
     window.confirm = original;
   }
 });
+
+
+test('final delivery confirms participants, directory contacts and manual addresses together', async () => {
+  if (!globalThis.crypto) globalThis.crypto = (await import('node:crypto')).webcrypto;
+  const sent = [];
+  globalThis.fetch = async (url, options) => {
+    if (url.startsWith('/api/people?')) return reply({people: [
+      {email:'ad@example.com', name:'Коллега из региона', source:'ldap'},
+    ]});
+    assert.equal(url, '/api/meetings/one/protocol/send');
+    sent.push(JSON.parse(options.body));
+    // A lost acknowledgement must preserve the same confirmation on retry.
+    if (sent.length === 1) return reply({detail:'Ответ не получен'}, 503);
+    return reply({...initial, mail_pending:true});
+  };
+  function App() {
+    const [meeting, update] = React.useState({...initial,
+      speakers:[{id:'s1', name:'Анна', email:'anna@example.com'}]});
+    return React.createElement(MeetingPane, {meeting, onUpdated:update, tab:'overview',
+      ownerEmail:'owner@example.com', directoryEnabled:true, mailEnabled:true, onTab() {}});
+  }
+  const view = render(React.createElement(App));
+  fireEvent.click(view.getByText('Редактировать протокол'));
+  assert.equal(view.queryByText('Отправить протокол по почте'), null);
+  fireEvent.click(view.getByText('Отмена'));
+  fireEvent.click(view.getByText('Отправить протокол по почте'));
+  fireEvent.click(view.getByRole('button',{name:'Убрать owner@example.com'}));
+  fireEvent.click(view.getByRole('button',{name:/Анна · anna@example.com/}));
+  const input = view.getByLabelText('Найти в AD или ввести email');
+  fireEvent.change(input, {target:{value:'Коллега'}});
+  fireEvent.click(await view.findByText('Коллега из региона · ad@example.com'));
+  for (const value of ['Extra@example.com', 'extra@example.com']) {
+    fireEvent.change(input, {target:{value}});
+    fireEvent.click(view.getByRole('button',{name:'Добавить адрес'}));
+  }
+  fireEvent.click(view.getByText('Проверить получателей'));
+  assert.deepEqual(sent, []);
+  assert.equal(view.container.querySelectorAll('.delivery-addresses li').length, 3);
+  fireEvent.click(view.getByText('Изменить получателей'));
+  fireEvent.click(view.getByText('Проверить получателей'));
+  fireEvent.click(view.getByText('Подтвердить и отправить'));
+  await view.findByText('Ответ не получен');
+  fireEvent.click(view.getByText('Подтвердить и отправить'));
+  await view.findByText('Письмо ожидает завершения доставки.');
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0], sent[1]);
+  assert.match(sent[0].request_id, /^[a-f0-9]{32}$/);
+  assert.equal(sent[0].revision, initial.result_revision);
+  assert.deepEqual(sent[0].recipients, ['anna@example.com', 'ad@example.com', 'extra@example.com']);
+});

@@ -6,7 +6,7 @@ import { isProtocolResult } from "./protocol";
 import { TranscriptView } from "./transcript";
 import { ProtocolEditor } from "./protocol-editor";
 import { ProtocolRecipients } from "./recipients";
-import type { Meeting, MeetingResult, MeetingStatus, ProtocolRecipient, Tab } from "./types";
+import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
 
 export const STEPS: { id: MeetingStatus; label: string }[] = [
   { id: "extracting", label: "Аудио" },
@@ -18,6 +18,7 @@ export function MeetingPane({
   meeting,
   tab,
   mailEnabled,
+  ownerEmail,
   directoryEnabled = false,
   onTab,
   onRetry,
@@ -30,6 +31,7 @@ export function MeetingPane({
   meeting: Meeting;
   tab: Tab;
   mailEnabled: boolean;
+  ownerEmail?: string;
   directoryEnabled?: boolean;
   onTab: (tab: Tab) => void;
   onRetry: (revision?: string) => void;
@@ -189,7 +191,7 @@ export function MeetingPane({
         <ProcessCard meeting={meeting} mailEnabled={mailEnabled} onStop={onStop} onRestart={onRestart} />
       )}
       {!editing && meeting.status === "review" && (
-        <SpeakerReview key={meeting.id} meeting={meeting} mailEnabled={mailEnabled} directoryEnabled={directoryEnabled} onUpdated={onUpdated} />
+        <SpeakerReview key={meeting.id} meeting={meeting} directoryEnabled={directoryEnabled} onUpdated={onUpdated} />
       )}
       {!editing && meeting.status === "error" && (
         <div className="error-card">
@@ -215,11 +217,9 @@ export function MeetingPane({
           {meeting.error && <p className="banner" role="alert">Сохранена предыдущая редакция протокола. {meeting.error}</p>}
           {meeting.status_message && meeting.status_message !== "Готово" &&
             <p className="progress-hint" role="status">{meeting.status_message}</p>}
-          {(meeting.speakers || []).some((speaker) => speaker.send_protocol) && <p className="progress-hint">
-            Дополнительные получатели: {(meeting.speakers || [])
-              .filter((speaker) => speaker.send_protocol && speaker.email)
-              .map((speaker) => `${speaker.name} (${speaker.email})`).join(", ")}.
-          </p>}
+          {mailEnabled && meeting.result_revision && <ProtocolRecipients key={meeting.id + meeting.result_revision}
+            meeting={meeting} revision={meeting.result_revision} ownerEmail={ownerEmail} directoryEnabled={directoryEnabled}
+            onUpdated={onUpdated} />}
           {meeting.name_review && (tab !== "transcript" || !meeting.segments?.length) && <p className="progress-hint">{meeting.name_review.message} Подробности — во вкладке «Транскрипт».</p>}
           <nav className="tabs">
             <TabButton id="overview" tab={tab} onTab={onTab} label="Саммари" />
@@ -245,9 +245,8 @@ export function MeetingPane({
   );
 }
 
-function SpeakerReview({ meeting, mailEnabled, directoryEnabled, onUpdated }: {
+function SpeakerReview({ meeting, directoryEnabled, onUpdated }: {
   meeting: Meeting;
-  mailEnabled: boolean;
   directoryEnabled: boolean;
   onUpdated: (meeting: Meeting) => void;
 }) {
@@ -256,11 +255,11 @@ function SpeakerReview({ meeting, mailEnabled, directoryEnabled, onUpdated }: {
   const [speakerBusy, setSpeakerBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function buildProtocol(recipients: ProtocolRecipient[]) {
+  async function buildProtocol() {
     setError(null);
     setProtocolBusy(true);
     try {
-      onUpdated(await startProtocol(meeting.id, recipients));
+      onUpdated(await startProtocol(meeting.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось собрать протокол");
     } finally {
@@ -273,9 +272,9 @@ function SpeakerReview({ meeting, mailEnabled, directoryEnabled, onUpdated }: {
       <div className="review-intro">
         <h2>Расшифровка готова</h2>
         <p>При необходимости уточните имена и распределение реплик.</p>
-        <ProtocolRecipients meeting={meeting} mailEnabled={mailEnabled}
-          disabled={protocolBusy || speakerBusy || (mailEnabled && meeting.speakers == null)} busy={protocolBusy}
-          submitLabel={edited ? "Собрать протокол" : "Пропустить и собрать протокол"} onSubmit={buildProtocol} />
+        <button className="primary" type="button" disabled={protocolBusy || speakerBusy}
+          onClick={() => void buildProtocol()}>{protocolBusy ? "Ставлю в очередь…" :
+            edited ? "Собрать протокол" : "Пропустить и собрать протокол"}</button>
         {error && <div className="banner" role="alert">{error}</div>}
       </div>
       <TranscriptView meeting={meeting} disabled={protocolBusy} onBusyChange={setSpeakerBusy} directoryEnabled={directoryEnabled}
@@ -355,7 +354,7 @@ function ProcessCard({
     ? "Транскрипт сохранён. Когда освободится слот, начнётся сборка протокола."
     : queued
     ? mailEnabled
-      ? "Обработка начнётся, когда освободится слот. Готовый протокол придёт на почту."
+      ? "Обработка начнётся, когда освободится слот. Получателей можно будет выбрать после подготовки протокола."
       : "Обработка начнётся, когда освободится слот. Результат появится в MoM."
     : meeting.status === "analyzing"
       ? protocolHint(meeting.status_message)

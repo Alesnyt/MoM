@@ -200,24 +200,6 @@ def clean_speaker_email(value: str) -> str:
     return email
 
 
-def select_protocol_recipients(document: dict[str, Any], recipients: list[dict[str, str]]) -> dict[str, Any]:
-    speakers = [dict(item) for item in document.get("speakers") or []]
-    by_id = {item["id"]: item for item in speakers if item["id"] != UNKNOWN_ID}
-    for item in speakers:
-        item.pop("send_protocol", None)
-    seen: set[str] = set()
-    for recipient in recipients:
-        sid = recipient["speaker_id"]
-        if sid not in by_id:
-            raise SpeakerError("Выберите получателя из размеченных спикеров")
-        if sid in seen:
-            raise SpeakerError("Спикер выбран несколько раз")
-        seen.add(sid)
-        by_id[sid]["email"] = clean_speaker_email(recipient["email"])
-        by_id[sid]["send_protocol"] = True
-    return {**document, "speakers": speakers}
-
-
 def rename_speaker(
     document: dict[str, Any], speaker_id: str, name: str, email: str | None = None,
     *, job_title: str | None = None,
@@ -278,6 +260,16 @@ def reassign_segments(document: dict[str, Any], indexes: list[int], speaker_id: 
     for index in indexes:
         segments[index]["speaker"] = target
     return {**document, "speakers": speakers, "segments": segments}
+
+
+def merge_speakers(document: dict, source_id: str, target_id: str) -> dict:
+    speakers = document.get("speakers") or []
+    ids = {speaker["id"] for speaker in speakers}
+    if source_id == target_id or UNKNOWN_ID in (source_id, target_id) or not {source_id, target_id} <= ids:
+        raise SpeakerError("Выберите двух разных спикеров из списка")
+    return {**document, "speakers": [s for s in speakers if s["id"] != source_id],
+            "segments": [{**s, "speaker": target_id} if s["speaker"] == source_id else s
+                         for s in document.get("segments") or []]}
 
 
 def _replace_name(text: str, old: str, new: str) -> str:

@@ -61,7 +61,6 @@ export type Speaker = {
   send_protocol?: boolean;
 };
 
-export type ProtocolRecipient = { speaker_id: string; email: string };
 
 export type NameReview = {
   status: "done" | "error" | "skipped" | "stale";

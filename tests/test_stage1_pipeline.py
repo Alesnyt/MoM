@@ -465,21 +465,19 @@ def test_task_cancel_keeps_asr_slot_and_wav_until_cpu_thread_exits(recording_db,
     asyncio.run(scenario())
 
 
-def test_stop_during_word_preparation_does_not_publish_or_enqueue_mail(recording_db, monkeypatch):
+def test_stop_before_protocol_publication_does_not_publish_or_enqueue_mail(recording_db, monkeypatch):
     from backend import mail
     mid = 'stop-word'
     store.create_meeting(mid, 'Тест', 'test.wav', recording_db)
     store.update_meeting(mid, status='analyzing', transcript='Анна: План утверждён.')
     async def analyze(*args, **kwargs): return _result()
     monkeypatch.setattr(pipeline, '_analyze_with_heartbeat', analyze)
-    monkeypatch.setattr(mail, '_protocol_recipients', lambda meeting: ['recipient@example.test'])
     entered, release = threading.Event(), threading.Event()
-    original = mail.prepare_protocol_mail
-    def prepare(meeting):
+    def finish(meeting, **fields):
         entered.set()
         assert release.wait(4)
-        return original(meeting)
-    monkeypatch.setattr(mail, 'prepare_protocol_mail', prepare)
+        return mail.complete_protocol(meeting, **fields)
+    monkeypatch.setattr(pipeline, 'complete_protocol', finish)
     async def scenario():
         task = asyncio.create_task(pipeline.process_meeting(mid))
         try:
