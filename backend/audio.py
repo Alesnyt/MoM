@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import logging
 import math
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import wave
 from contextlib import contextmanager
 from pathlib import Path
@@ -70,6 +72,46 @@ def _run(cmd: list[str], timeout: int | None = None) -> str:
             "Не удалось обработать аудио. Проверьте, что файл — запись, а не повреждённый контейнер."
         )
     return (result.stdout or "").strip()
+
+
+def audio_source(meeting_id: str, filename: str) -> Path | None:
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", meeting_id):
+        return None
+    path = config.UPLOAD_DIR / f"{meeting_id}{Path(filename).suffix.lower() or '.webm'}"
+    if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(config.UPLOAD_DIR.resolve()):
+        return path
+    return None
+
+
+# Interactive listening shares the VM with recognition. Bound only these short
+# conversions; ASR never waits for a player slot.
+_playback_slots = threading.BoundedSemaphore(2)
+
+
+def playback_clip(source: Path, start: float, duration: float) -> bytes:
+    """Seek in the archived recording and encode just the requested minute or less."""
+    if not math.isfinite(start) or start < 0 or not 0 < duration <= 60:
+        raise AudioError("Некорректные границы аудиофрагмента")
+    if not _playback_slots.acquire(timeout=2):
+        raise AudioError("Плеер занят. Повторите попытку через несколько секунд.")
+    try:
+        nice = shutil.which("nice")
+        launch = [nice, "-n", "10", "ffmpeg"] if nice else ["ffmpeg"]
+        result = subprocess.run(
+            [*launch, "-v", "error", "-nostdin", "-ss", f"{start:.3f}", "-threads", "1",
+             "-protocol_whitelist", "file,pipe", "-i", str(source), "-t", f"{duration:.3f}",
+             "-map", "0:a:0", "-vn", "-filter_threads", "1", "-ac", "1", "-ar", "16000",
+             "-map_metadata", "-1", "-c:a", "libmp3lame", "-b:a", "48k", "-write_xing", "0",
+             "-id3v2_version", "0", "-f", "mp3", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=25,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AudioError("Не удалось подготовить фрагмент записи") from exc
+    finally:
+        _playback_slots.release()
+    if result.returncode or not result.stdout:
+        raise AudioError("Не удалось прочитать аудиозапись")
+    return result.stdout
 
 
 def ffmpeg_available() -> bool:

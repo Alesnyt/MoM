@@ -38,6 +38,7 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
         source_type: row.source_type ?? old.source_type,
         calendar_context: row.calendar_context ?? old.calendar_context,
         result: old.result,
+        result_revision: old.result_revision,
         transcript: old.transcript,
         speakers: row.speakers ?? old.speakers,
         segments: row.segments ?? old.segments,
@@ -62,6 +63,10 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
 export default function App() {
   const [meetings, setMeetingRows] = useState<Meeting[]>([]);
   const dataVersion = useRef(0);
+  const protocolDirty = useRef(false);
+  const onEditorDirty = useCallback((dirty: boolean) => { protocolDirty.current = dirty; }, []);
+  const canLeaveEditor = useCallback(() => !protocolDirty.current ||
+    window.confirm("Покинуть встречу и отбросить несохранённые правки протокола?"), []);
   const meetingVersions = useRef(new Map<string, number>());
   const setMeetings = useCallback((update: SetStateAction<Meeting[]>, meetingId?: string) => {
     dataVersion.current += 1;
@@ -157,6 +162,7 @@ export default function App() {
   }
 
   function goAdmin() {
+    if (!canLeaveEditor()) return;
     setScreen("admin");
     if (!pathIsAdmin()) {
       window.history.pushState({}, "", "/admin");
@@ -164,10 +170,13 @@ export default function App() {
   }
 
   useEffect(() => {
-    const onPop = () => setScreen(pathIsAdmin() ? "admin" : "app");
+    const onPop = () => {
+      if (pathIsAdmin() && !canLeaveEditor()) { window.history.pushState({}, "", "/"); return; }
+      setScreen(pathIsAdmin() ? "admin" : "app");
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [canLeaveEditor]);
 
   useEffect(() => {
     let disposed = false;
@@ -454,6 +463,7 @@ export default function App() {
             <button
               className="primary"
               onClick={() => {
+                if (!canLeaveEditor()) return;
                 goApp();
                 setComposing(true);
                 setRailOpen(false);
@@ -479,6 +489,7 @@ export default function App() {
                 <button
                   className={item.id === selectedId && !showComposer && screen === "app" ? "active" : ""}
                   onClick={() => {
+                    if (item.id !== selectedId && !canLeaveEditor()) return;
                     setSelectedId(item.id);
                     setComposing(false);
                     goApp();
@@ -510,6 +521,7 @@ export default function App() {
               style={{ margin: "8px 16px" }}
               onClick={() => {
                 const generation = userGeneration.current;
+                if (!canLeaveEditor()) return;
                 void logoutUser().then((session) => {
                   if (generation !== userGeneration.current) return;
                   invalidateUserRequests();
@@ -655,6 +667,7 @@ export default function App() {
               mailEnabled={Boolean(health?.smtp?.configured)}
               directoryEnabled={Boolean(health?.ldap?.configured)}
               onTab={setTab}
+              onEditorDirty={onEditorDirty}
               onRetry={() => void onRetry(selected.id)}
               onStop={() => void onStop(selected.id)}
               onRestart={() => void onRestart(selected.id)}

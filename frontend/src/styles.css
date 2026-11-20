@@ -1902,3 +1902,21 @@ select.title-input {
 }
 @media (max-width: 1150px) { .meeting-home { grid-template-columns: minmax(0, 1fr); } .calendar-panel { max-width: none; } }
 @media (max-width: 600px) { .calendar-panel { padding: 16px; } .calendar-context { padding: 14px; } }
+
+.protocol-editor { max-width: 900px; margin: 18px 0; }
+.editor-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; padding: 8px 0; position: sticky; top: 0; z-index: 1; background: var(--stage); }
+.editor-body { display: grid; gap: 16px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.editor-field { min-width: 0; }
+.editor-field .title-input { width: 100%; font: inherit; color: var(--text); font-size: 1rem; }
+.editor-field textarea { resize: vertical; line-height: 1.5; }
+.editor-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; margin-bottom: 10px; }
+.editor-row > button { margin-top: 20px; }
+.editor-group { display: grid; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 0 0 12px; min-width: 0; }
+.editor-group button { justify-self: start; }
+.proof-suggestion { border-inline-start: 3px solid var(--accent); padding: 8px 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.proof-suggestion p { margin: 5px 0; color: var(--muted); }
+.proof-suggestion ins { font-weight: 600; }
+
+.speakers-complete { color: var(--ok); border: 1px solid currentColor; border-radius: 6px; padding: 8px 12px; font-weight: 600; }
+.turn-listen { padding: 4px 9px; font-size: 0.85rem; }
+.turn audio { display: block; width: 100%; max-width: 34rem; margin-top: 8px; }

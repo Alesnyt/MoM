@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import config, glossary, store
+from .audio import audio_source
 
 log = logging.getLogger('mom.terms')
 MSK = timezone(timedelta(hours=3))
@@ -311,14 +312,6 @@ async def run(stop: asyncio.Event):
         except Exception: log.exception('Не удалось выполнить фоновый поиск терминов')
         try: await asyncio.wait_for(stop.wait(),timeout=5)
         except TimeoutError: pass
-
-
-def audio_source(meeting_id: str, filename: str):
-    # IDs are read from the database, not interpolated from a user-supplied path.
-    from pathlib import Path
-    if not re.fullmatch(r'[a-zA-Z0-9_-]+',meeting_id): return None
-    path = config.UPLOAD_DIR / f"{meeting_id}{Path(filename).suffix.lower() or '.webm'}"
-    return path if path.is_file() and path.resolve().is_relative_to(config.UPLOAD_DIR.resolve()) else None
 
 
 def snapshot(state: str = 'pending', offset: int = 0) -> dict:

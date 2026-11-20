@@ -4,6 +4,7 @@ import logging
 import smtplib
 import ssl
 import time
+import uuid
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.policy import SMTP
@@ -108,6 +109,10 @@ def build_eml(meeting: dict) -> bytes:
     message["From"] = "MoM <mom@localhost>"
     message["Date"] = formatdate(localtime=True)
     message["X-Unsent"] = "1"
+    if any(speaker.get("send_protocol") for speaker in meeting.get("speakers") or []):
+        recipients = _protocol_recipients(meeting, require_smtp=False)
+        if recipients:
+            message["To"] = ", ".join(recipients)
     return message.as_bytes()
 
 
@@ -131,17 +136,22 @@ def smtp_snapshot(*, full: bool = False) -> dict:
 
 
 def send_mail(
-    to: str, subject: str, body: str, *, html: str | None = None, attachment: tuple[str, bytes] | None = None,
-) -> None:
+    to: str | list[str], subject: str, body: str, *, html: str | None = None,
+    attachment: tuple[str, bytes] | None = None, envelope_to: list[str] | None = None,
+    message_id: str | None = None,
+) -> dict[str, tuple[int, bytes]]:
     host = config.get_smtp_host()
     from_addr = config.get_smtp_from()
     if not host or not from_addr:
         raise RuntimeError("Сначала укажите SMTP-сервер и адрес отправителя")
-    if not to or "@" not in to:
+    recipients = [to] if isinstance(to, str) else to
+    if not recipients or any("@" not in address for address in recipients):
         raise RuntimeError("Нет адреса получателя")
     message = _make_message(subject, body, html=html, attachment=attachment)
     message["From"] = from_addr
-    message["To"] = to
+    message["To"] = ", ".join(recipients)
+    if message_id:
+        message["Message-ID"] = message_id
 
     port = config.get_smtp_port()
     user = config.get_smtp_user()
@@ -164,8 +174,12 @@ def send_mail(
                 raise
             raise TemporaryMailError("Не удалось открыть соединение SMTP") from exc
         try:
-            client.send_message(message)
+            if envelope_to is None:
+                return client.send_message(message)
+            return client.send_message(message, to_addrs=envelope_to)
         except smtplib.SMTPRecipientsRefused as exc:
+            if envelope_to is not None:
+                return exc.recipients
             if any(400 <= code < 500 for code, _ in exc.recipients.values()):
                 raise TemporaryMailError("SMTP временно отклонил получателя") from exc
             raise
@@ -181,8 +195,8 @@ def send_mail(
                 client.close()
 
 
-def _protocol_recipients(meeting: dict) -> list[str]:
-    if not config.smtp_configured():
+def _protocol_recipients(meeting: dict, *, require_smtp: bool = True) -> list[str]:
+    if require_smtp and not config.smtp_configured():
         return []
     user_id = meeting.get("user_id")
     user = store.get_user(user_id) if user_id else None
@@ -215,7 +229,7 @@ def complete_protocol(meeting: dict, **fields) -> None:
     if recipients:
         try:
             packet = prepare_protocol_mail(finished)
-            status_message = "Готово, письма в очереди"
+            status_message = "Готово, письмо в очереди"
         except Exception:
             log.exception("Не удалось подготовить письмо с протоколом встречи %s", meeting_id)
             status_message = "Готово. Не удалось подготовить письмо с протоколом."
@@ -254,13 +268,13 @@ def _delivery_status(conn, meeting_id: str) -> bool:
     if sent == total:
         message = "Готово, протокол отправлен на почту"
     else:
-        message = f"Готово. Отправлено писем: {sent} из {total}."
+        message = f"Готово. Письмо принято для получателей: {sent} из {total}."
         if pending:
-            message += " Остальные письма в очереди."
+            message += " Остальные адреса в очереди."
         if counts.get("failed"):
             message += " Есть ошибки доставки."
         if counts.get("unknown"):
-            message += " Для некоторых писем SMTP не подтвердил отправку."
+            message += " Для некоторых адресов SMTP не подтвердил отправку."
     conn.execute("UPDATE meetings SET status_message = ? WHERE id = ? AND status = 'done'", (message, meeting_id))
     if not pending:
         conn.execute("DELETE FROM protocol_mail_format WHERE meeting_id = ?", (meeting_id,))
@@ -289,18 +303,27 @@ def deliver_pending() -> bool:
                FROM protocol_mail AS mail
                JOIN meetings ON meetings.id = mail.meeting_id AND meetings.status = 'done'
                LEFT JOIN protocol_mail_format AS content ON content.meeting_id = mail.meeting_id
-               WHERE mail.state = 'pending' AND mail.due_at <= ? ORDER BY mail.due_at, mail.id LIMIT 1""", (now,),
+               WHERE mail.state = 'pending' AND mail.due_at <= ?
+               AND NOT EXISTS (SELECT 1 FROM protocol_mail busy WHERE busy.meeting_id = mail.meeting_id AND busy.state = 'sending')
+               ORDER BY mail.due_at, mail.id LIMIT 1""", (now,),
         ).fetchone()
         if row:
+            recipients = conn.execute(
+                "SELECT id, recipient, attempts, state, due_at FROM protocol_mail WHERE meeting_id = ? ORDER BY id",
+                (row["meeting_id"],),
+            ).fetchall()
+            claimed = [r for r in recipients if r["state"] == "pending" and r["due_at"] <= now]
             conn.execute(
-                "UPDATE protocol_mail SET state = 'sending', attempts = attempts + 1, due_at = ? WHERE id = ?",
-                (now + CLAIM_SECONDS, row["id"]),
+                """UPDATE protocol_mail SET state = 'sending', attempts = attempts + 1, due_at = ?
+                   WHERE meeting_id = ? AND state = 'pending' AND due_at <= ?""",
+                (now + CLAIM_SECONDS, row["meeting_id"], now),
             )
     retention.remove_pruned(removed)
     if not row:
         return False
+
     state = "sent"
-    due_at = 0
+    refused: dict[str, tuple[int, bytes]] = {}
     try:
         if row["docx"] is not None:
             packet = ProtocolMail(row["body"], row["html"], row["filename"], row["docx"])
@@ -310,14 +333,15 @@ def deliver_pending() -> bool:
             if not meeting or meeting["status"] != "done":
                 raise RuntimeError("Сохранённый протокол недоступен")
             packet = prepare_protocol_mail(meeting)
-        send_mail(row["recipient"], row["subject"], packet.body, html=packet.html,
-                  attachment=(packet.filename, packet.docx))
+        # Keep To and Message-ID stable on retry, and only retry unaccepted envelopes.
+        generation = str(row["meeting_id"]) + ":" + str(recipients[0]["id"])
+        identifier = uuid.uuid5(uuid.NAMESPACE_OID, generation).hex
+        refused = send_mail([r["recipient"] for r in recipients], row["subject"], packet.body,
+                            envelope_to=[r["recipient"] for r in claimed], message_id=f"<{identifier}@mom.local>",
+                            html=packet.html, attachment=(packet.filename, packet.docx)) or {}
     except TemporaryMailError:
-        state = "failed"
-        if row["attempts"] < len(RETRY_DELAYS):
-            state = "pending"
-            due_at = time.time() + RETRY_DELAYS[row["attempts"]]
-    except (smtplib.SMTPResponseException, smtplib.SMTPRecipientsRefused):
+        state = "pending"
+    except smtplib.SMTPResponseException:
         state = "failed"
     except (OSError, smtplib.SMTPServerDisconnected):
         state = "unknown"
@@ -325,20 +349,32 @@ def deliver_pending() -> bool:
         state = "failed"
         log.exception("Не удалось отправить протокол встречи %s", row["meeting_id"])
 
+    updated = []
+    removed = []
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        keep_message = state == "pending"
-        result = conn.execute(
-            "UPDATE protocol_mail SET state = ?, due_at = ?, subject = ?, body = ? WHERE id = ? AND state = 'sending'",
-            (state, due_at, row["subject"] if keep_message else "", row["body"] if keep_message else "", row["id"]),
-        )
-        removed = []
-        if result.rowcount:
-            if not _delivery_status(conn, row["meeting_id"]) and row["user_id"]:
-                removed = store.prune_user_meetings(row["user_id"], connection=conn)
-    if result.rowcount:
+        for recipient in claimed:
+            outcome = state
+            address = recipient["recipient"]
+            if address in refused:
+                code, _ = refused[address]
+                outcome = "pending" if 400 <= code < 500 else "failed"
+            attempts = recipient["attempts"]
+            if outcome == "pending" and attempts >= len(RETRY_DELAYS):
+                outcome = "failed"
+            retry = outcome == "pending"
+            due_at = time.time() + RETRY_DELAYS[attempts] if retry else 0
+            result = conn.execute(
+                "UPDATE protocol_mail SET state = ?, due_at = ?, subject = ?, body = ? WHERE id = ? AND state = 'sending'",
+                (outcome, due_at, row["subject"] if retry else "", row["body"] if retry else "", recipient["id"]),
+            )
+            if result.rowcount:
+                updated.append((address, outcome))
+        if updated and not _delivery_status(conn, row["meeting_id"]) and row["user_id"]:
+            removed = store.prune_user_meetings(row["user_id"], connection=conn)
+    for address, outcome in updated:
         detail = {"sent": "автоматически", "pending": "временный отказ, будет повтор",
-                  "failed": "SMTP не принял письмо", "unknown": "результат отправки неизвестен"}[state]
-        store.record_audit(row["recipient"], "email.send" if state == "sent" else "email.fail", row["meeting_id"], detail)
+                  "failed": "SMTP не принял письмо", "unknown": "результат отправки неизвестен"}[outcome]
+        store.record_audit(address, "email.send" if outcome == "sent" else "email.fail", row["meeting_id"], detail)
     retention.remove_pruned(removed)
     return True

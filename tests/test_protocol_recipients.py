@@ -103,10 +103,10 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
     store.init_db()
     while mail.deliver_pending():
         pass
-    assert [item[0] for item in sent] == ["owner@example.com", "anna@example.com"]
+    assert len(sent) == 1
+    assert sent[0][0] == sent[0][3]["envelope_to"] == ["owner@example.com", "anna@example.com"]
     assert all("Готовый протокол" in item[2] for item in sent)
     assert all("Руководитель проекта" in item[3]["html"] for item in sent)
-    assert sent[0][3]["attachment"] == sent[1][3]["attachment"]
     assert sent[0][3]["attachment"][0] == "Совещание.docx"
     assert any("Руководитель проекта" in p.text for p in Document(BytesIO(sent[0][3]["attachment"][1])).paragraphs)
     assert store.get_meeting(mid)["status"] == "done"
@@ -184,15 +184,19 @@ def test_downloaded_email_and_smtp_have_the_word_attachment(delivery, monkeypatc
     mid = meeting["id"]
     result = {"title": "План & сроки", "summary": "Первый абзац\n\nВторой абзац",
               "decisions": ["Утвердить <пилот>"], "action_items": [{"task": "Проверить пилот", "assignee": "Анна"}]}
-    mail.complete_protocol(meeting, result=result)
+    path = f"/api/meetings/{mid}/protocol"
+    assert client.post(path, json={"recipients": [{"speaker_id": "S1", "email": "speaker@example.com"}]}).is_success
+    mail.complete_protocol(store.get_meeting(mid), result=result)
     captured = []
 
     class SMTP:
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def send_message(self, message):
+        def send_message(self, message, *, to_addrs):
+            assert to_addrs == ["owner@example.com", "speaker@example.com"]
             captured.append(message.as_bytes())
+            return {}
 
         def quit(self):
             pass
@@ -211,6 +215,7 @@ def test_downloaded_email_and_smtp_have_the_word_attachment(delivery, monkeypatc
     word = client.get(f"/api/meetings/{mid}/export.docx")
     for raw in (captured[0], response.content):
         message = BytesParser(policy=policy.default).parsebytes(raw)
+        assert str(message["To"]) == "owner@example.com, speaker@example.com"
         assert "Первый абзац" in message.get_body(("plain",)).get_content()
         html = message.get_body(("html",)).get_content()
         assert "Утвердить &lt;пилот&gt;" in html and "<table" in html
@@ -252,14 +257,14 @@ def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch
 
     def send(to, subject, body, **formatting):
         sent.append(to)
-        if to == "b@example.com":
-            raise RuntimeError("SMTP refused")
+        assert formatting["envelope_to"] == to
+        return {"b@example.com": (550, b"Unknown recipient")}
 
     monkeypatch.setattr(mail, "send_mail", send)
     mail.complete_protocol(store.get_meeting(meeting["id"]), result={"summary": "Текст"})
     while mail.deliver_pending():
         pass
-    assert sent == ["owner@example.com", "b@example.com", "g@example.com"]
+    assert sent == [["owner@example.com", "b@example.com", "g@example.com"]]
     assert "2 из 3" in store.get_meeting(meeting["id"])["status_message"]
     assert [row["action"] for row in store.list_audit()].count("email.fail") == 1
 
@@ -285,12 +290,12 @@ def test_delivery_retries_only_the_recipient_with_a_temporary_failure(delivery, 
     calls = []
 
     def send(to, _subject, _body, **formatting):
-        calls.append(to)
-        if to == "speaker@example.com" and calls.count(to) == 1:
-            raise mail.TemporaryMailError("try later")
+        calls.append((to, formatting["envelope_to"], formatting["message_id"]))
+        if len(calls) == 1:
+            return {"speaker@example.com": (450, b"try later")}
+        return {}
 
     monkeypatch.setattr(mail, "send_mail", send)
-    assert mail.deliver_pending()
     assert mail.deliver_pending()
     assert not mail.deliver_pending()
     assert store.get_meeting(mid)["mail_pending"]
@@ -299,7 +304,9 @@ def test_delivery_retries_only_the_recipient_with_a_temporary_failure(delivery, 
     store.init_db()
     assert mail.deliver_pending()
     assert not mail.deliver_pending()
-    assert calls == ["owner@example.com", "speaker@example.com", "speaker@example.com"]
+    addresses = ["owner@example.com", "speaker@example.com"]
+    assert len(calls) == 2 and calls[0][2]
+    assert calls == [(addresses, addresses, calls[0][2]), (addresses, addresses[1:], calls[0][2])]
     assert not store.get_meeting(mid)["mail_pending"]
 
 
@@ -340,3 +347,71 @@ def test_legacy_email_download_is_memory_only_and_owner_scoped(delivery, monkeyp
     assert client.post(path).status_code == 404
     client.cookies.clear()
     assert client.post(path).status_code == 401
+
+
+def test_two_workers_cannot_send_the_same_group_twice(delivery, monkeypatch):
+    from threading import Event
+
+    client, meeting, _ = delivery
+    mid = meeting["id"]
+    assert client.post(f"/api/meetings/{mid}/protocol", json={"recipients": [
+        {"speaker_id": "S1", "email": "speaker@example.com"},
+    ]}).is_success
+    mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
+    started, release = Event(), Event()
+    attempts = []
+
+    def slow_send(to, _subject, _body, **kwargs):
+        attempts.append(kwargs["envelope_to"])
+        started.set()
+        assert release.wait(5)
+        return {}
+
+    monkeypatch.setattr(mail, "send_mail", slow_send)
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(mail.deliver_pending)
+        try:
+            assert started.wait(5)
+            assert not mail.deliver_pending()
+        finally:
+            release.set()
+        assert first.result()
+    assert attempts == [["owner@example.com", "speaker@example.com"]]
+    assert not store.get_meeting(mid)["mail_pending"]
+
+
+def test_all_addresses_refused_keep_individual_retry_status(delivery, monkeypatch):
+    client, meeting, _ = delivery
+    mid = meeting["id"]
+    assert client.post(f"/api/meetings/{mid}/protocol", json={"recipients": [
+        {"speaker_id": "S1", "email": "speaker@example.com"},
+    ]}).is_success
+    mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
+    sends = []
+
+    class SMTP:
+        def __init__(self, *_args, **_kwargs): pass
+        def quit(self): pass
+
+        def send_message(self, message, *, to_addrs):
+            sends.append((str(message["To"]), str(message["Message-ID"]), to_addrs))
+            if len(sends) == 1:
+                raise mail.smtplib.SMTPRecipientsRefused({
+                    "owner@example.com": (550, b"invalid"),
+                    "speaker@example.com": (451, b"temporary"),
+                })
+            return {}
+
+    monkeypatch.setattr(mail.smtplib, "SMTP", SMTP)
+    monkeypatch.setattr(mail, "send_mail", real_send_mail)
+    for key, value in dict(host="localhost", port=25, user="", starttls=False, from_="mom@example.com").items():
+        monkeypatch.setattr(config, "get_smtp_" + key.rstrip("_"), lambda v=value: v)
+    assert mail.deliver_pending()
+    assert not mail.deliver_pending()
+    with store.connect() as conn:
+        conn.execute("UPDATE protocol_mail SET due_at = 0 WHERE state = 'pending'")
+    assert mail.deliver_pending()
+    assert sends[0][:2] == sends[1][:2]
+    assert sends[0][2] == ["owner@example.com", "speaker@example.com"]
+    assert sends[1][2] == ["speaker@example.com"]
+    assert '1 из 2' in store.get_meeting(mid)["status_message"]
