@@ -425,8 +425,9 @@ export async function restartMeeting(id: string): Promise<Meeting> {
   return response.json();
 }
 
-export async function retryMeeting(id: string): Promise<Meeting> {
-  const response = await apiRequest(`/api/meetings/${id}/retry`, { method: "POST", credentials: "include" });
+export async function retryMeeting(id: string, revision?: string): Promise<Meeting> {
+  const query = revision ? `?revision=${encodeURIComponent(revision)}` : "";
+  const response = await apiRequest(`/api/meetings/${id}/retry${query}`, { method: "POST", credentials: "include" });
   return response.json();
 }
 

@@ -1008,6 +1008,7 @@ def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: st
 def retry_meeting(
     meeting_id: str,
     user: dict = Depends(require_user),
+    revision: str | None = None,
 ) -> dict:
     # The worker claims jobs in its own transaction. Keep the eligibility check
     # and enqueue together so concurrent retries cannot requeue an active job.
@@ -1015,26 +1016,19 @@ def retry_meeting(
         meeting = _owned(row, user)
         if meeting["status"] not in {"error", "done"}:
             raise HTTPException(status_code=409, detail="Эта встреча ещё обрабатывается")
+        if store.is_manual_protocol(meeting.get("result")) or revision is not None:
+            if revision != meeting["result_revision"]:
+                raise HTTPException(409, "Откройте актуальную версию протокола и подтвердите замену ручных правок.")
+            if not (meeting.get("transcript") or "").strip():
+                raise HTTPException(409, "Для пересборки протокола нужна сохранённая расшифровка.")
         if not keys.snapshot()["connected"]:
             status = keys.snapshot()
             raise HTTPException(
                 status_code=400,
                 detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
             )
-        keep_transcript = (meeting["status"] == "error" or meeting.get("source_type") == "text") and (meeting.get("transcript") or "").strip()
-        fields: dict = {
-            "status": "queued",
-            "status_message": "Продолжаю с готовой расшифровки" if keep_transcript else "Повторная обработка в очереди",
-            "error": None,
-            "result": None,
-            "progress": 88 if keep_transcript else 0,
-            "queued_at": store.utc_now(),
-        }
-        if not keep_transcript:
-            fields["transcript"] = None
-            fields["transcript_segments"] = None
-            fields["language"] = None
-        store.update_meeting(meeting_id, connection=connection, **fields)
+        store.queue_reprocessing(meeting, connection=connection,
+                                 resume_transcript=meeting["status"] == "error")
     store.refresh_queue_messages()
     worker.notify_work()
     updated = store.get_meeting(meeting_id)
@@ -1124,20 +1118,10 @@ def _halt_processing(meeting_id: str, user: dict, *, restart: bool) -> dict:
             # No worker can claim this row until the transition commits. Applying
             # queued requests here avoids cancellation flags leaking into a new job.
             if restart:
-                keep = meeting.get("source_type") == "text"
-                fields = {} if keep else {"transcript": None, "transcript_segments": None, "language": None}
-                store.update_meeting(
-                    meeting_id, connection=connection,
-                    status="queued", status_message="Повторная обработка в очереди",
-                    error=None, result=None, progress=88 if keep else 0,
-                    queued_at=store.utc_now(), **fields,
-                )
+                store.queue_reprocessing(meeting, connection=connection)
             else:
-                store.update_meeting(
-                    meeting_id, connection=connection,
-                    status="error", status_message="Остановлено",
-                    error="Обработка остановлена", progress=0,
-                )
+                store.finish_processing_error(meeting_id, connection=connection, status_message="Остановлено",
+                                              error="Обработка остановлена", progress=0)
         else:
             # A claimed job may not yet have reached control.bind_job. Its worker
             # must acknowledge the stop; finishing here could requeue an owned job.
@@ -1207,10 +1191,11 @@ def _save_segments(
     if document.get("name_review") and (not replace_from or replace_from != replace_to):
         document["name_review"] = {**document["name_review"], "status": "stale",
             "message": "Разметка спикеров изменена. Для новой проверки имён пересоберите протокол."}
-    if result is not None and replace_from and replace_to:
-        result = replace_speaker_label(result, replace_from, replace_to)
-    fields = {"transcript": render_transcript(document), "transcript_segments": document, "result": result}
+    fields = {"transcript": render_transcript(document), "transcript_segments": document}
+    if result is not None and not store.is_manual_protocol(result) and replace_from and replace_to:
+        fields["result"] = replace_speaker_label(result, replace_from, replace_to)
     if rebuild:
+        fields["result"] = None
         fields.update(status="queued", status_message="Обновляю протокол после правки спикеров",
                       error=None, progress=88, queued_at=store.utc_now())
     store.update_meeting(meeting_id, connection=connection, **fields)
@@ -1267,7 +1252,7 @@ def reassign_meeting_segments(
                 (item.get("name") for item in updated.get("speakers") or [] if item.get("id") == payload.speaker_id),
                 payload.speaker_id,
             )
-        rebuild = meeting["status"] != "review"
+        rebuild = meeting["status"] != "review" and not store.is_manual_protocol(meeting.get("result"))
         _save_segments(connection, meeting_id, updated, None, rebuild=rebuild)
     store.record_audit(
         _actor_name(user),

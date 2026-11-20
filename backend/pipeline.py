@@ -205,7 +205,7 @@ async def _process_with_diagnostics(meeting_id: str, run) -> None:
         if control.is_stopped(meeting_id) or current.get("status_message") == "Остановлено":
             outcome = "cancelled"
         else:
-            outcome = current.get("status", "unknown")
+            outcome = "error" if current.get("error") else current.get("status", "unknown")
     except asyncio.CancelledError:
         outcome = "interrupted"
         raise
@@ -235,9 +235,8 @@ async def _process_meeting(meeting_id: str) -> None:
         return
     api_key = config.get_api_key()
     if not api_key:
-        await run_sync(store.update_meeting,
+        await run_sync(store.finish_processing_error,
             meeting_id,
-            status="error",
             status_message="Нет ключа OpenAI",
             error="Сохраните ключ в разделе «Администрирование»",
         )
@@ -267,9 +266,8 @@ async def _process_meeting(meeting_id: str) -> None:
             if not src.exists():
                 src = next(UPLOAD_DIR.glob(f"{meeting_id}.*"), None)
             if not src or not src.exists():
-                await run_sync(store.update_meeting,
+                await run_sync(store.finish_processing_error,
                     meeting_id,
-                    status="error",
                     status_message="Исходный файл не найден",
                     error="Запись исчезла с диска до начала обработки",
                 )
@@ -280,9 +278,8 @@ async def _process_meeting(meeting_id: str) -> None:
                 await run_sync(disk.ensure_space)
             except disk.DiskError as exc:
                 log.warning("нет места: %s", exc)
-                await run_sync(store.update_meeting,
+                await run_sync(store.finish_processing_error,
                     meeting_id,
-                    status="error",
                     status_message="Не хватает места на диске",
                     error=str(exc),
                 )
@@ -449,9 +446,8 @@ async def _process_meeting(meeting_id: str) -> None:
             await run_sync(control.finish, meeting_id)
             return
         log.exception("Встреча остановилась на шаге «%s»", step)
-        await run_sync(store.update_meeting,
+        await run_sync(store.finish_processing_error,
             meeting_id,
-            status="error",
             status_message="Обработка не удалась",
             error=public_error(exc),
         )

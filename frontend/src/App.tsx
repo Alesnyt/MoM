@@ -342,11 +342,11 @@ export default function App() {
     }
   }
 
-  async function onRetry(id: string) {
+  async function onRetry(id: string, revision?: string) {
     const generation = userGeneration.current;
     setError(null);
     try {
-      const updated = await retryMeeting(id);
+      const updated = await retryMeeting(id, revision);
       if (generation !== userGeneration.current) return;
       setMeetings((rows) => rows.map((row) => (row.id === id ? updated : row)), id);
       setSelectedId(id);
@@ -668,7 +668,7 @@ export default function App() {
               directoryEnabled={Boolean(health?.ldap?.configured)}
               onTab={setTab}
               onEditorDirty={onEditorDirty}
-              onRetry={() => void onRetry(selected.id)}
+              onRetry={revision => void onRetry(selected.id, revision)}
               onStop={() => void onStop(selected.id)}
               onRestart={() => void onRestart(selected.id)}
               onDelete={() => onDelete(selected.id)}

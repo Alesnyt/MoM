@@ -305,6 +305,40 @@ def update_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = N
         conn.execute(f"UPDATE meetings SET {', '.join(sets)} WHERE id = ?", values)
 
 
+def is_manual_protocol(result: object) -> bool:
+    return isinstance(result, dict) and result.get("edited_manually") is True
+
+
+def queue_reprocessing(meeting: dict, *, connection: sqlite3.Connection | None = None,
+                       resume_transcript: bool = False) -> None:
+    manual = is_manual_protocol(meeting.get("result"))
+    keep = (manual or meeting.get("source_type") == "text" or resume_transcript) and bool((meeting.get("transcript") or "").strip())
+    fields = {} if keep else {"transcript": None, "transcript_segments": None, "language": None}
+    if not manual:
+        fields["result"] = None
+    update_meeting(
+        meeting["id"], connection=connection, **fields, status="queued", error=None,
+        status_message="Продолжаю с готовой расшифровки" if keep else "Повторная обработка в очереди",
+        progress=88 if keep else 0, queued_at=utc_now(),
+    )
+
+
+def finish_processing_error(meeting_id: str, *, status_message: str, error: str,
+                            progress: int | None = None, connection: sqlite3.Connection | None = None) -> None:
+    """Keep a previously published manual protocol available after a failed rebuild."""
+    with (connect() if connection is None else nullcontext(connection)) as conn:
+        if connection is None:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT result_json FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        previous = json.loads(row["result_json"]) if row and row["result_json"] else None
+        saved = is_manual_protocol(previous)
+        fields = {} if progress is None else {"progress": progress}
+        if saved:
+            fields["progress"] = 100
+        update_meeting(meeting_id, connection=conn, **fields, status="done" if saved else "error",
+                       status_message=status_message, error=error)
+
+
 def get_recording_info(meeting_id: str) -> dict | None:
     # The media player does not need the transcript or generated protocol.
     with connect() as conn:

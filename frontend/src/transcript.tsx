@@ -396,6 +396,7 @@ export function TranscriptView({
       <div className="speaker-review-grid">
         <section className="speaker-panel" aria-labelledby={speakersHeadingId}>
           <h2 id={speakersHeadingId}>Назначение спикеров</h2>
+          {meeting.result?.edited_manually && <p className="speaker-hint">Правки разметки сохраняются в транскрипте. Чтобы обновить текст протокола по новой разметке, нажмите «Собрать протокол».</p>}
           {allLabelled && <p className="speakers-complete" role="status">✓ Все спикеры размечены</p>}
           {namedSpeakers.length > 0
             ? <div className="speaker-instructions">
