@@ -4,6 +4,7 @@ import { copyForWord } from "./copy";
 import { count, formatClock, formatDate, formatDuration, priorityLabel, queuePositionLabel } from "./format";
 import { isProtocolResult } from "./protocol";
 import { TranscriptView } from "./transcript";
+import { ProtocolEditor } from "./protocol-editor";
 import { ProtocolRecipients } from "./recipients";
 import type { Meeting, MeetingResult, MeetingStatus, ProtocolRecipient, Tab } from "./types";
 
@@ -24,6 +25,7 @@ export function MeetingPane({
   onRestart,
   onDelete,
   onUpdated,
+  onEditorDirty,
 }: {
   meeting: Meeting;
   tab: Tab;
@@ -35,6 +37,7 @@ export function MeetingPane({
   onRestart: () => void;
   onDelete: () => void;
   onUpdated: (meeting: Meeting) => void;
+  onEditorDirty?: (dirty: boolean) => void;
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
   const rawResult = isProtocolResult(meeting.result) ? meeting.result : null;
@@ -45,6 +48,7 @@ export function MeetingPane({
     return role ? `${name} — ${role}` : name;
   }) };
   const wide = meeting.status === "review" || (meeting.status === "done" && (tab === "transcript" || !result));
+  const [editing, setEditing] = useState<{ initial: MeetingResult; revision: string } | null>(null);
   const [mailNote, setMailNote] = useState<string | null>(null);
   const wordContent = useRef<HTMLElement>(null);
   const [downloading, setDownloading] = useState(false);
@@ -122,9 +126,13 @@ export function MeetingPane({
           </p>
           <h1>{meeting.title}</h1>
         </div>
-        <div className="pane-actions">
+        {!editing && <div className="pane-actions">
           {meeting.status === "done" && result && (
             <>
+              {rawResult && meeting.result_revision && <button className="ghost" type="button" onClick={() => {
+                if (!meeting.result_revision) return;
+                setMailNote(null); onTab("mom"); setEditing({ initial: rawResult, revision: meeting.result_revision });
+              }}>Редактировать протокол</button>}
               <button className="primary" type="button" disabled={downloading} onClick={() => void download("docx")}>
                 Скачать протокол в Word (.docx)
               </button>
@@ -155,7 +163,9 @@ export function MeetingPane({
             </>
           )}
           {(meeting.status === "error" || meeting.status === "done") && (
-            <button className="ghost" onClick={onRetry}>
+            <button className="ghost" onClick={() => {
+              if (!rawResult?.edited_manually || window.confirm("Собрать протокол заново и заменить сохранённые правки?")) onRetry();
+            }}>
               {(meeting.status === "error" || meeting.source_type === "text") && meeting.transcript ? "Собрать протокол" : "Повторить"}
             </button>
           )}
@@ -164,25 +174,25 @@ export function MeetingPane({
               Удалить
             </button>
           )}
-        </div>
+        </div>}
       </header>
 
       {mailNote && <div className="banner" role="status">{mailNote}</div>}
 
-      {processing && (
+      {!editing && processing && (
         <ProcessCard meeting={meeting} mailEnabled={mailEnabled} onStop={onStop} onRestart={onRestart} />
       )}
-      {meeting.status === "review" && (
+      {!editing && meeting.status === "review" && (
         <SpeakerReview key={meeting.id} meeting={meeting} mailEnabled={mailEnabled} directoryEnabled={directoryEnabled} onUpdated={onUpdated} />
       )}
-      {meeting.status === "error" && (
+      {!editing && meeting.status === "error" && (
         <div className="error-card">
           <strong>Обработка не удалась</strong>
           <p>{meeting.error || meeting.status_message}</p>
         </div>
       )}
 
-      {meeting.status === "done" && !result && (
+      {!editing && meeting.status === "done" && !result && (
         <div className="error-card">
           <strong>Не удалось прочитать сохранённый протокол</strong>
           <p>Ответ модели имеет неверный формат. Сформируйте протокол заново.</p>
@@ -190,7 +200,11 @@ export function MeetingPane({
           <TranscriptView meeting={meeting} onUpdated={onUpdated} directoryEnabled={directoryEnabled} />
         </div>
       )}
-      {result && meeting.status === "done" && (
+      {editing &&
+        <ProtocolEditor meetingId={meeting.id} initial={editing.initial} revision={editing.revision}
+          onDirtyChange={onEditorDirty} onCancel={() => setEditing(null)}
+          onSaved={next => { onUpdated(next); setEditing(null); setMailNote("Правки протокола сохранены."); }} />}
+      {!editing && result && meeting.status === "done" && (
         <>
           {meeting.status_message && meeting.status_message !== "Готово" &&
             <p className="progress-hint" role="status">{meeting.status_message}</p>}

@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from . import directory_search, request_origin
+from . import directory_search, protocol_editor, request_origin
 from .request_limits import RequestLimitsMiddleware
 from pydantic import ValidationError
 from .api_schemas import (
@@ -1041,6 +1041,33 @@ def retry_meeting(
     if not updated:
         raise HTTPException(status_code=404, detail="Встреча не найдена")
     return updated
+
+
+def _editable_protocol(meeting: dict, revision: str) -> None:
+    if meeting["status"] != "done" or not isinstance(meeting.get("result"), dict):
+        raise HTTPException(409, "Доступен для редактирования только готовый протокол.")
+    if meeting["result_revision"] != revision:
+        raise HTTPException(409, "Протокол уже изменился. Скопируйте нужные правки, обновите страницу и снова откройте встречу.")
+
+
+@app.patch("/api/meetings/{meeting_id}/protocol")
+def save_protocol(meeting_id: str, payload: protocol_editor.EditRequest, user: dict = Depends(require_user)) -> dict:
+    with store.edit_meeting(meeting_id) as (connection, row):
+        meeting = _owned(row, user)
+        _editable_protocol(meeting, payload.revision)
+        result = protocol_editor.edited_result(meeting["result"], payload.result)
+        store.update_meeting(meeting_id, connection=connection, result=result, title=result["title"])
+    store.record_audit(_actor_name(user), "protocol.edit", meeting_id)
+    return _owned(store.get_meeting(meeting_id), user)
+
+
+@app.post("/api/meetings/{meeting_id}/protocol/proofread")
+async def proofread_protocol(meeting_id: str, payload: protocol_editor.EditRequest, request: Request,
+                             user: dict = Depends(require_user)) -> dict:
+    meeting = _owned(await run_in_threadpool(store.get_meeting, meeting_id), user)
+    _editable_protocol(meeting, payload.revision)
+    with protocol_editor.proofread_slot(user["user_id"]):
+        return {"suggestions": await protocol_editor.proofread(payload.result, request.is_disconnected)}
 
 
 @app.post("/api/meetings/{meeting_id}/protocol")

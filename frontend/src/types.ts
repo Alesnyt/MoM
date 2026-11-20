@@ -37,6 +37,7 @@ export type AgendaItem = {
 };
 
 export type MeetingResult = {
+  edited_manually?: boolean;
   title: string;
   language?: string;
   participants: string[];
@@ -95,6 +96,7 @@ export type Meeting = {
   diarization_note?: string | null;
   name_review?: NameReview | null;
   result: MeetingResult | null;
+  result_revision?: string | null;
   error: string | null;
   progress?: number;
   queue_ahead?: number;

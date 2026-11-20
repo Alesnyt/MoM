@@ -712,8 +712,11 @@ def _serialize(row: sqlite3.Row, *, body: bool = True) -> dict[str, Any]:
         data["mail_pending"] = bool(data["mail_pending"])
     data["user_id"] = data.get("user_id")
     if body:
+        data["result_revision"] = hashlib.sha256(raw.encode()).hexdigest() if raw else None
         result = json.loads(raw) if raw else None
-        data["result"] = deduplicate(result) if isinstance(result, dict) else result
+        if isinstance(result, dict) and not result.get("edited_manually"):
+            result = deduplicate(result)
+        data["result"] = result
         parsed = json.loads(raw_segments) if raw_segments else {}
         data["speakers"] = parsed.get("speakers") or []
         data["segments"] = parsed.get("segments") or []
