@@ -421,6 +421,26 @@ def reject_pending(actor: str) -> dict:
         return result
 
 
+def _variant_page(conn, state: str, group: str, offset: int) -> dict:
+    rows = conn.execute('''SELECT * FROM term_candidates WHERE state=? AND group_key=?
+        ORDER BY variant,id LIMIT 21 OFFSET ?''', (state, group, offset)).fetchall()
+    variants = []
+    for row in rows[:20]:
+        cid = row['id']
+        meetings = conn.execute('SELECT count(DISTINCT meeting_id) FROM term_evidence WHERE candidate_id=?', (cid,)).fetchone()[0]
+        evidence = conn.execute('''SELECT e.*,m.title,m.filename FROM term_evidence e JOIN meetings m ON m.id=e.meeting_id
+            WHERE e.candidate_id=? ORDER BY m.created_at DESC,e.turn LIMIT 3''', (cid,)).fetchall()
+        examples = [dict(e, audio=audio_source(e['meeting_id'], e['filename']) is not None and e['start'] is not None) for e in evidence]
+        variants.append(dict(row, normalized=glossary.normalize(row['variant']), meetings=meetings, examples=examples))
+    return {'variants': variants, 'has_more': len(rows) > 20}
+
+
+def variant_page(state: str, group: str, offset: int) -> dict:
+    with store.connect() as conn:
+        _resume_due(conn)
+        return _variant_page(conn, state, group, offset)
+
+
 def snapshot(state: str = 'pending', offset: int = 0) -> dict:
     if state not in ('pending','approved','rejected','deferred','ordinary'): raise ValueError('Неизвестный раздел предложений')
     with store.connect() as conn:
@@ -438,16 +458,9 @@ def snapshot(state: str = 'pending', offset: int = 0) -> dict:
             ORDER BY meetings DESC,c.group_key LIMIT 20 OFFSET ?''',(state,offset)).fetchall()
         proposals = []
         for group in groups:
-            variants = [dict(row) for row in conn.execute('SELECT * FROM term_candidates WHERE state=? AND group_key=? ORDER BY variant LIMIT 20',(state,group['group_key']))]
-            for variant in variants:
-                variant['normalized'] = glossary.normalize(variant['variant'])
-                variant['meetings'] = conn.execute('SELECT count(DISTINCT meeting_id) FROM term_evidence WHERE candidate_id=?',(variant['id'],)).fetchone()[0]
-                evidence = conn.execute('''SELECT e.*,m.title,m.filename FROM term_evidence e JOIN meetings m ON m.id=e.meeting_id
-                    WHERE e.candidate_id=? ORDER BY m.created_at DESC,e.turn LIMIT 3''',(variant['id'],)).fetchall()
-                variant['examples'] = [dict(e,audio=audio_source(e['meeting_id'],e['filename']) is not None and e['start'] is not None) for e in evidence]
             key = group['group_key']
             label = term_morphology.form_label(key[len(FORM_PREFIX):]) if key.startswith(FORM_PREFIX) else None
-            proposals.append(dict(key=key,form_label=label,meetings=group['meetings'],variants=variants))
+            proposals.append(dict(key=key,form_label=label,meetings=group['meetings'],**_variant_page(conn, state, key, 0)))
         total = conn.execute('SELECT count(DISTINCT group_key) FROM term_candidates WHERE state=?',(state,)).fetchone()[0]
     return dict(job=job,counts=counts,group_counts=group_counts,proposals=proposals,total=total)
 

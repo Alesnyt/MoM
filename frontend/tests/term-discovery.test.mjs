@@ -78,6 +78,38 @@ test('a word-form card hides and restores the full family with its original evid
   ]);
 });
 
+test('can reopen the 21st rejected spelling without changing any of the first 20', async () => {
+  const first = Array.from({length:20},(_,i)=>({...variant,id:'v'+i,variant:'Форма '+i,examples:[]}));
+  const last = {...variant,id:'last',revision:2,variant:'Последняя форма',examples:[]};
+  const group = 'form:NOUN:пример';
+  let reviewed;
+  globalThis.fetch = async (url,options) => {
+    const {pathname,searchParams} = new URL(String(url),'http://localhost');
+    if (pathname.endsWith('/review')) {
+      reviewed = JSON.parse(options.body);
+      return Response.json({ok:true});
+    }
+    if (pathname.endsWith('/variants')) {
+      assert.equal(searchParams.get('group'),group);
+      assert.equal(searchParams.get('state'),'rejected');
+      assert.equal(searchParams.get('offset'),'20');
+      return Response.json({variants:reviewed ? [] : [last],has_more:false});
+    }
+    const proposals = searchParams.get('state') === 'rejected'
+      ? [{key:group,form_label:'пример',meetings:0,variants:first,has_more:!reviewed}] : [];
+    return Response.json({...catalog,proposals,total:proposals.length});
+  };
+  const view = render(React.createElement(TermDiscoveryPanel));
+  fireEvent.click(await view.findByRole('button',{name:/Отклонённые/}));
+  fireEvent.click(await view.findByRole('button',{name:'Следующие варианты'}));
+  fireEvent.click(await view.findByRole('checkbox',{name:/Последняя форма/}));
+  fireEvent.click(view.getByRole('button',{name:'Вернуть на проверку'}));
+  await view.findByRole('checkbox',{name:/^Форма 0 /});
+  assert.deepEqual(reviewed.items,[{id:'last',revision:2}]);
+  assert.equal(reviewed.action,'reopen');
+  assert.equal(view.queryByRole('button',{name:'Следующие варианты'}),null);
+});
+
 test('failed approval retains selection and draft, retry can enable correction and scope',async()=>{
   let requests=0,saved;
   globalThis.fetch=async(url,opts)=>{

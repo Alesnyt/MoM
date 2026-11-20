@@ -1,5 +1,5 @@
 import {useEffect,useState} from 'react';
-import {getTermDiscovery,termDiscoveryAction,rejectPendingTerms,getGlossaries,type TermDiscovery,type TermProposal} from './api';
+import {getTermDiscovery,getTermVariants,termDiscoveryAction,rejectPendingTerms,getGlossaries,type TermDiscovery,type TermProposal} from './api';
 import {formatDate} from './format';
 const states=[['pending','На проверке'],['approved','Подтверждённые'],['deferred','Отложенные'],['rejected','Отклонённые'],['ordinary','Скрытые слова']];
 const labels:Record<string,string>={idle:'Ожидает запуска',queued:'В очереди',running:'Анализирую новые реплики',
@@ -80,7 +80,7 @@ export function TermDiscoveryPanel({onBack}:{onBack?:()=>void}) {
         : <button type="button" className="ghost danger" disabled={busy} onClick={()=>setConfirmAll(true)}>Отклонить все</button>)}
       {state==='ordinary'&&<p className="muted">Здесь собраны слова, которые администратор скрыл вместе с их формами. Их можно вернуть в предложения.</p>}
       {!data.proposals.length&&<p>В этом разделе предложений пока нет.</p>}
-      {data.proposals.map(p=><Proposal key={p.key+state} proposal={p} state={state} busy={busy}
+      {data.proposals.map(p=><ProposalPages key={p.key+state} proposal={p} state={state} busy={busy}
         onReview={payload=>action(()=>termDiscoveryAction('review',payload))}/>) }
       <div className="composer-row"><button className="ghost" disabled={!offset} onClick={()=>setOffset(v=>Math.max(0,v-20))}>Предыдущие предложения</button>
         <span>{data.total?`${offset+1}–${Math.min(offset+20,data.total)} из ${data.total}`:'0 групп'}</span>
@@ -89,7 +89,40 @@ export function TermDiscoveryPanel({onBack}:{onBack?:()=>void}) {
   </section>;
 }
 
-function Proposal({proposal,state,busy,onReview}:{proposal:TermProposal;state:string;busy:boolean;onReview:(payload:unknown)=>Promise<void>}) {
+type ProposalProps = {proposal:TermProposal;state:string;busy:boolean;onReview:(payload:unknown)=>Promise<void>};
+
+function ProposalPages(props:ProposalProps) {
+  const {proposal,state,busy} = props;
+  const [offset,setOffset] = useState(0);
+  const [extra,setExtra] = useState<(Pick<TermProposal,'variants'|'has_more'> & {offset:number})|null>(null);
+  const [error,setError] = useState('');
+  useEffect(()=>{
+    setError('');
+    if (!offset) return;
+    const controller = new AbortController();
+    getTermVariants(state,proposal.key,offset,controller.signal).then(page=>{
+      if (controller.signal.aborted) return;
+      if (page.variants.length) setExtra({...page,offset});
+      else setOffset(0);
+    }).catch(err=>{if (!controller.signal.aborted) setError(err.message);});
+    return ()=>controller.abort();
+  },[proposal,state,offset]);
+
+  const page = offset === 0 ? proposal : (extra?.offset === offset ? extra : null);
+  const changePage = (next:number) => {setExtra(null);setError('');setOffset(next);};
+  return <>
+    {page && <Proposal key={offset} {...props} proposal={{...proposal,...page}}/>}
+    {!page && !error && <p role="status">Загружаю варианты…</p>}
+    {error && <p role="alert">{error}</p>}
+    {(offset > 0 || page?.has_more) && <div className="composer-row" aria-label="Страницы вариантов">
+      <button className="ghost" disabled={busy || !offset} onClick={()=>changePage(Math.max(0,offset-20))}>Предыдущие варианты</button>
+      {page && <span>Варианты {offset+1}–{offset+page.variants.length}</span>}
+      <button className="ghost" disabled={busy || !page?.has_more} onClick={()=>changePage(offset+20)}>Следующие варианты</button>
+    </div>}
+  </>;
+}
+
+function Proposal({proposal,state,busy,onReview}:ProposalProps) {
   const [selected,setSelected]=useState<string[]>([]),[canonical,setCanonical]=useState(proposal.variants[0]?.canonical||'');
   const [description,setDescription]=useState(proposal.variants[0]?.description||''),[department,setDepartment]=useState(proposal.variants[0]?.department||'');
   const [replace,setReplace]=useState(false),[playing,setPlaying]=useState<number|null>(null),[audioError,setAudioError]=useState('');

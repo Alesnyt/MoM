@@ -13,6 +13,9 @@ from .api_schemas import (
 )
 
 
+TermState = Literal['pending','approved','rejected','deferred','ordinary']
+
+
 def create_router(require_admin) -> APIRouter:
     """Inject the shared authentication dependency without importing the app."""
     router = APIRouter()
@@ -129,9 +132,14 @@ def create_router(require_admin) -> APIRouter:
 
 
     @router.get('/api/admin/term-discovery')
-    def get_term_discovery(state: Literal['pending','approved','rejected','deferred','ordinary'] = 'pending',
+    def get_term_discovery(state: TermState = 'pending',
                            offset: int = Query(default=0, ge=0, le=100000), _admin: dict = Depends(require_admin)):
         return term_discovery.snapshot(state,offset)
+
+    @router.get('/api/admin/term-discovery/variants')
+    def get_term_variants(state: TermState, group: str = Query(max_length=256),
+                          offset: int = Query(default=0, ge=0, le=2147483647), _admin: dict = Depends(require_admin)):
+        return term_discovery.variant_page(state, group, offset)
 
 
     @router.post('/api/admin/term-discovery/settings')

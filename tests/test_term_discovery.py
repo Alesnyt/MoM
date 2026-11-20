@@ -81,6 +81,28 @@ def test_overview_and_bulk_rejection_across_pages(db, monkeypatch):
     assert client.get(url).status_code in (401,403)
 
 
+def test_restore_last_spelling_in_large_rejected_group(db, monkeypatch):
+    client = TestClient(main.app)
+    endpoint = '/api/admin/term-discovery'
+    group = 'form:NOUN:пример'
+    with store.connect() as conn:
+        conn.executemany("""INSERT INTO term_candidates(id,normalized,variant,group_key,created_at)
+            VALUES(?,?,?,?,?)""", [(f'v{i:02}', f':literal:v{i:02}', 'вариант', group, '2026-01-01') for i in range(21)])
+    assert client.post(endpoint + '/reject-pending').json() == {'groups': 1, 'variants': 21}
+    card, = client.get(endpoint, params={'state': 'rejected'}).json()['proposals']
+    assert card['has_more'] and [v['id'] for v in card['variants']] == [f'v{i:02}' for i in range(20)]
+    params = {'state': 'rejected', 'group': group, 'offset': 20}
+    page = client.get(endpoint + '/variants', params=params).json()
+    assert not page['has_more']
+    last, = page['variants']
+    assert last['id'] == 'v20'
+    assert client.post(endpoint + '/review', json={'action':'reopen','items':[{'id':last['id'],'revision':last['revision']}]}).is_success
+    assert client.get(endpoint + '/variants', params=params).json() == {'variants': [], 'has_more': False}
+    assert client.get(endpoint).json()['proposals'][0]['variants'][0]['id'] == 'v20'
+    monkeypatch.delitem(main.app.dependency_overrides, main.require_admin)
+    assert client.get(endpoint + '/variants', params=params).status_code in (401, 403)
+
+
 def test_unrecognized_terms_are_proposals_only_until_explicit_approval(db):
     meeting();v=collect()
     assert not glossary.catalog()['terms']
