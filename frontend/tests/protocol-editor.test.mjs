@@ -136,9 +136,13 @@ test('final delivery confirms participants, directory contacts and manual addres
   }
   const view = render(React.createElement(App));
   fireEvent.click(view.getByText('Редактировать протокол'));
-  assert.equal(view.queryByText('Отправить протокол по почте'), null);
+  assert.equal(view.queryByRole('region', {name:'Отправка протокола по почте'}), null);
   fireEvent.click(view.getByText('Отмена'));
-  fireEvent.click(view.getByText('Отправить протокол по почте'));
+  const card = within(view.getByRole('region', {name:'Отправка протокола по почте'}));
+  assert.match(card.getByRole('list', {name:'Получатели письма'}).textContent, /owner@example.com/);
+  assert.equal(card.getByRole('button', {name:'Подтвердить и отправить'}).disabled, false);
+  fireEvent.click(card.getByText('Изменить получателей'));
+  assert.equal(card.queryByRole('button', {name:'Подтвердить и отправить'}), null);
   fireEvent.click(view.getByRole('button',{name:'Убрать owner@example.com'}));
   fireEvent.click(view.getByRole('button',{name:/Анна · anna@example.com/}));
   const input = view.getByLabelText('Найти в AD или ввести email');
@@ -148,11 +152,14 @@ test('final delivery confirms participants, directory contacts and manual addres
     fireEvent.change(input, {target:{value}});
     fireEvent.click(view.getByRole('button',{name:'Добавить адрес'}));
   }
-  fireEvent.click(view.getByText('Проверить получателей'));
+  fireEvent.click(view.getByText('Применить список'));
   assert.deepEqual(sent, []);
   assert.equal(view.container.querySelectorAll('.delivery-addresses li').length, 3);
   fireEvent.click(view.getByText('Изменить получателей'));
-  fireEvent.click(view.getByText('Проверить получателей'));
+  fireEvent.click(view.getByRole('button',{name:'Убрать ad@example.com'}));
+  fireEvent.click(view.getByText('Отмена'));
+  assert.equal(view.container.querySelectorAll('.delivery-addresses li').length, 3);
+  assert.deepEqual(sent, []);
   fireEvent.click(view.getByText('Подтвердить и отправить'));
   await view.findByText('Ответ не получен');
   fireEvent.click(view.getByText('Подтвердить и отправить'));
@@ -162,4 +169,22 @@ test('final delivery confirms participants, directory contacts and manual addres
   assert.match(sent[0].request_id, /^[a-f0-9]{32}$/);
   assert.equal(sent[0].revision, initial.result_revision);
   assert.deepEqual(sent[0].recipients, ['anna@example.com', 'ad@example.com', 'extra@example.com']);
+});
+
+test('an empty recipient list can be edited and cannot be sent', () => {
+  globalThis.fetch = () => assert.fail('editing the list must not send a request');
+  const view = render(React.createElement(MeetingPane, {meeting:initial, tab:'overview', mailEnabled:true}));
+  const button = () => view.getByRole('button', {name:'Подтвердить и отправить'});
+  assert.ok(button().disabled);
+  fireEvent.click(view.getByText('Добавить получателей'));
+  const input = view.getByLabelText('Добавить email получателя');
+  fireEvent.change(input, {target:{value:'test@example.com'}});
+  assert.ok(view.getByText('Применить список').disabled);
+  fireEvent.click(view.getByText('Добавить адрес'));
+  fireEvent.click(view.getByText('Применить список'));
+  assert.ok(!button().disabled);
+  fireEvent.click(view.getByText('Изменить получателей'));
+  fireEvent.click(view.getByRole('button',{name:'Убрать test@example.com'}));
+  fireEvent.click(view.getByText('Применить список'));
+  assert.ok(button().disabled);
 });

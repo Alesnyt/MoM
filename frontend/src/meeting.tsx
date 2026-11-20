@@ -135,7 +135,8 @@ export function MeetingPane({
                 if (!meeting.result_revision) return;
                 setMailNote(null); onTab("mom"); setEditing({ initial: rawResult, revision: meeting.result_revision });
               }}>Редактировать протокол</button>}
-              <button className="primary" type="button" disabled={downloading} onClick={() => void download("docx")}>
+              <button className={mailEnabled && meeting.result_revision ? "ghost" : "primary"}
+                type="button" disabled={downloading} onClick={() => void download("docx")}>
                 Скачать протокол в Word (.docx)
               </button>
               <button

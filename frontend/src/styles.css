@@ -833,6 +833,7 @@ select.title-input {
 
 .pane {
   max-width: 920px;
+  container-type: inline-size;
 }
 
 .pane--transcript { max-width: none; }
@@ -854,6 +855,10 @@ select.title-input {
 }
 
 .pane-head h1 { overflow-wrap: anywhere; }
+@container (max-width: 670px) {
+  .pane-head { flex-direction: column; gap: 12px; }
+  .pane-head .pane-actions { justify-content: flex-start; max-width: none; }
+}
 
 .settings-actions {
   margin-top: 8px;
@@ -1512,14 +1517,6 @@ select.title-input {
   }
 }
 
-.protocol-recipients {
-  flex: 1 1 240px;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 12px;
-}
-
 .speaker-rename form {
   display: flex;
   flex-wrap: wrap;
@@ -1894,8 +1891,33 @@ select.title-input {
 .transcript-pages button { min-height: 38px; border: 1px solid var(--accent); font-weight: 650; }
 .transcript-pages button:disabled { border-color: var(--line); }
 .turn-listen span { color: var(--accent); }
-.recipient-search, .recipient-options, .delivery-addresses li { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
-.recipient-search { align-items: end; margin: .75rem 0; }
-.recipient-search label { flex: 1 1 14rem; }
-.delivery-addresses, .recipient-matches { list-style: none; padding: 0; }
-.delivery-addresses li, .recipient-matches li { margin: .3rem 0; overflow-wrap: anywhere; }
+.protocol-recipients {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 12px 0 18px;
+  padding: 16px 20px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-inline-start: 4px solid var(--accent);
+  border-radius: 10px;
+}
+.protocol-recipients h2 { margin: 0; font-size: 1.15rem; }
+.protocol-recipients p { margin: 0; }
+.protocol-recipients > button { justify-self: start; }
+.delivery-attachment, .delivery-empty { font-size: .875rem; color: var(--muted); }
+.delivery-to, .delivery-addresses, .delivery-addresses li, .delivery-actions,
+.recipient-search, .recipient-options { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.delivery-to { align-items: baseline; }
+.delivery-to > strong { font-size: .875rem; }
+.delivery-addresses, .recipient-matches { list-style: none; padding: 0; margin: 0; }
+.delivery-addresses { min-width: 0; }
+.delivery-addresses li { max-width: 100%; padding: 4px 9px; background: var(--stage); border: 1px solid var(--line); border-radius: 6px; }
+.delivery-addresses span, .recipient-matches li { overflow-wrap: anywhere; }
+.delivery-addresses li button { padding: 2px 6px; font-size: .8rem; }
+.delivery-editor { padding: 12px 0; border-block: 1px solid var(--line); }
+.recipient-search { align-items: end; }
+.recipient-options + .recipient-search { margin-top: .75rem; }
+.recipient-search label { flex: 1 1 14rem; min-width: 0; }
+.recipient-matches li { margin-top: .3rem; }
+.delivery-actions .primary, .delivery-actions .ghost { min-height: 40px; }
