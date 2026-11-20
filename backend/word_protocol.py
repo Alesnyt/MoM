@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from io import BytesIO
 
 from docx import Document
@@ -25,24 +26,57 @@ def docx_filename(title: str) -> str:
     return f"{name or 'Протокол'}.docx"
 
 
+def _list_definition(document, ordered: bool) -> int:
+    """Extend the template's native list style to the nine nesting levels supported by Word."""
+    numbering = document.part.numbering_part.element
+    style = document.styles["List Number" if ordered else "List Bullet"]
+    template_num = numbering.num_having_numId(style.element.pPr.numPr.numId.val)
+    definitions = numbering.findall(qn("w:abstractNum"))
+    id_attr = qn("w:abstractNumId")
+    definition_id = max(int(node.get(id_attr)) for node in definitions) + 1
+    definition = deepcopy(next(node for node in definitions if int(node.get(id_attr)) == template_num.abstractNumId.val))
+    definition.set(id_attr, str(definition_id))
+    definition.find(qn("w:multiLevelType")).set(qn("w:val"), "multilevel")
+    for element in definition.findall(qn("w:nsid")) + definition.findall(qn("w:tmpl")):
+        element.getparent().remove(element)
+    base = definition.find(qn("w:lvl"))
+    for style_link in base.findall(qn("w:pStyle")):
+        base.remove(style_link)
+    definition.remove(base)
+    for depth in range(9):
+        level = deepcopy(base)
+        level.set(qn("w:ilvl"), str(depth))
+        if ordered:
+            level.find(qn("w:lvlText")).set(qn("w:val"), f"%{depth + 1}.")
+        left = str(Cm(.65 * (depth + 1)).twips)
+        level.find(qn("w:pPr")).find(qn("w:ind")).set(qn("w:left"), left)
+        for tab in level.iter(qn("w:tab")):
+            tab.set(qn("w:pos"), left)
+        definition.append(level)
+    numbering.insert_element_before(definition, "w:num", "w:numIdMacAtCleanup")
+    return definition_id
+
+
 def _add_summary(document, result: dict) -> None:
     numbering = document.part.numbering_part.element
     numbers = {}
+    definitions = {}
     for block in summary_format.paragraphs(result):
         paragraph = document.add_paragraph(style="Heading 2" if block.heading else "Normal")
         if block.depth:
             paragraph.paragraph_format.left_indent = Cm(.65 * block.depth)
         if block.item:
             marker = block.item
+            level = min(block.depth - 1, 8)
             if marker.list_id not in numbers:
-                style = "List Bullet" if marker.number is None else "List Number"
-                template_id = document.styles[style].element.pPr.numPr.numId.val
-                abstract_id = numbering.num_having_numId(template_id).abstractNumId.val
-                num = numbering.add_num(abstract_id)
-                num.add_lvlOverride(0).add_startOverride(marker.number if marker.number is not None else 1)
+                ordered = marker.number is not None
+                if ordered not in definitions:
+                    definitions[ordered] = _list_definition(document, ordered)
+                num = numbering.add_num(definitions[ordered])
+                num.add_lvlOverride(level).add_startOverride(marker.number if ordered else 1)
                 numbers[marker.list_id] = num.numId
             properties = paragraph._p.get_or_add_pPr().get_or_add_numPr()
-            properties.get_or_add_ilvl().val = 0
+            properties.get_or_add_ilvl().val = level
             properties.get_or_add_numId().val = numbers[marker.list_id]
             paragraph.paragraph_format.first_line_indent = Cm(-.45)
         for span in block.spans:

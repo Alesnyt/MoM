@@ -568,6 +568,7 @@ def test_formatted_summary_roundtrip_with_nested_lists_and_group_delivery(delive
         assert any(run.italic and run.text == "Открытый вопрос." for p in paragraphs for run in p.runs)
         listed = [p for p in paragraphs if p._p.xpath("w:pPr/w:numPr/w:numId")]
         assert len(listed) == 12 * copies
+        assert [p._p.pPr.numPr.ilvl.val for p in listed[:5]] == [0, 1, 1, 0, 0]
         assert listed[1].paragraph_format.left_indent > listed[0].paragraph_format.left_indent
         num_ids = [p._p.xpath("w:pPr/w:numPr/w:numId")[0].get(qn("w:val")) for p in listed]
         assert num_ids[-1] == num_ids[-2] and num_ids[-1] != num_ids[5]
