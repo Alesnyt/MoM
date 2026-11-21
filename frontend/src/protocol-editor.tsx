@@ -111,7 +111,7 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
   }
 
   const summaryField = textField("summary", "Саммари", draft.summary, summary => ({ ...draft, summary }));
-  return <form className="protocol-editor" aria-label={summaryOnly ? "Редактор саммари" : "Редактор протокола"} onSubmit={e => {
+  return <form className={summaryOnly ? "protocol-editor protocol-editor--summary" : "protocol-editor"} aria-label={summaryOnly ? "Редактор саммари" : "Редактор протокола"} onSubmit={e => {
     e.preventDefault(); void submit("save");
   }}>
     <h2>{summaryOnly ? "Редактирование саммари" : "Редактирование протокола"}</h2>
