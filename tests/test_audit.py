@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend import audio, auth, config, keys, mail, store, worker
+from backend import audio, auth, config, keys, mail, main, store, worker
 from backend.logctx import meeting_scope
 from backend.main import app
 
@@ -244,7 +244,7 @@ def test_admin_journal_hides_secrets(db: Path, monkeypatch: pytest.MonkeyPatch) 
     assert ldap_row["actor"] == "boss"
 
 
-def test_auto_mail_is_audited(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_confirmed_mail_is_audited(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     user = store.create_user("a@example.com", auth.hash_password("secret-pass"), 5)
     store.create_meeting("meet1", "Планёрка", "plan.webm", user["id"])
     store.update_meeting("meet1", status="done", result={"title": "Планёрка", "summary": "ок"})
@@ -253,7 +253,8 @@ def test_auto_mail_is_audited(db: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(mail, "send_mail", lambda *args, **kwargs: None)
     meeting = store.get_meeting("meet1")
     assert meeting
-    mail.complete_protocol(meeting, result=meeting["result"])
+    payload = main.ProtocolSendIn(revision=meeting["result_revision"], recipients=["a@example.com"], request_id="a" * 32)
+    main.confirm_protocol_mail("meet1", payload, {"user_id": user["id"], "email": "a@example.com"})
     assert mail.deliver_pending()
     rows = store.list_audit()
     assert rows[0]["action"] == "email.send"

@@ -43,6 +43,7 @@ export type MeetingResult = {
   participants: string[];
   date_hint: string | null;
   summary: string;
+  summary_format?: "plain" | "markdown";
   key_points: string[];
   decisions: string[];
   decision_sources?: { decision: string; turns: number[] }[];
@@ -61,7 +62,6 @@ export type Speaker = {
   send_protocol?: boolean;
 };
 
-export type ProtocolRecipient = { speaker_id: string; email: string };
 
 export type NameReview = {
   status: "done" | "error" | "skipped" | "stale";

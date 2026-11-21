@@ -134,7 +134,7 @@ test('recognition opens speaker editing and the skip button queues the protocol'
   const skip = view.getByRole('button', { name: 'Пропустить и собрать протокол' });
   assert.ok(skip.compareDocumentPosition(transcript) & Node.DOCUMENT_POSITION_FOLLOWING);
   fireEvent.click(skip);
-  await waitFor(() => assert.deepEqual(submitted, { recipients: [] }));
+  await waitFor(() => assert.deepEqual(submitted, {}));
   assert.equal(view.queryByRole('region', { name: 'Проверка спикеров' }), null);
   assert.ok(view.getByText('Транскрипт сохранён. Когда освободится слот, начнётся сборка протокола.'));
 });

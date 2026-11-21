@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { assignSpeaker, listPeople, renameSpeaker, type Person } from "./api";
+import { assignSpeaker, listPeople, mergeSpeakers, renameSpeaker, type Person } from "./api";
 import { formatClock } from "./format";
 import type { CalendarPerson } from "./calendar-types";
 import { CalendarContextCard } from "./calendar";
@@ -309,6 +309,8 @@ export function TranscriptView({
   const [error, setError] = useState<string | null>(null);
   const [speakerFilter, setSpeakerFilter] = useState<string | null>(null);
   const [page, setPage] = useState<number | null>(null);
+  const [mergeSource, setMergeSource] = useState("");
+  const [mergeTarget, setMergeTarget] = useState("");
   const speakersHeadingId = useId();
   const transcriptHeadingId = useId();
   const turnsId = useId();
@@ -364,6 +366,18 @@ export function TranscriptView({
     }
   }
 
+  async function merge() {
+    if (!mergeSource || !mergeTarget || mergeSource === mergeTarget || busy || disabled) return;
+    setBusy(true); onBusyChange?.(true); setError(null);
+    try {
+      onUpdated(await mergeSpeakers(meeting.id, mergeSource, mergeTarget));
+      if (speakerFilter === mergeSource) { setSpeakerFilter(mergeTarget); setPage(0); }
+      setMergeSource(""); setMergeTarget("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось объединить спикеров");
+    } finally { setBusy(false); onBusyChange?.(false); }
+  }
+
   async function moveTurn(indexes: number[], speakerId: string) {
     setBusy(true);
     onBusyChange?.(true);
@@ -404,6 +418,31 @@ export function TranscriptView({
                 <p><strong>2. Проверьте фразы.</strong> Нажмите «Показать реплики» у спикера — транскрипт отфильтруется.</p>
               </div>
             : <p className="speaker-hint">Назначьте спикеров в транскрипте.</p>}
+          {namedSpeakers.length > 1 && <details className="speaker-merge">
+            <summary>Объединить спикеров</summary>
+            <fieldset disabled={busy || disabled}>
+              <label>Чьи реплики перенести
+                <select value={mergeSource} onChange={e => { setMergeSource(e.target.value); setMergeTarget(""); }}>
+                  <option value="">Выберите спикера</option>
+                  {namedSpeakers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+              <label>Кому передать все реплики
+                <select value={mergeTarget} disabled={!mergeSource} onChange={e => setMergeTarget(e.target.value)}>
+                  <option value="">Выберите спикера</option>
+                  {namedSpeakers.filter(s => s.id !== mergeSource).map(s =>
+                    <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+              {mergeSource && mergeTarget && <p className="progress-hint">
+                Все реплики «{speakers.find(s => s.id === mergeSource)?.name}» перейдут к «{speakers.find(s => s.id === mergeTarget)?.name}».
+                Сохранится карточка второго спикера.{meeting.status === "done" && !meeting.result?.edited_manually &&
+                  " MoM соберёт протокол заново."}
+              </p>}
+              <button type="button" className="ghost" disabled={!mergeSource || !mergeTarget}
+                onClick={() => void merge()}>Подтвердить объединение</button>
+            </fieldset>
+          </details>}
           <div className="speaker-roster">
             {namedSpeakers.map((speaker) => (
               <div className={`speaker-card${speakerFilter === speaker.id ? " speaker-card--selected" : ""}`}
@@ -528,12 +567,12 @@ function TranscriptTurns({
       </label>
       <nav className="transcript-pages" aria-label="Страницы транскрипта">
         <button type="button" className="ghost" disabled={currentPage === 0}
-          onClick={() => onPageChange(currentPage - 1)}>Предыдущие реплики</button>
+          onClick={() => onPageChange(currentPage - 1)}><span aria-hidden="true">← </span>Предыдущие реплики</button>
         <span role="status">{filtered.length
           ? `Реплики ${start + 1}–${start + visibleTurns.length} из ${filtered.length}`
           : "Реплик не найдено"}</span>
         <button type="button" className="ghost" disabled={currentPage === lastPage}
-          onClick={() => onPageChange(currentPage + 1)}>Следующие реплики</button>
+          onClick={() => onPageChange(currentPage + 1)}>Следующие реплики<span aria-hidden="true"> →</span></button>
       </nav>
     </div>
     <div ref={listRef} id={turnsId} className="turns" role="region" aria-labelledby={headingId} tabIndex={0}>
@@ -553,7 +592,7 @@ function TranscriptTurns({
               {recordingId && endMs > startMs && <button type="button" className="ghost turn-listen"
                 aria-pressed={playing === playbackKey} aria-label={`${playing === playbackKey ? "Закрыть плеер" : "Прослушать реплику"}: ${name}, ${formatClock(turn.start!)}`}
                 onClick={() => setPlaying(playing === playbackKey ? null : playbackKey)}>
-                {playing === playbackKey ? "Закрыть плеер" : "Прослушать"}
+                <span aria-hidden="true">{playing === playbackKey ? "×" : "▶"}</span> {playing === playbackKey ? "Закрыть плеер" : "Прослушать"}
               </button>}
               <label className="speaker-move">
                 <span className="sr-only">Кто говорит эту реплику</span>

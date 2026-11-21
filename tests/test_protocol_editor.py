@@ -187,12 +187,15 @@ def test_partial_document_rejected(api):
     assert client.get(PATH).json()["result"] == payload["result"]
 
 
-def test_proofreading_unsaved_draft_calls_configured_model_and_never_saves(api, monkeypatch):
+@pytest.mark.parametrize("summary_only", [False, True])
+def test_proofreading_unsaved_draft_calls_configured_model_and_never_saves(api, monkeypatch, summary_only):
     client, payload = api
     monkeypatch.setattr(config, "get_api_key", lambda: "configured-key")
     monkeypatch.setattr(config, "get_chat_model", lambda: "configured-model")
     draft = payload["result"]
     draft["summary"] = "Благодаря нового плана одобрили 12 задач."
+    if summary_only:
+        payload = {"summary": draft["summary"], "revision": payload["revision"]}
     proposal = dict(field="summary", before="Благодаря нового плана", after="Благодаря новому плану",
                     reason="Предлог «благодаря» требует дательного падежа.")
     choices = [proposal, dict(proposal, field="transcript"), dict(proposal, before="чужой текст"),
@@ -211,6 +214,8 @@ def test_proofreading_unsaved_draft_calls_configured_model_and_never_saves(api, 
     assert sent["model"] == "configured-model"
     fields = json.loads(sent["messages"][1]["content"])
     assert fields["summary"] == draft["summary"]
+    if summary_only:
+        assert set(fields) == {"summary"}
     assert "Исходная реплика" not in str(fields) and "Иван" not in str(fields)
     assert client.get(PATH).json()["result"]["summary"] == ORIGINAL["summary"]
     completion.return_value.choices[0].message.content = "{}"
@@ -249,3 +254,16 @@ def test_duplicate_proof_request_releases_slot_even_after_failure(monkeypatch):
                 with editor.proofread_slot("third"):
                     pytest.fail("Model capacity exceeded")
             assert err.value.status_code == 429
+
+
+def test_plain_legacy_summary_and_literal_markup_stay_readable_in_exports(api):
+    from backend import summary_format
+    client, payload = api
+    url = PATH + "/protocol"
+    source = "**буквально** <пример> & условия\n2. Строка исходного протокола"
+    assert client.patch(url, json={"revision": payload["revision"], "summary": source}).is_success
+    assert source in client.get(PATH + "/email.txt").text
+    word = Document(BytesIO(client.get(PATH + "/export.docx").content))
+    assert all(s in [p.text for p in word.paragraphs] for s in source.splitlines())
+    assert "&lt;пример&gt;" in summary_format.html("<пример>")
+    assert "<em>важно</em>" in summary_format.html("*важно*")

@@ -663,6 +663,7 @@ export default function App() {
             <MeetingPane
               key={selected.id}
               meeting={selected}
+              ownerEmail={user?.email ?? undefined}
               tab={tab}
               mailEnabled={Boolean(health?.smtp?.configured)}
               directoryEnabled={Boolean(health?.ldap?.configured)}

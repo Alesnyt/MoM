@@ -116,6 +116,16 @@ class SpeakerNameIn(BaseModel):
     job_title: str | None = Field(default=None, max_length=200)
 
 
+class MergeSpeakersIn(BaseModel):
+    target_id: str = Field(min_length=1, max_length=40)
+
+
+class ProtocolSendIn(BaseModel):
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    request_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    recipients: list[str] = Field(min_length=1, max_length=200)
+
+
 class ProtocolRecipientIn(BaseModel):
     speaker_id: str = Field(min_length=1, max_length=40)
     email: str = Field(min_length=3, max_length=254)

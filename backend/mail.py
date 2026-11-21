@@ -10,8 +10,8 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate
 
-from . import config, control, protocol_email, retention, store, word_protocol
-from .analyze import ProtocolResult
+from . import config, control, protocol_email, retention, store, summary_format, word_protocol
+from .analyze import StoredProtocolResult
 from .speakers import SpeakerError, clean_speaker_email, participant_labels
 
 log = logging.getLogger("mom.mail")
@@ -40,7 +40,7 @@ def email_body(meeting: dict) -> str:
     if participants:
         lines.append(f"Участники: {', '.join(participants)}")
     lines.append("")
-    lines.append((result.get("summary") or "").strip() or "Саммари отсутствует.")
+    lines.append(summary_format.plain_text(result))
     key_points = result.get("key_points") or []
     if key_points:
         lines.append("")
@@ -77,7 +77,7 @@ class ProtocolMail:
 
 
 def prepare_protocol_mail(meeting: dict) -> ProtocolMail:
-    result = ProtocolResult.model_validate(meeting["result"]).model_dump()
+    result = StoredProtocolResult.model_validate(meeting["result"]).model_dump()
     filename = word_protocol.docx_filename(result["title"] or meeting["title"])
     public_url = protocol_email.meeting_url(config.get_public_base_url())
     body = email_body({**meeting, "result": result}) + f"\nВо вложении: {filename}\n"
@@ -102,17 +102,17 @@ def _make_message(
     return message
 
 
-def build_eml(meeting: dict) -> bytes:
+def build_eml(meeting: dict, recipients: list[str] | None = None) -> bytes:
     packet = prepare_protocol_mail(meeting)
     message = _make_message(email_subject(meeting), packet.body, html=packet.html,
                             attachment=(packet.filename, packet.docx))
     message["From"] = "MoM <mom@localhost>"
     message["Date"] = formatdate(localtime=True)
     message["X-Unsent"] = "1"
-    if any(speaker.get("send_protocol") for speaker in meeting.get("speakers") or []):
-        recipients = _protocol_recipients(meeting, require_smtp=False)
-        if recipients:
-            message["To"] = ", ".join(recipients)
+    if not recipients and any(speaker.get("send_protocol") for speaker in meeting.get("speakers") or []):
+        recipients = _legacy_draft_recipients(meeting)
+    if recipients:
+        message["To"] = ", ".join(recipients)
     return message.as_bytes()
 
 
@@ -195,9 +195,7 @@ def send_mail(
                 client.close()
 
 
-def _protocol_recipients(meeting: dict, *, require_smtp: bool = True) -> list[str]:
-    if require_smtp and not config.smtp_configured():
-        return []
+def _legacy_draft_recipients(meeting: dict) -> list[str]:
     user_id = meeting.get("user_id")
     user = store.get_user(user_id) if user_id else None
     candidates = [(user or {}).get("email") or ""]
@@ -222,40 +220,28 @@ def _protocol_recipients(meeting: dict, *, require_smtp: bool = True) -> list[st
 def complete_protocol(meeting: dict, **fields) -> None:
     meeting_id = meeting["id"]
     user_id = meeting.get("user_id")
-    finished = {**meeting, **fields}
-    recipients = _protocol_recipients(finished)
-    packet = None
-    status_message = "Готово"
-    if recipients:
-        try:
-            packet = prepare_protocol_mail(finished)
-            status_message = "Готово, письмо в очереди"
-        except Exception:
-            log.exception("Не удалось подготовить письмо с протоколом встречи %s", meeting_id)
-            status_message = "Готово. Не удалось подготовить письмо с протоколом."
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        # Word generation and waiting for the writer lock can outlast a stop.
-        # Do not enqueue mail or publish a late result in that case.
+        # Recheck cancellation under the same lock that publishes the result.
         if control.is_stopped(meeting_id):
             raise control.ProcessingStopped()
         store.update_meeting(
             meeting_id, connection=conn, **fields, status="done", error=None, progress=100,
-            status_message=status_message,
+            status_message="Готово",
         )
-        conn.execute("DELETE FROM protocol_mail WHERE meeting_id = ?", (meeting_id,))
-        conn.execute("DELETE FROM protocol_mail_format WHERE meeting_id = ?", (meeting_id,))
-        if packet is not None:
-            conn.execute(
-                "INSERT INTO protocol_mail_format (meeting_id, html, filename, docx) VALUES (?, ?, ?, ?)",
-                (meeting_id, packet.html, packet.filename, packet.docx),
-            )
-            conn.executemany(
-                "INSERT INTO protocol_mail (meeting_id, recipient, subject, body) VALUES (?, ?, ?, ?)",
-                [(meeting_id, to, email_subject(finished), packet.body) for to in recipients],
-            )
         removed = store.prune_user_meetings(user_id, connection=conn) if user_id else []
     retention.remove_pruned(removed)
+
+
+def queue_protocol_mail(conn, meeting: dict, packet: ProtocolMail, recipients: list[str]) -> None:
+    meeting_id = meeting["id"]
+    conn.execute("DELETE FROM protocol_mail WHERE meeting_id = ?", (meeting_id,))
+    conn.execute("INSERT OR REPLACE INTO protocol_mail_format (meeting_id, html, filename, docx) VALUES (?, ?, ?, ?)",
+                 (meeting_id, packet.html, packet.filename, packet.docx))
+    subject = email_subject(meeting)
+    conn.executemany("INSERT INTO protocol_mail (meeting_id, recipient, subject, body) VALUES (?, ?, ?, ?)",
+                     [(meeting_id, address, subject, packet.body) for address in recipients])
+    store.update_meeting(meeting_id, connection=conn, status_message="Готово, письмо в очереди")
 
 
 def _delivery_status(conn, meeting_id: str) -> bool:

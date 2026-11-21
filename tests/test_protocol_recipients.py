@@ -66,6 +66,12 @@ def delivery(tmp_path, monkeypatch):
         yield client, result.json(), sent
 
 
+def confirm(client, mid, recipients, revision=None, key="a" * 32):
+    return client.post(f"/api/meetings/{mid}/protocol/send", json={
+        "revision": revision or store.get_meeting(mid)["result_revision"], "recipients": recipients, "request_id": key,
+    })
+
+
 def test_selected_speakers_receive_protocol_only_after_completion(delivery, monkeypatch):
     client, meeting, sent = delivery
     mid = meeting["id"]
@@ -78,13 +84,13 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
     assert not renamed.json()["speakers"][0].get("send_protocol")
     # Saving a catalog contact is not permission to email that contact.
     client.patch(path + "/speakers/S3", json={"name": "Вера", "email": "vera@example.com"})
-    queued = client.post(path + "/protocol", json={"recipients": [{"speaker_id": "S1", "email": "anna@example.com"}]})
+    queued = client.post(path + "/protocol")
     assert queued.status_code == 200, queued.text
     assert queued.json()["status"] == "queued"
     assert sent == []
     store.init_db()
     saved = client.get(path).json()
-    assert saved["speakers"][0]["send_protocol"] is True
+    assert not saved["speakers"][0].get("send_protocol")
     assert saved["speakers"][2]["email"] == "vera@example.com"
     assert not saved["speakers"][2].get("send_protocol")
     assert saved["segments"] == meeting["segments"]
@@ -99,6 +105,9 @@ def test_selected_speakers_receive_protocol_only_after_completion(delivery, monk
     monkeypatch.setattr(pipeline, "_analyze_with_heartbeat", analyze)
     asyncio.run(pipeline.process_meeting(mid))
     assert sent == []
+    assert not store.get_meeting(mid)["mail_pending"]
+    assert not mail.deliver_pending()
+    assert confirm(client, mid, ["owner@example.com", "anna@example.com"]).is_success
     assert store.get_meeting(mid)["mail_pending"]
     store.init_db()
     while mail.deliver_pending():
@@ -135,7 +144,7 @@ def test_delivery_requires_smtp_but_protocol_without_recipients_does_not(deliver
     path = f'/api/meetings/{meeting["id"]}/protocol'
     response = client.post(path, json={"recipients": [{"speaker_id": "S1", "email": "a@example.com"}]})
     assert response.status_code == 400
-    assert "SMTP" in response.json()["detail"]
+    assert "готовом протоколе" in response.json()["detail"]
     assert client.post(path).status_code == 200
 
 
@@ -153,10 +162,10 @@ def test_another_user_cannot_set_recipients(delivery):
 def test_recipient_selection_cannot_change_after_queue(delivery):
     client, meeting, _ = delivery
     path = f'/api/meetings/{meeting["id"]}/protocol'
-    assert client.post(path, json={"recipients": [{"speaker_id": "S1", "email": "a@example.com"}]}).status_code == 200
+    assert client.post(path).status_code == 200
     assert client.post(path, json={"recipients": [{"speaker_id": "S2", "email": "b@example.com"}]}).status_code == 409
-    assert not store.queue_review_protocol(meeting["id"], {"speakers": []})
-    assert store.get_meeting(meeting["id"])["speakers"][0]["email"] == "a@example.com"
+    assert not store.queue_review_protocol(meeting["id"])
+    assert not store.get_meeting(meeting["id"])["speakers"][0].get("email")
 
 
 def test_name_reset_clears_contact_and_delivery_flag(delivery):
@@ -185,8 +194,9 @@ def test_downloaded_email_and_smtp_have_the_word_attachment(delivery, monkeypatc
     result = {"title": "План & сроки", "summary": "Первый абзац\n\nВторой абзац",
               "decisions": ["Утвердить <пилот>"], "action_items": [{"task": "Проверить пилот", "assignee": "Анна"}]}
     path = f"/api/meetings/{mid}/protocol"
-    assert client.post(path, json={"recipients": [{"speaker_id": "S1", "email": "speaker@example.com"}]}).is_success
+    assert client.post(path).is_success
     mail.complete_protocol(store.get_meeting(mid), result=result)
+    assert confirm(client, mid, ["owner@example.com", "speaker@example.com"]).is_success
     captured = []
 
     class SMTP:
@@ -245,7 +255,7 @@ def test_simultaneous_speaker_edits_keep_both_updates(delivery):
 
 
 def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch):
-    _, meeting, sent = delivery
+    client, meeting, sent = delivery
     document = {"speakers": [
         {"id": "S1", "name": "Анна", "email": "OWNER@example.com", "send_protocol": True},
         {"id": "S2", "name": "Борис", "email": "b@example.com", "send_protocol": True},
@@ -262,6 +272,7 @@ def test_mail_deduplicates_and_continues_after_one_failure(delivery, monkeypatch
 
     monkeypatch.setattr(mail, "send_mail", send)
     mail.complete_protocol(store.get_meeting(meeting["id"]), result={"summary": "Текст"})
+    assert confirm(client, meeting["id"], ["owner@example.com", "b@example.com", "B@example.com", "g@example.com"]).is_success
     while mail.deliver_pending():
         pass
     assert sent == [["owner@example.com", "b@example.com", "g@example.com"]]
@@ -282,11 +293,10 @@ def test_review_or_disabled_smtp_never_sends(delivery, monkeypatch):
 def test_delivery_retries_only_the_recipient_with_a_temporary_failure(delivery, monkeypatch):
     client, meeting, _ = delivery
     mid = meeting["id"]
-    response = client.post(f"/api/meetings/{mid}/protocol", json={"recipients": [
-        {"speaker_id": "S1", "email": "speaker@example.com"},
-    ]})
+    response = client.post(f"/api/meetings/{mid}/protocol")
     assert response.status_code == 200
     mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
+    assert confirm(client, mid, ["owner@example.com", "speaker@example.com"]).is_success
     calls = []
 
     def send(to, _subject, _body, **formatting):
@@ -311,9 +321,10 @@ def test_delivery_retries_only_the_recipient_with_a_temporary_failure(delivery, 
 
 
 def test_interrupted_smtp_attempt_is_not_sent_again(delivery):
-    _, meeting, sent = delivery
+    client, meeting, sent = delivery
     mid = meeting["id"]
     mail.complete_protocol(meeting, result={"summary": "Готово"})
+    assert confirm(client, mid, ["owner@example.com"]).is_success
     with store.connect() as conn:
         conn.execute("UPDATE protocol_mail SET state = 'sending', due_at = 0 WHERE meeting_id = ?", (mid,))
     assert not mail.deliver_pending()
@@ -354,10 +365,9 @@ def test_two_workers_cannot_send_the_same_group_twice(delivery, monkeypatch):
 
     client, meeting, _ = delivery
     mid = meeting["id"]
-    assert client.post(f"/api/meetings/{mid}/protocol", json={"recipients": [
-        {"speaker_id": "S1", "email": "speaker@example.com"},
-    ]}).is_success
+    assert client.post(f"/api/meetings/{mid}/protocol").is_success
     mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
+    assert confirm(client, mid, ["owner@example.com", "speaker@example.com"]).is_success
     started, release = Event(), Event()
     attempts = []
 
@@ -383,10 +393,9 @@ def test_two_workers_cannot_send_the_same_group_twice(delivery, monkeypatch):
 def test_all_addresses_refused_keep_individual_retry_status(delivery, monkeypatch):
     client, meeting, _ = delivery
     mid = meeting["id"]
-    assert client.post(f"/api/meetings/{mid}/protocol", json={"recipients": [
-        {"speaker_id": "S1", "email": "speaker@example.com"},
-    ]}).is_success
+    assert client.post(f"/api/meetings/{mid}/protocol").is_success
     mail.complete_protocol(store.get_meeting(mid), result={"summary": "Готово"})
+    assert confirm(client, mid, ["owner@example.com", "speaker@example.com"]).is_success
     sends = []
 
     class SMTP:
@@ -415,3 +424,152 @@ def test_all_addresses_refused_keep_individual_retry_status(delivery, monkeypatc
     assert sends[0][2] == ["owner@example.com", "speaker@example.com"]
     assert sends[1][2] == ["speaker@example.com"]
     assert '1 из 2' in store.get_meeting(mid)["status_message"]
+
+
+def test_only_the_owner_can_confirm_a_ready_protocol_with_valid_addresses(delivery, monkeypatch):
+    client, meeting, sent = delivery
+    mid = meeting["id"]
+    assert confirm(client, mid, ["a@example.com"], revision="0" * 64).status_code == 409
+    mail.complete_protocol(meeting, result={"summary": "Готово"})
+    assert confirm(client, mid, ["a@example.com", "bad address"]).status_code == 400
+    assert confirm(client, mid, ["a@example.com\r\nCc: x@example.com"]).status_code == 400
+    store.put_session("other", "user", user_id="other", email="other@example.com", expires=time.time() + 3600)
+    client.cookies.set(auth.USER_COOKIE, "other")
+    assert confirm(client, mid, ["x@example.com"]).status_code == 404
+    client.cookies.set(auth.USER_COOKIE, "owner")
+    monkeypatch.setattr(config, "smtp_configured", lambda: False)
+    assert confirm(client, mid, ["x@example.com"]).status_code == 400
+    assert not mail.deliver_pending() and not sent
+
+
+def test_final_send_freezes_the_confirmed_edit_and_deduplicates_retries(delivery):
+    client, meeting, sent = delivery
+    mid = meeting["id"]
+    path = f"/api/meetings/{mid}/protocol"
+    draft = main.ProtocolResult(title="План", summary="Первая версия", participants=["Анна"],
+                                decisions=["Назначить пилот"],
+                                decision_sources=[{"decision": "Назначить пилот", "turns": [2]}]).model_dump()
+    mail.complete_protocol(meeting, result=draft)
+    original = store.get_meeting(mid)["result_revision"]
+    draft["summary"] = "Отредактированная версия"
+    saved = client.patch(path, json={"revision": original, "summary": draft["summary"]})
+    assert saved.is_success, saved.text
+    assert saved.json()["result"] == {**draft, "edited_manually": True}
+    revision = saved.json()["result_revision"]
+    assert client.patch(path, json={"revision": original, "summary": "Устаревшая правка"}).status_code == 409
+    assert not mail.deliver_pending() and not sent
+    addresses = ["Colleague@example.com", "additional@example.com", "colleague@example.com"]
+    assert confirm(client, mid, addresses, original).status_code == 409
+    assert confirm(client, mid, addresses, revision).is_success
+    assert confirm(client, mid, addresses, revision).is_success
+    assert confirm(client, mid, ["other@example.com"], revision).status_code == 409
+    assert confirm(client, mid, addresses, revision, key="b" * 32).status_code == 409
+    eml = client.get(f"/api/meetings/{mid}/email.eml")
+    message = BytesParser(policy=policy.default).parsebytes(eml.content)
+    assert [a.addr_spec for a in message["To"].addresses] == ["colleague@example.com", "additional@example.com"]
+    draft["summary"] = "Следующая редакция"
+    changed = client.patch(path, json={"revision": revision, "result": draft})
+    assert changed.is_success
+    assert mail.deliver_pending() and not mail.deliver_pending()
+    assert len(sent) == 1 and sent[0][0] == ["colleague@example.com", "additional@example.com"]
+    assert "Отредактированная версия" in sent[0][2] and "Следующая редакция" not in sent[0][2]
+    assert "Отредактированная версия" in sent[0][3]["html"] and "Следующая редакция" not in sent[0][3]["html"]
+    paragraphs = Document(BytesIO(sent[0][3]["attachment"][1])).paragraphs
+    assert any("Отредактированная версия" in p.text for p in paragraphs)
+    assert confirm(client, mid, addresses, revision).is_success
+    assert not mail.deliver_pending()
+    assert confirm(client, mid, ["new@example.com"], changed.json()["result_revision"], key="b" * 32).is_success
+    assert mail.deliver_pending() and sent[1][0] == ["new@example.com"]
+    assert "Следующая редакция" in sent[1][2]
+    assert sent[1][3]["message_id"] != sent[0][3]["message_id"]
+
+
+def test_an_edit_during_word_rendering_requires_new_confirmation(delivery, monkeypatch):
+    client, meeting, sent = delivery
+    mid = meeting["id"]
+    mail.complete_protocol(meeting, result={"summary": "До правки"})
+
+    def render_and_edit(current):
+        packet = mail.prepare_protocol_mail(current)
+        store.update_meeting(mid, result={"summary": "После правки"})
+        return packet
+
+    monkeypatch.setattr(main, "prepare_protocol_mail", render_and_edit)
+    assert confirm(client, mid, ["a@example.com"]).status_code == 409
+    assert not mail.deliver_pending() and not sent
+
+
+def test_merge_moves_all_turns_preserving_target_metadata_and_timecodes(delivery):
+    client, meeting, _ = delivery
+    mid = meeting["id"]
+    target = {**meeting["speakers"][1], "email": "b@example.com", "job_title": "Инженер"}
+    speakers = [meeting["speakers"][0], target, meeting["speakers"][2]]
+    segments = [{"speaker": "S3" if i % 10 == 0 else "S1", "start": i, "end": i + .5,
+                 "text": f"Фраза {i}", "original_text": f"Оригинал {i}"} for i in range(1100)]
+    store.update_meeting(mid, transcript_segments={"speakers": speakers, "segments": segments})
+    url = f"/api/meetings/{mid}/speakers/S1/merge"
+    for invalid in ("S1", "unknown", "missing"):
+        assert client.post(url, json={"target_id": invalid}).status_code == 400
+    store.put_session("other", "user", user_id="other", email="other@example.com", expires=time.time() + 3600)
+    client.cookies.set(auth.USER_COOKIE, "other")
+    assert client.post(url, json={"target_id": "S2"}).status_code == 404
+    client.cookies.set(auth.USER_COOKIE, "owner")
+    merged = client.post(url, json={"target_id": "S2"})
+    assert merged.is_success, merged.text
+    result = merged.json()
+    assert result["status"] == "review" and result["speakers"] == [target, speakers[2]]
+    assert result["segments"] == [{**s, "speaker": "S2"} if s["speaker"] == "S1" else s for s in segments]
+    assert client.post(url, json={"target_id": "S2"}).status_code == 400
+
+
+def test_merge_after_manual_edit_preserves_the_authored_protocol(delivery):
+    client, meeting, _ = delivery
+    result = {"title": "Мои правки", "summary": "Согласованный текст", "edited_manually": True}
+    mail.complete_protocol(meeting, result=result)
+    merged = client.post(f"/api/meetings/{meeting['id']}/speakers/S1/merge", json={"target_id": "S2"})
+    assert merged.is_success
+    assert merged.json()["result"] == result and merged.json()["status"] == "done"
+
+
+@pytest.mark.parametrize("copies", [1, 8], ids=["regional-pilot", "long-document"])
+def test_formatted_summary_roundtrip_with_nested_lists_and_group_delivery(delivery, copies):
+    from pathlib import Path
+    from docx.oxml.ns import qn
+
+    client, meeting, sent = delivery
+    mid = meeting["id"]
+    sample = (Path(__file__).parent / "fixtures/summary-pilot.md").read_text().strip()
+    source = "\n\n".join([sample] * copies) + "\n\nПоследняя строка документа."
+    original = main.ProtocolResult(title="Региональный пилот", summary="Исходный текст").model_dump()
+    mail.complete_protocol(meeting, result=original)
+    url = f"/api/meetings/{mid}"
+    revision = client.get(url).json()["result_revision"]
+    response = client.patch(url + "/protocol", json={"revision": revision, "summary": source, "summary_format": "markdown"})
+    assert response.is_success
+    saved = client.get(url).json()
+    assert saved["result"]["summary"] == source
+    assert saved["result"]["summary_format"] == "markdown"
+    assert source in client.get(url + "/export.md").text
+    assert not mail.deliver_pending() and not sent
+    addresses = ["north@example.test", "east@example.test"]
+    assert confirm(client, mid, addresses, saved["result_revision"]).is_success
+    assert mail.deliver_pending() and len(sent) == 1
+    recipients, _, body, packet = sent[0]
+    assert recipients == addresses
+    assert "  2. Сверяет даты" in body and "**" not in body and "###" not in body
+    assert "<strong>Главный вывод.</strong>" in packet["html"] and "<em>Открытый вопрос.</em>" in packet["html"]
+    assert packet["html"].count("<ol>") == 3 * copies and packet["html"].count("<ul>") == 2 * copies
+    assert "8 встреч, 2 показателя" in body and "8 встреч, 2 показателя" in packet["html"]
+    for data in [packet["attachment"][1], client.get(url + "/export.docx").content]:
+        doc = Document(BytesIO(data))
+        paragraphs = doc.paragraphs
+        assert any(p.text == "Итоги пилота в регионах" and p.style.name == "Heading 2" for p in paragraphs)
+        assert any(run.bold and run.text == "Главный вывод." for p in paragraphs for run in p.runs)
+        assert any(run.italic and run.text == "Открытый вопрос." for p in paragraphs for run in p.runs)
+        listed = [p for p in paragraphs if p._p.xpath("w:pPr/w:numPr/w:numId")]
+        assert len(listed) == 12 * copies
+        assert [p._p.pPr.numPr.ilvl.val for p in listed[:5]] == [0, 1, 1, 0, 0]
+        assert listed[1].paragraph_format.left_indent > listed[0].paragraph_format.left_indent
+        num_ids = [p._p.xpath("w:pPr/w:numPr/w:numId")[0].get(qn("w:val")) for p in listed]
+        assert num_ids[-1] == num_ids[-2] and num_ids[-1] != num_ids[5]
+        assert any(p.text == "Последняя строка документа." for p in paragraphs)
