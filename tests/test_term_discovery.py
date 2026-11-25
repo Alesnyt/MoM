@@ -532,3 +532,25 @@ def test_naming_cue_at_part_boundary_preserves_old_fingerprint_and_protects_name
     assert digest == hashlib.sha256(json.dumps(old_parts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     [item] = td.validate_candidates({'candidates': [{'turn': 1, 'term': 'контур'}]}, [parts[1]])
     assert item['name_context'] and 'в системе контур' in item['excerpt']
+
+
+def test_background_discovery_never_opens_sqlite_on_api_loop(db, monkeypatch):
+    import threading
+    on_loop = threading.get_ident()
+    connection = store.connect
+    meeting()
+    td.queue("admin")
+
+    def checked_connection(*args, **kwargs):
+        assert threading.get_ident() != on_loop
+        return connection(*args, **kwargs)
+
+    async def extract(_parts):
+        return []
+
+    monkeypatch.setattr(td, "extract", extract)
+    with monkeypatch.context() as checks:
+        checks.setattr(store, "connect", checked_connection)
+        assert asyncio.run(td.step())
+    assert td.snapshot()["job"]["attempts"] == 1
+    assert td.snapshot()["job"]["status"] != "error"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -64,6 +65,14 @@ def _backup_db(dest: Path) -> None:
     config.restrict_path(dest, 0o600)
 
 
+def _originals(conn: sqlite3.Connection) -> dict[str, str]:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)")}
+    source = "json_extract(segments_json, '$.source_type')" if "segments_json" in columns else "NULL"
+    rows = conn.execute(f"SELECT id, filename, {source} FROM meetings")
+    return {mid: mid + (Path(name).suffix.lower() or ".webm") for mid, name, kind in rows
+            if kind != "text" and Path(name).suffix.lower() not in {".txt", ".md", ".srt", ".vtt"}}
+
+
 def create_snapshot(dest: Path | None = None) -> Path:
     if dest is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -75,13 +84,32 @@ def create_snapshot(dest: Path | None = None) -> Path:
     with tempfile.TemporaryDirectory(prefix=".snapshot-", dir=target.parent) as temporary:
         stage = Path(temporary) / "snapshot"
         _backup_db(stage / "mom.db")
+        with closing(sqlite3.connect(f"{(stage / 'mom.db').as_uri()}?mode=ro&immutable=1", uri=True)) as conn:
+            originals = _originals(conn)
         copied = []
         for name in SNAPSHOT_DIRS:
             source = config.DATA_DIR / name
             if source.exists():
-                shutil.copytree(source, stage / name, symlinks=True)
+                if source.is_symlink():
+                    raise BackupError(f"Символьная ссылка в каталоге данных: {name}")
+                if name == "uploads":
+                    allowed = set(originals.values())
+                    # A database snapshot fixes membership even while uploads continue.
+                    shutil.copytree(source, stage / name, symlinks=True,
+                                    ignore=lambda folder, entries: set(entries) - allowed)
+                elif name == "audio":
+                    (stage / name).mkdir()
+                    for file in source.iterdir():
+                        if file.stem in originals and file.suffix in {".wav", ".mp3"}:
+                            try:
+                                shutil.copy2(file, stage / name / file.name, follow_symlinks=False)
+                            except FileNotFoundError:
+                                pass  # Derived audio may finish processing during a snapshot.
+                else:
+                    shutil.copytree(source, stage / name, symlinks=True)
                 copied.append(name)
         manifest = {
+            "version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "includes": ["mom.db", *copied],
             "omits": ["whisper", "hf"],
@@ -136,14 +164,10 @@ def _verify_snapshot(path: Path, calculated: dict[str, str] | None = None) -> di
         result["integrity"] = conn.execute("PRAGMA integrity_check").fetchone()[0]
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         result["missing_tables"] = [name for name in REQUIRED_TABLES if name not in tables]
-        originals = []
+        originals = {}
         if "meetings" in tables:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)")}
-            source = "json_extract(segments_json, '$.source_type')" if "segments_json" in columns else "NULL"
-            meetings = conn.execute(f"SELECT id, filename, {source} FROM meetings").fetchall()
-            result["meetings"] = len(meetings)
-            originals = [meeting_id for meeting_id, filename, kind in meetings
-                         if kind != "text" and Path(filename).suffix.lower() not in {".txt", ".md", ".srt", ".vtt"}]
+            result["meetings"] = conn.execute("SELECT count(*) FROM meetings").fetchone()[0]
+            originals = _originals(conn)
     except sqlite3.DatabaseError as exc:
         return {**result, "integrity": str(exc)}
     finally:
@@ -151,9 +175,14 @@ def _verify_snapshot(path: Path, calculated: dict[str, str] | None = None) -> di
     errors = result["file_errors"]
     try:
         files = calculated if calculated is not None else _checksums(folder)
-        uploads = {Path(name).stem for name in files if Path(name).parent == Path("uploads")}
-        errors.extend(f"Нет оригинала встречи {meeting_id}" for meeting_id in originals if meeting_id not in uploads)
+        uploads = {Path(name).name for name in files if Path(name).parent == Path("uploads")}
         manifest = json.loads((folder / "manifest.json").read_text())
+        if manifest.get("version") == 2:
+            errors.extend(f"Нет оригинала встречи {mid}" for mid, filename in originals.items() if filename not in uploads)
+            errors.extend(f"Файл без встречи {name}" for name in sorted(uploads - set(originals.values())))
+        else:
+            stems = {Path(name).stem for name in uploads}
+            errors.extend(f"Нет оригинала встречи {mid}" for mid in originals if mid not in stems)
         expected = manifest.get("sha256")
         if expected is not None:
             result["checksums"] = True
@@ -164,6 +193,30 @@ def _verify_snapshot(path: Path, calculated: dict[str, str] | None = None) -> di
         errors.append(f"Не удалось проверить файлы снимка: {exc}")
     result["ok"] = result["integrity"] == "ok" and not result["missing_tables"] and not errors
     return result
+
+
+def _hold_restored_mail(stage: Path) -> bool:
+    """SMTP cannot tell whether a pending-at-snapshot message was delivered later."""
+    with closing(sqlite3.connect(stage / "mom.db")) as conn, conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "protocol_mail" not in tables:
+            return False
+        meetings = conn.execute("SELECT DISTINCT meeting_id FROM protocol_mail WHERE state IN ('pending','sending')").fetchall()
+        if not meetings:
+            return False
+        conn.execute("UPDATE protocol_mail SET state='unknown', body='', subject='' WHERE state IN ('pending','sending')")
+        conn.executemany("UPDATE meetings SET status_message=? WHERE id=? AND status='done'",
+                         [("После восстановления проверьте доставку перед повторной отправкой.", mid) for mid, in meetings])
+        if "protocol_mail_format" in tables:
+            conn.executemany("DELETE FROM protocol_mail_format WHERE meeting_id=?", meetings)
+    manifest_file = stage / "manifest.json"
+    manifest = json.loads(manifest_file.read_text())
+    manifest["mail_held_on_restore"] = len(meetings)
+    if "sha256" in manifest:
+        with (stage / "mom.db").open("rb") as db:
+            manifest["sha256"]["mom.db"] = hashlib.file_digest(db, "sha256").hexdigest()
+    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    return True
 
 
 def restore_snapshot(source: Path, dest: Path) -> Path:
@@ -185,6 +238,8 @@ def restore_snapshot(source: Path, dest: Path) -> Path:
                 shutil.copy2(item, stage / name)
         if not verify_snapshot(stage)["ok"]:
             raise BackupError("Восстановленные файлы не прошли проверку")
+        if _hold_restored_mail(stage) and not verify_snapshot(stage)["ok"]:
+            raise BackupError("Восстановленная база не прошла проверку очереди писем")
         _lock_tree(stage)
         os.rename(stage, target)
     return target

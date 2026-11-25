@@ -101,7 +101,8 @@ def _unavailable_reason() -> str | None:
     return None
 
 
-def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dict[str, Any]]:
+def diarize_turns(audio_path: Path, *, prepared: Path | None = None,
+                  recognition_turns: list | None = None) -> list[dict[str, Any]]:
     global _cached_pipeline, _cached_key
     token = config.get_hf_token()
     if not token:
@@ -130,7 +131,11 @@ def diarize_turns(audio_path: Path, *, prepared: Path | None = None) -> list[dic
                     _cached_pipeline, _cached_key = pipeline, key
             source = _audio_input(wav)
             with stage_timer("diarization_inference"):
-                return _read_turns(_run_pipeline(pipeline, source, wav))
+                output = _run_pipeline(pipeline, source, wav)
+                exclusive = getattr(output, "exclusive_speaker_diarization", None)
+                if recognition_turns is not None and exclusive is not None:
+                    recognition_turns.extend(_read_turns(exclusive))
+                return _read_turns(output)
         except Exception:
             # A failed inference may have left state in the pipeline.
             pipeline = None

@@ -6,6 +6,9 @@ import { loadSource } from './load-source.mjs';
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {url:'http://localhost/'});
 Object.assign(globalThis, {window:dom.window, document:dom.window.document,
   navigator:dom.window.navigator, HTMLElement:dom.window.HTMLElement, Node:dom.window.Node});
+Object.assign(globalThis, { MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle });
+dom.window.Range.prototype.getClientRects = () => [];
+dom.window.Range.prototype.getBoundingClientRect = () => new dom.window.DOMRect();
 const React = await import('react');
 const {render, fireEvent, waitFor, cleanup, act} = await import('@testing-library/react');
 const {default: App} = loadSource('App.tsx');
@@ -110,6 +113,69 @@ test('expired upload session asks for login and preserves the same user text dra
   assert.equal(view.getByRole('textbox', {name:'Текст транскрипта'}).value, 'Анна: План на пятницу.');
   assert.equal(view.getByRole('textbox', {name:'Название встречи'}).value, 'Мой черновик');
   assert.equal(view.queryByText(/Сессия истекла/), null);
+});
+
+for (const sameUser of [true, false]) {
+  test('protocol draft survives expiration only for the original account: ' + sameUser, async () => {
+    let nextUser = session;
+    let saved;
+    let expired = false;
+    mockApi((url, options) => {
+      if (url === '/api/meetings') return Response.json(nextUser.id === session.id ? [{...meeting, result_revision:'r1'}] : []);
+      if (url === '/api/session/login') {
+        if (!sameUser) nextUser = {...session, id:'user-B'};
+        return Response.json(nextUser);
+      }
+      if (url === '/api/meetings/A/protocol') {
+        if (!expired) { expired = true; return failure(401, 'Войдите в профиль'); }
+        saved = JSON.parse(options.body);
+        return Response.json({...meeting, result_revision:'r2', result:{...meeting.result, summary:saved.summary}});
+      }
+      throw new Error('Unexpected ' + url);
+    });
+    const view = render(React.createElement(App));
+    fireEvent.click(await view.findByRole('button', {name:/Сохранённая встреча/}));
+    fireEvent.click(view.getByRole('button', {name:'Редактировать саммари'}));
+    const input = await view.findByRole('textbox', {name:'Саммари'});
+    input.focus();
+    fireEvent.keyDown(input, {key:'a', code:'KeyA', keyCode:65, ctrlKey:true});
+    fireEvent.paste(input, {clipboardData:{files:[],getData:type => type === 'text/plain' ? '**Отредактировано**' : ''}});
+    fireEvent.click(view.getByRole('button', {name:'Сохранить саммари'}));
+    await view.findByRole('heading', {name:'Вход'});
+    await signIn(view, session.email);
+    if (sameUser) {
+      const restored = await view.findByRole('textbox', {name:'Саммари'});
+      assert.equal(restored.querySelector('strong').textContent, 'Отредактировано');
+      fireEvent.click(view.getByRole('button', {name:'Сохранить саммари'}));
+      await view.findByText('Саммари сохранено.');
+      assert.equal(saved.revision, 'r1');
+      assert.equal(saved.summary_format, 'markdown');
+    } else {
+      assert.equal(view.queryByRole('form', {name:'Редактор саммари'}), null);
+      assert.equal(view.queryByText('Отредактировано'), null);
+    }
+  });
+}
+
+test('archive focus fetches changed meeting details without downloading unchanged transcripts', async () => {
+  let version = 1, details = 0;
+  mockApi(url => {
+    if (url === '/api/meetings') return Response.json([{ ...meeting, segments:null, transcript:null, result:null, body_version:version }]);
+    if (url === '/api/meetings/A') {
+      details++;
+      return Response.json({ ...meeting, body_version:version, result_revision:'r' + version,
+        result:{ ...meeting.result, summary:'Редакция ' + version } });
+    }
+    throw new Error('Unexpected ' + url);
+  });
+  const view = render(React.createElement(App));
+  fireEvent.click(await view.findByRole('button', {name:/Сохранённая встреча/}));
+  await view.findByText('Редакция 1');
+  version++;
+  fireEvent(window, new window.Event('focus'));
+  await view.findByText('Редакция 2');
+  await act(async () => fireEvent(window, new window.Event('focus')));
+  assert.equal(details, 2);
 });
 
 test('logging in as another user clears the previous user draft and archive', async () => {

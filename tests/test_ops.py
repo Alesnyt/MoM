@@ -216,3 +216,62 @@ def test_public_health_hides_models_and_disk_numbers(db: Path) -> None:
     assert public["openai"]["denied_models"] == []
     full = _health(full=True)
     assert "free_bytes" in full["disk"]
+
+
+def test_snapshot_excludes_unregistered_files_and_quarantines_restored_mail(db):
+    user = store.create_user("owner@example.com", "unused")
+    store.create_meeting("owned", "meeting", "voice.wav", user["id"])
+    (config.UPLOAD_DIR / "owned.wav").write_bytes(b"WAV")
+    for path in ("orphan.wav", "owned.uploading", "owned.ogg"):
+        (config.UPLOAD_DIR / path).write_bytes(b"not committed")
+    with store.connect() as conn:
+        conn.execute("UPDATE meetings SET status='done' WHERE id='owned'")
+        conn.execute("INSERT INTO protocol_mail (meeting_id,recipient,subject,body) VALUES ('owned','r@example.com','s','b')")
+    snap = backup.create_snapshot(config.ROOT / "snapshot")
+    assert [p.name for p in (snap / "uploads").iterdir()] == ["owned.wav"]
+    restored = backup.restore_snapshot(snap, config.ROOT / "restored")
+    assert backup.verify_snapshot(restored)["ok"]
+    with sqlite3.connect(restored / "mom.db") as conn:
+        assert conn.execute("SELECT state,body FROM protocol_mail").fetchone() == ("unknown", "")
+        assert "восстановления" in conn.execute("SELECT status_message FROM meetings").fetchone()[0]
+    with sqlite3.connect(snap / "mom.db") as conn:
+        assert conn.execute("SELECT state FROM protocol_mail").fetchone()[0] == "pending"
+
+
+def test_concurrent_pcm_reservations_share_free_space(db, monkeypatch):
+    monkeypatch.setattr(config, "MIN_FREE_BYTES", 100)
+    monkeypatch.setattr(disk, "free_bytes", lambda: 1000)
+    with disk.reserve_space(600) as reservation:
+        with pytest.raises(disk.DiskError):
+            with disk.reserve_space(301):
+                pass
+        reservation.consumed(200)
+        monkeypatch.setattr(disk, "free_bytes", lambda: 800)
+        with disk.reserve_space(300):
+            with pytest.raises(disk.DiskError):
+                disk.ensure_space(1)
+    with disk.reserve_space(700):
+        pass
+
+
+@pytest.mark.parametrize("unknown_duration", [False, True])
+def test_pcm_reservation_handles_media_with_and_without_duration(db, monkeypatch, tmp_path, unknown_duration):
+    import wave
+    from backend import audio
+    if not audio.ffmpeg_available():
+        pytest.skip("ffmpeg required")
+    src, out = tmp_path / "sample.wav", tmp_path / "prepared.wav"
+    pcm = bytes(range(128)) * 1000
+    with wave.open(str(src), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", ""))
+        wav.writeframes(pcm)
+    if unknown_duration:
+        def no_duration(_):
+            raise audio.AudioError("stream lacks duration")
+        monkeypatch.setattr(audio, "duration_seconds", no_duration)
+    assert audio.extract_wav(src, out) == pytest.approx(len(pcm) / 32000)
+    with wave.open(str(out), "rb") as wav:
+        assert wav.readframes(wav.getnframes()) == pcm
+    monkeypatch.setattr(disk, "free_bytes", lambda: config.MIN_FREE_BYTES + 60)
+    with pytest.raises(disk.DiskError):
+        audio.extract_wav(src, tmp_path / "no-space.wav")

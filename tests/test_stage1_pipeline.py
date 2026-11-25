@@ -106,7 +106,7 @@ def test_stop_during_gigaam_cannot_publish_review(
     monkeypatch.setattr(
         pipeline,
         "diarize_turns",
-        lambda audio_path, prepared=None: [{"start": 0, "end": 10, "speaker": "original"}],
+        lambda audio_path, prepared=None, recognition_turns=None: [{"start": 0, "end": 10, "speaker": "original"}],
     )
     entered = threading.Event()
     complete = threading.Event()
@@ -214,7 +214,7 @@ def test_parallel_gigaam_uses_a_single_model_slot(
     monkeypatch.setattr(pipeline, "extract_wav", fake_wav)
     monkeypatch.setattr(
         pipeline, "diarize_turns",
-        lambda audio_path, prepared=None: [{"start": 0, "end": 10, "speaker": "original"}],
+        lambda audio_path, prepared=None, recognition_turns=None: [{"start": 0, "end": 10, "speaker": "original"}],
     )
     running = 0
     peak = 0
@@ -270,7 +270,7 @@ def test_local_models_share_one_wav(recording_db, monkeypatch, caplog, engine):
         calls.append("prepare")
         return 10.0
 
-    def diarize(path, *, prepared=None):
+    def diarize(path, *, prepared=None, recognition_turns=None):
         assert path == prepared == wav and wav.exists()
         calls.append("diarize")
         return [{"start": 0, "end": 10, "speaker": "A"}]
@@ -325,7 +325,7 @@ def test_gigaam_without_turns_reuses_wav_and_cleans_up_on_asr_error(recording_db
         dst.write_bytes(b"prepared wav")
         return 10.0
 
-    def diarize(path, *, prepared=None):
+    def diarize(path, *, prepared=None, recognition_turns=None):
         if diarization_fails:
             raise RuntimeError("No diarization")
         return []

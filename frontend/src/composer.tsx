@@ -73,7 +73,7 @@ export function Composer({
 
   const queued = (queue?.active || 0) + (queue?.waiting || 0);
   const blocked = uploadBlockedReason(keyStatus);
-  const keyReady = keyStatus?.connected === true;
+  const keyReady = keyStatus?.asr_ready ?? keyStatus?.connected ?? false;
   const limitReady = Number.isFinite(maxUploadBytes) && (maxUploadBytes ?? 0) > 0;
   const sizeError = mode === "audio" && file && limitReady
     ? recordingSizeError(file.size, maxUploadBytes!) : null;

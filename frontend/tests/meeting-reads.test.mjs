@@ -27,6 +27,24 @@ function mockApi(handler, {openai = {configured:true,connected:true,message:'OK'
   };
 }
 
+test('connection hints reflect recognition and protocol readiness independently', () => {
+  const {connectionDetail} = loadSource('format.ts');
+  assert.match(connectionDetail({asr_ready:true, connected:false}), /Доступна расшифровка/);
+  assert.match(connectionDetail({asr_ready:false, connected:true}), /настройте распознавание/);
+});
+
+test('independent ASR accepts audio while the protocol provider is offline', async () => {
+  const openai = {configured:false, connected:false, asr_ready:true, message:'Нет связи с LLM'};
+  mockApi(url => url === '/api/meetings' ? response([]) : response({}), {openai});
+  const view = render(React.createElement(App));
+  const action = await view.findByRole('button', {name:'Обработать'});
+  fireEvent.change(view.container.querySelector('input[type=file]'), {
+    target: {files: [new dom.window.File(['sample'], 'meeting.wav', {type:'audio/wav'})]},
+  });
+  await waitFor(() => assert.equal(action.disabled, false));
+  assert.equal(view.queryByText('Обработка записей сейчас недоступна. Попробуйте позже.'), null);
+});
+
 test('a provider outage gives regular users a plain notice and no admin controls', async () => {
   const openai = {configured:true,connected:false,auth_rejected:true,message:'Ключ не принят'};
   mockApi(url => {

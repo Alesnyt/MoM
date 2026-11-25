@@ -83,7 +83,7 @@ def test_discovery_probe_save_and_pipeline(admin, monkeypatch, tmp_path):
     with wave.open(str(path), "wb") as wav:
         wav.setparams((1, 2, 16000, 0, "NONE", ""))
         wav.writeframes(bytes(32000))
-    payload = asyncio.run(pipeline._transcribe(None, path, "test", 1, SimpleNamespace()))
+    payload = asyncio.run(pipeline._transcribe(None, path, "test", 1, SimpleNamespace(set=lambda *args, **kwargs: None)))
     assert payload["segments"] == [{"start": 0, "end": 1, "text": "Реплика"}]
     assert requests == ["/v1/models", "/v1/audio/transcriptions", "/v1/audio/transcriptions"]
 
@@ -141,19 +141,17 @@ def test_chunked_transcription_offsets_and_text_only(admin, monkeypatch, tmp_pat
             return httpx.Response(200, json={"text": "Первая"})
         return httpx.Response(200, json={"text": "Вторая", "segments": [{"start": 1, "end": 2, "text": "Вторая"}]})
     transport(monkeypatch, handle)
-    monkeypatch.setattr(pipeline, "MAX_WHISPER_BYTES", 1)
+    monkeypatch.setattr(pipeline, "MAX_WHISPER_BYTES", 44 + 18 * 32000)
     monkeypatch.setattr(pipeline, "AUDIO_DIR", tmp_path)
     src = tmp_path / "recording.wav"
-    src.write_bytes(b"wave")
-    async def split(path, dest, seconds):
-        assert seconds == pipeline.CHUNK_SECONDS
-        return [(0, path), (18.5, path)]
-    monkeypatch.setattr(pipeline, "split_audio_async", split)
+    with wave.open(str(src), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", ""))
+        wav.writeframes(bytes(30 * 32000))
     config.save_asr(config.REMOTE_ASR, DRAFT["base_url"], DRAFT["api_key"], DRAFT["model"])
     out = asyncio.run(pipeline._transcribe(None, src, "chunks", 30, SimpleNamespace(set=lambda *args, **kwargs: None)))
     assert requests == [b"verbose_json", b"json", b"json"]
     assert out["text"] == "Первая\nВторая"
-    assert [(s["start"], s["end"]) for s in out["segments"]] == [(None, None), (19.5, 20.5)]
+    assert [(s["start"], s["end"]) for s in out["segments"]] == [(None, None), (19, 20)]
 
 
 def test_asr_admin_only():
@@ -193,3 +191,80 @@ def test_upload_failures_keep_audio_and_key_on_selected_service(admin, monkeypat
     assert calls == [("gpu.test", "/v1/audio/transcriptions")]
     assert response.status_code == 502
     assert "upstream-private-message" not in response.text and DRAFT["api_key"] not in response.text
+
+
+def test_remote_recognition_recovers_checkpoint_and_model_change_restarts(admin, monkeypatch, tmp_path):
+    from backend import keys
+    user = store.create_user("asr@example.test", "unused")
+    store.create_meeting("resume-asr", "Resume", "test.wav", user["id"])
+    config.save_asr(config.REMOTE_ASR, DRAFT["base_url"], DRAFT["api_key"], DRAFT["model"])
+    assert keys.snapshot()["connected"] is False and keys.public_snapshot()["asr_ready"] is True
+    main._require_model_ready(protocol=False)
+    with pytest.raises(main.HTTPException):
+        main._require_model_ready(protocol=True)
+
+    monkeypatch.setattr(pipeline, "CHUNK_SECONDS", 1)
+    monkeypatch.setattr(pipeline, "AUDIO_DIR", tmp_path)
+    path = tmp_path / "input.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", ""))
+        for value in range(10):
+            wav.writeframes(bytes([value]) * 32000)
+    calls = []
+    fail = True
+
+    async def transcribe(path):
+        nonlocal fail
+        with wave.open(str(path), "rb") as wav:
+            part = wav.readframes(1)[0]
+        assert list(path.parent.glob("*.wav")) == [path]
+        calls.append(part)
+        if fail and part == 8:
+            fail = False
+            raise RuntimeError("temporary")
+        return {"text": str(part), "segments": [{"start": 0, "end": 1, "text": str(part)}]}
+
+    async def run():
+        speech = SimpleNamespace(transcribe=transcribe)
+        return await pipeline._transcribe_remote(speech, config.get_asr_connection(), path, "resume-asr",
+                                                 SimpleNamespace(set=lambda *a, **kw: None), True)
+    with pytest.raises(RuntimeError, match="temporary"):
+        asyncio.run(run())
+    assert calls == list(range(9))
+    calls.clear()
+    result = asyncio.run(run())
+    assert calls == [8, 9]
+    assert [s["start"] for s in result["segments"]] == list(range(10))
+    assert not (tmp_path / "resume-asr_chunks").exists()
+
+    config.save_asr(config.REMOTE_ASR, DRAFT["base_url"], "", "another-model")
+    calls.clear()
+    asyncio.run(run())
+    assert calls == list(range(10))
+    pipeline._publish_transcript("resume-asr", transcript="complete", status="review")
+    with store.connect() as conn:
+        assert not conn.execute("SELECT 1 FROM asr_checkpoints").fetchone()
+
+
+def test_gpu_meeting_reaches_review_without_llm_key(admin, monkeypatch, tmp_path):
+    user = store.create_user("pipeline@example.test", "unused")
+    store.create_meeting("independent", "Только речь", "sample.wav", user["id"])
+    config.save_asr(config.REMOTE_ASR, DRAFT["base_url"], DRAFT["api_key"], DRAFT["model"])
+    monkeypatch.setattr(pipeline, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "AUDIO_DIR", tmp_path / "prepared")
+    monkeypatch.setattr(pipeline, "make_client", lambda *a: pytest.fail("unexpected LLM client"))
+    def copy_prepared(src, dst):
+        dst.parent.mkdir()
+        dst.write_bytes(src.read_bytes())
+        return 1
+
+    monkeypatch.setattr(pipeline, "extract_wav", copy_prepared)
+    assert not config.get_api_key()
+    src = tmp_path / "independent.wav"
+    with wave.open(str(src), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", ""))
+        wav.writeframes(bytes(32000))
+    transport(monkeypatch, lambda req: httpx.Response(200, json={"text": "Добрый день"}))
+    asyncio.run(pipeline.process_meeting("independent"))
+    item = store.get_meeting("independent")
+    assert item["status"] == "review" and "Добрый день" in item["transcript"]

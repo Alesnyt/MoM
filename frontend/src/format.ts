@@ -88,7 +88,8 @@ export function connectionLabel(status: OpenAIStatus | undefined): string {
 }
 
 export function uploadBlockedReason(status: OpenAIStatus | null): string | null {
-  if (status === null || status.connected) return null;
+  if (status === null || (status.asr_ready ?? status.connected)) return null;
+  if (status.connected) return "Настройте сервис распознавания в администрировании.";
   if (!status.configured) return "Ключ ещё не подключён. Без рабочего ключа запись обработать нельзя.";
   if (status.rate_limited) return "Провайдер ограничил запросы. Повторите проверку в админке позже.";
   if (status.model_unavailable || status.denied_models?.length) {
@@ -100,6 +101,8 @@ export function uploadBlockedReason(status: OpenAIStatus | null): string | null 
 }
 
 export function connectionDetail(status: OpenAIStatus | undefined): string {
+  if (status?.asr_ready && !status.connected) return "Доступна расшифровка. Для протокола проверьте подключение LLM.";
+  if (status?.asr_ready === false && status.connected) return "Для загрузки аудио настройте распознавание.";
   if (!status?.configured) return "Сохраните ключ в админке";
   if (status.connected) return "Можно загружать записи";
   const message = (status.message || "").trim();

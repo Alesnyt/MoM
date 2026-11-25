@@ -97,6 +97,7 @@ export type Meeting = {
   name_review?: NameReview | null;
   result: MeetingResult | null;
   result_revision?: string | null;
+  body_version?: number;
   error: string | null;
   progress?: number;
   queue_ahead?: number;
@@ -104,6 +105,7 @@ export type Meeting = {
 };
 
 export type OpenAIStatus = {
+  asr_ready?: boolean;
   configured: boolean;
   connected: boolean;
   hint: string | null;

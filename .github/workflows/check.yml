@@ -231,3 +231,5 @@ jobs:
         run: docker build --build-arg MOM_REVISION="$GITHUB_SHA" -f deploy/corporate/Dockerfile -t mom:corporate-ci .
       - name: Verify corporate image version
         run: docker run --rm --entrypoint grep mom:corporate-ci -F "· ${GITHUB_SHA:0:7}</footer>" /app/backend/static/index.html
+      - name: Test corporate ASR over TLS and recover the saved settings
+        run: python3 tests/smoke_corporate_image.py mom:corporate-ci

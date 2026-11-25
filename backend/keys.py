@@ -63,7 +63,14 @@ def snapshot() -> dict[str, Any]:
     base = config.get_base_url()
     model = config.get_chat_model()
     checked = _status if _status.get("connection") == _connection_id(key, base, model) else {}
+    asr_model = config.get_asr_model()
+    if asr_model == config.REMOTE_ASR:
+        speech = config.get_asr_connection()
+        asr_ready = bool(speech.base_url and speech.key and speech.model)
+    else:
+        asr_ready = config.is_local_asr(asr_model) or bool(checked.get("connected"))
     return {
+        "asr_ready": asr_ready,
         "configured": bool(key),
         "connected": bool(checked.get("connected")),
         "auth_rejected": bool(checked.get("auth_rejected")),

@@ -366,3 +366,15 @@ def test_cgroup_v1_and_absent_metrics(tmp_path, monkeypatch):
     assert values["cgroup_memory_current_bytes"] == 524288
     monkeypatch.setattr(diag, "CGROUP_ROOT", tmp_path / "absent")
     assert diag._cgroup() == {"cgroup_version": 0}
+
+
+def test_remote_recognition_reports_pcm_work_and_resumed_parts():
+    run = diag.begin_run("gpu-test", "audio", audio_seconds=100)
+    with diag.run_scope(run):
+        diag.record_remote_part(reused=False, pcm_bytes=2000)
+        diag.record_remote_part(reused=True, pcm_bytes=1500)
+        diag.record_stage("asr_cloud", 5)
+    diag.finish_run(run, status="review")
+    record = diag.export_report()["runs"][0]
+    assert record["peak_asr_pcm_bytes"] == 2000
+    assert (record["asr_parts_reused"], record["asr_parts_submitted"], record["asr_rtf"]) == (1, 1, .05)

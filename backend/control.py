@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import threading
+
 from . import store
 
+# Writers acquire this before opening a meeting transaction. Publishers already
+# holding SQLite's write lock read pending() without acquiring this lock.
+command_lock = threading.RLock()
 _stop: set[str] = set()
 _restart: set[str] = set()
 _sealed: set[str] = set()
@@ -26,6 +31,12 @@ def is_stopped(meeting_id: str) -> bool:
     return meeting_id in _stop or meeting_id in _sealed
 
 
+def pending(connection, meeting_id: str) -> bool:
+    return is_stopped(meeting_id) or connection.execute(
+        "SELECT 1 FROM processing_requests WHERE meeting_id=?", (meeting_id,)
+    ).fetchone() is not None
+
+
 def bind_job(meeting_id: str, task: object) -> None:
     _jobs[meeting_id] = task
 
@@ -46,45 +57,40 @@ def cancel_job(meeting_id: str) -> bool:
 
 
 def release(meeting_id: str) -> None:
-    _jobs.pop(meeting_id, None)
-    _sealed.discard(meeting_id)
-    _stop.discard(meeting_id)
-    _restart.discard(meeting_id)
-    _applied.discard(meeting_id)
+    with command_lock:
+        _jobs.pop(meeting_id, None)
+        _sealed.discard(meeting_id)
+        _stop.discard(meeting_id)
+        _restart.discard(meeting_id)
+        _applied.discard(meeting_id)
 
 
 def finish(meeting_id: str) -> str:
     """Apply a requested stop once. Returns 'stop', 'restart', or ''."""
+    with command_lock:
+        return _finish_locked(meeting_id)
+
+
+def _finish_locked(meeting_id: str) -> str:
     if meeting_id in _applied:
         return ""
     restart = meeting_id in _restart
     stopped = meeting_id in _stop or meeting_id in _sealed
     if not stopped and not restart:
         return ""
-    if restart:
-        meeting = store.get_meeting(meeting_id)
+    action = "restart" if restart else "stop"
+    with store.edit_meeting(meeting_id) as (conn, meeting):
         if meeting:
-            store.queue_reprocessing(meeting)
-        _applied.add(meeting_id)
-        _stop.discard(meeting_id)
-        _restart.discard(meeting_id)
-        # Queued jobs have no running task to release their cancellation flags.
-        # Active jobs are cleaned up in worker._run_job.finally.
-        if meeting_id not in _jobs:
-            release(meeting_id)
-        store.refresh_queue_messages()
-        return "restart"
-    meeting = store.get_meeting(meeting_id)
-    if meeting and meeting.get("status") != "done":
-        store.finish_processing_error(
-            meeting_id,
-            status_message="Остановлено",
-            error="Обработка остановлена",
-            progress=0,
-        )
+            saved = conn.execute("SELECT action FROM processing_requests WHERE meeting_id=?", (meeting_id,)).fetchone()
+            if saved:
+                action = saved[0]
+            if saved or action == "restart" or meeting["status"] != "done":
+                store.apply_processing_request(conn, meeting, action)
     _applied.add(meeting_id)
     _stop.discard(meeting_id)
     _restart.discard(meeting_id)
     if meeting_id not in _jobs:
         release(meeting_id)
-    return "stop"
+    if action == "restart":
+        store.refresh_queue_messages()
+    return action

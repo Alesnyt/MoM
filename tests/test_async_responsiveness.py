@@ -72,7 +72,7 @@ def test_slow_upload_and_setting_work_does_not_block_http(app_db,monkeypatch,sta
     elif stage == 'audio-copy':
         original=Path.open
         def slow(path,*args,**kw):
-            if path.parent == config.UPLOAD_DIR and args and args[0] == 'wb': wait()
+            if path.parent == config.UPLOAD_DIR and args and args[0] in ('wb', 'xb'): wait()
             return original(path,*args,**kw)
         monkeypatch.setattr(Path,'open',slow)
         call=lambda client: client.post('/api/meetings',files={'file':('record.wav',b'RIFF'+b'x'*100)})

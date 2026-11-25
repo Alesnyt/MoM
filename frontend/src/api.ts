@@ -296,7 +296,7 @@ export async function saveSmtp(payload: {
   return response.json();
 }
 
-export async function saveLdap(payload: {
+export type LdapSettings = {
   enabled: boolean;
   url: string;
   bind_dn: string;
@@ -306,7 +306,9 @@ export async function saveLdap(payload: {
   starttls: boolean;
   tls_verify: boolean;
   email_attr: string;
-}): Promise<Health> {
+};
+
+export async function saveLdap(payload: LdapSettings): Promise<Health> {
   const response = await apiRequest("/api/settings/ldap", {
     method: "POST",
     credentials: "include",
@@ -316,12 +318,12 @@ export async function saveLdap(payload: {
   return response.json();
 }
 
-export async function testLdap(username: string): Promise<{ ok: boolean; entries?: number | null; mail?: string | null }> {
+export async function testLdap(username: string, settings: LdapSettings): Promise<{ ok: boolean; entries?: number | null; mail?: string | null }> {
   const response = await apiRequest("/api/settings/ldap/test", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ username, settings }),
   });
   return response.json();
 }

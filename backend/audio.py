@@ -15,7 +15,7 @@ from typing import Iterator
 
 from .background import run_sync
 
-from . import config
+from . import config, disk
 
 log = logging.getLogger("mom.audio")
 
@@ -168,25 +168,45 @@ def extract_audio(src: Path, dst: Path) -> float:
 
 def extract_wav(src: Path, dst: Path) -> float:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    _run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(src),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            str(dst),
-        ]
-    )
-    if not dst.exists() or dst.stat().st_size == 0:
-        raise AudioError("Не удалось подготовить WAV для распознавания")
-    return duration_seconds(dst)
+    # Some streaming containers (notably browser WebM) lack a duration header.
+    # Reserve their PCM incrementally, and also handle underestimated durations.
+    try:
+        estimate = math.ceil(duration_seconds(src) * 32000) + 44
+    except AudioError:
+        estimate = 44
+    command = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(src), "-vn", "-ac", "1",
+               "-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1"]
+    with disk.reserve_space(estimate) as reservation, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
+        expired = threading.Event()
+
+        def timeout():
+            expired.set()
+            process.kill()
+
+        timer = threading.Timer(config.FFMPEG_TIMEOUT_SECONDS, timeout)
+        timer.start()
+        try:
+            size = 0
+            with wave.open(str(dst), "wb") as wav:
+                wav.setparams((1, 2, 16000, 0, "NONE", ""))
+                while block := process.stdout.read(1024 * 1024):
+                    reservation.ensure(len(block) + 44)
+                    wav.writeframesraw(block)
+                    reservation.consumed(len(block))
+                    size += len(block)
+            if process.wait() or not size:
+                if expired.is_set():
+                    raise AudioError(f"ffmpeg не уложился в {config.FFMPEG_TIMEOUT_SECONDS} с")
+                errors.seek(0)
+                log.warning("ffmpeg: %s", errors.read(4000).decode(errors="replace"))
+                raise AudioError("Не удалось подготовить WAV для распознавания")
+            return size / 32000
+        finally:
+            timer.cancel()
+            process.kill()
+            process.wait()
+            process.stdout.close()
 
 
 @contextmanager
@@ -226,6 +246,28 @@ def read_pcm_span(reader: wave.Wave_read, start: float, end: float) -> bytes:
     if len(frames) != (last - first) * 2:
         raise AudioError("WAV обрезан: не удалось прочитать реплику целиком")
     return frames
+
+
+def pcm_frame_count(path: Path) -> int:
+    with wave.open(str(path), "rb") as reader:
+        if (reader.getnchannels(), reader.getsampwidth(), reader.getframerate()) != (1, 2, 16000):
+            raise AudioError("Ожидается подготовленная дорожка PCM 16 кГц")
+        return reader.getnframes()
+
+
+def write_pcm_part(src: Path, dst: Path, first: int, count: int) -> None:
+    with disk.reserve_space(44 + count * 2) as reservation, wave.open(str(src), "rb") as source:
+        source.setpos(first)
+        with wave.open(str(dst), "wb") as target:
+            target.setparams((1, 2, 16000, 0, "NONE", ""))
+            remaining = count
+            while remaining:
+                frames = source.readframes(min(remaining, 512 * 1024))
+                if not frames:
+                    raise AudioError("Подготовленная дорожка обрезана")
+                target.writeframesraw(frames)
+                remaining -= len(frames) // 2
+                reservation.consumed(len(frames))
 
 
 def cut_pcm(src: Path, dst: Path, start: float, end: float) -> None:

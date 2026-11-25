@@ -65,6 +65,24 @@ def test_edits_reach_exports_and_preserve_evidence_only_for_unchanged_facts(api)
     assert client.get(PATH + "/email.eml").status_code == 200
 
 
+def test_archive_body_version_tracks_detail_edits_without_returning_the_transcript(api):
+    client, payload = api
+    def archive_version():
+        row, = client.get("/api/meetings").json()
+        assert row["result"] is None and row["transcript"] is None
+        assert row["body_version"] == client.get(PATH).json()["body_version"]
+        return row["body_version"]
+
+    old = archive_version()
+    store.update_meeting("ready", progress=99)
+    assert archive_version() == old
+    payload["result"]["summary"] = "Новый текст"
+    assert client.patch(PATH + "/protocol", json=payload).status_code == 200
+    assert archive_version() == old + 1
+    store.update_meeting("ready", transcript_segments={"segments": [], "speakers": []})
+    assert archive_version() == old + 2
+
+
 @pytest.mark.parametrize("length", [255, 256, 600])
 def test_long_edited_title_in_word_and_email_attachment(api, length):
     client, payload = api

@@ -88,6 +88,7 @@ def people_filter(query: str, *, ldap_filter: str = "") -> str:
     return f"(&{person}(|{''.join(clauses)}))"
 
 
+@config.ldap_settings_scope()
 def authenticate(username: str, password: str) -> bool:
     if not password:
         return False
@@ -112,6 +113,7 @@ def authenticate(username: str, password: str) -> bool:
     return _bind_as(server, user_dn, password)
 
 
+@config.ldap_settings_scope()
 def calendar_identity(email: str) -> dict[str, str]:
     """Resolve the signed-in profile in login scopes, never in the speaker cache."""
     from ldap3 import BASE, DEREF_NEVER
@@ -154,13 +156,21 @@ def calendar_identity(email: str) -> dict[str, str]:
         _close_connection(connection)
 
 
-def test_connection(username: str = "") -> dict:
+@config.ldap_settings_scope()
+def test_connection(username: str = "", *, check_base: bool = False) -> dict:
     if not config.get_ldap_url() or not config.get_ldap_base_dn():
         raise LdapError("Укажите адрес каталога и базу поиска")
     connection = None
     try:
         connection, _server = _service_connection()
         if not username.strip():
+            if check_base:
+                from ldap3 import BASE, DEREF_NEVER
+                for base in authentication_bases():
+                    connection.search(base, "(objectClass=*)", search_scope=BASE, dereference_aliases=DEREF_NEVER,
+                                      attributes=["1.1"], size_limit=1, time_limit=5)
+                    if (connection.result or {}).get("result") != 0 or not connection.entries:
+                        raise LdapError("База поиска недоступна. Проверьте DN и права чтения.")
             return {"ok": True, "entries": None}
         found = _search(connection, username.strip())
     except LdapError:
@@ -300,6 +310,7 @@ def _with_email_domains(search_filter: str, mail_attr: str, domains: list[str]) 
     return f"(&{search_filter}{allowed})"
 
 
+@config.ldap_settings_scope()
 def search_people(query: str, limit: int = 20, *, for_speakers: bool = False) -> list[dict[str, str]]:
     text = query.strip()
     if len(text) < 2 or not config.ldap_configured():
@@ -360,6 +371,7 @@ def search_people(query: str, limit: int = 20, *, for_speakers: bool = False) ->
             connection.unbind()
 
 
+@config.ldap_settings_scope()
 def sync_people(*, progress: Callable[[dict], None] | None = None, policy: dict | None = None) -> list[dict[str, str]]:
     """Enumerate the configured people scopes, committing only a complete result."""
     from ldap3 import SUBTREE, DEREF_NEVER
@@ -444,6 +456,7 @@ def sync_people(*, progress: Callable[[dict], None] | None = None, policy: dict 
         _close_connection(connection)
 
 
+@config.ldap_settings_scope()
 def browse_scopes(base_dn: str = "", cursor: str = "") -> dict:
     """Read directory structure, never enumerate people or follow referrals."""
     from ldap3 import BASE, LEVEL, DEREF_NEVER

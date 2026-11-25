@@ -338,24 +338,38 @@ def _finish(owner: str, error: str | None = None):
                      ('error' if error else 'succeeded',error,store.utc_now(),owner))
 
 
+def _update_job(owner: str, assignments: str) -> bool:
+    with store.connect() as conn:
+        return bool(conn.execute(f"UPDATE term_discovery SET {assignments} WHERE owner=?", (owner,)).rowcount)
+
+
+def _still_idle(owner: str) -> bool:
+    with store.connect() as conn:
+        active = conn.execute("SELECT 1 FROM meetings WHERE status IN ('queued','extracting','transcribing','analyzing') LIMIT 1").fetchone()
+        valid = conn.execute("SELECT 1 FROM term_discovery WHERE owner=?", (owner,)).fetchone()
+        if active or not valid:
+            conn.execute("UPDATE term_discovery SET status='paused',owner=NULL,lease=0 WHERE owner=?", (owner,))
+            return False
+        return True
+
+
 async def step() -> bool:
     owner = await asyncio.to_thread(_claim)
     if not owner: return False
     try:
         batch = await asyncio.to_thread(_batch,owner)
         if batch is False:
-            with store.connect() as conn: conn.execute('UPDATE term_discovery SET owner=NULL,lease=0 WHERE owner=?',(owner,))
+            await asyncio.to_thread(_update_job, owner, "owner=NULL,lease=0")
         elif batch is None:
             await asyncio.to_thread(_finish,owner)
         else:
-            with store.connect() as conn:
-                if not conn.execute('UPDATE term_discovery SET attempts=attempts+1 WHERE owner=?',(owner,)).rowcount:
-                    return False
+            if not await asyncio.to_thread(_update_job, owner, "attempts=attempts+1"):
+                return False
             candidates = await _extract_while_idle(owner,batch['parts'])
             if candidates is None: return False
             await asyncio.to_thread(_save,owner,batch,candidates)
     except asyncio.CancelledError:
-        with store.connect() as conn: conn.execute("UPDATE term_discovery SET status='queued',owner=NULL,lease=0 WHERE owner=?",(owner,))
+        await asyncio.to_thread(_update_job, owner, "status='queued',owner=NULL,lease=0")
         raise
     except Exception as exc:
         log.warning('Ошибка поиска терминов: %s',type(exc).__name__)
@@ -370,12 +384,8 @@ async def _extract_while_idle(owner: str, parts: list[dict]):
     try:
         while not task.done():
             await asyncio.wait({task},timeout=1)
-            with store.connect() as conn:
-                active = conn.execute("SELECT 1 FROM meetings WHERE status IN ('queued','extracting','transcribing','analyzing') LIMIT 1").fetchone()
-                valid = conn.execute('SELECT 1 FROM term_discovery WHERE owner=?',(owner,)).fetchone()
-                if active or not valid:
-                    conn.execute("UPDATE term_discovery SET status='paused',owner=NULL,lease=0 WHERE owner=?",(owner,))
-                    return None
+            if not await asyncio.to_thread(_still_idle, owner):
+                return None
         return await task
     finally:
         if not task.done(): task.cancel()

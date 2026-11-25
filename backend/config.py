@@ -475,7 +475,7 @@ def is_qwen() -> bool:
 
 
 _env_lock = threading.Lock()
-_ldap_settings_lock = threading.Lock()
+_ldap_options: ContextVar[dict | None] = ContextVar("ldap_options", default=None)
 
 
 def _replace_env(original: str, values: dict[str, str]) -> None:
@@ -744,6 +744,13 @@ def smtp_configured() -> bool:
     return bool(SMTP_HOST and get_smtp_from())
 
 
+@_serialized
+def smtp_delivery_settings() -> tuple[str, int, str, str, str, bool]:
+    return (get_smtp_host(), get_smtp_port(), get_smtp_user(), get_smtp_password(),
+            get_smtp_from(), get_smtp_starttls())
+
+
+@_serialized
 def set_smtp(
     *,
     host: str,
@@ -758,47 +765,75 @@ def set_smtp(
         "SMTP_HOST": host.strip(), "SMTP_PORT": max(1, min(65535, int(port))),
         "SMTP_USER": user.strip(), "SMTP_FROM": from_addr.strip(), "SMTP_STARTTLS": bool(starttls),
     }
-    if password:
+    old_target = (SMTP_HOST.casefold(), SMTP_PORT, SMTP_USER, SMTP_STARTTLS and SMTP_PORT != 465)
+    new_target = (payload["SMTP_HOST"].casefold(), payload["SMTP_PORT"], payload["SMTP_USER"],
+                  payload["SMTP_STARTTLS"] and payload["SMTP_PORT"] != 465)
+    if SMTP_PASSWORD and old_target != new_target and payload["SMTP_USER"] and not password:
+        raise ValueError("Введите пароль для нового подключения SMTP.")
+    if password or old_target != new_target:
         payload["SMTP_PASSWORD"] = password
     if public_url is not None:
         payload["PUBLIC_BASE_URL"] = public_url.strip().rstrip("/")
     _commit_settings(payload)
 
 
+def _ldap_value(key: str):
+    options = _ldap_options.get()
+    return options[key] if options is not None else globals()[key]
+
+
+_LDAP_KEYS = ("LDAP_ENABLED", "LDAP_URL", "LDAP_BIND_DN", "LDAP_BIND_PASSWORD", "LDAP_BASE_DN",
+              "LDAP_USER_FILTER", "LDAP_STARTTLS", "LDAP_TLS_VERIFY", "LDAP_EMAIL_ATTR")
+
+
+@contextmanager
+def ldap_settings_scope(options: dict | None = None):
+    if options is None:
+        options = _ldap_options.get()
+        if options is None:
+            with _runtime_lock:
+                options = {key: globals()[key] for key in _LDAP_KEYS}
+    token = _ldap_options.set(options)
+    try:
+        yield
+    finally:
+        _ldap_options.reset(token)
+
+
 def ldap_enabled() -> bool:
-    return LDAP_ENABLED
+    return _ldap_value("LDAP_ENABLED")
 
 
 def get_ldap_url() -> str:
-    return LDAP_URL
+    return _ldap_value("LDAP_URL")
 
 
 def get_ldap_bind_dn() -> str:
-    return LDAP_BIND_DN
+    return _ldap_value("LDAP_BIND_DN")
 
 
 def get_ldap_bind_password() -> str:
-    return LDAP_BIND_PASSWORD
+    return _ldap_value("LDAP_BIND_PASSWORD")
 
 
 def get_ldap_base_dn() -> str:
-    return LDAP_BASE_DN
+    return _ldap_value("LDAP_BASE_DN")
 
 
 def get_ldap_user_filter() -> str:
-    return LDAP_USER_FILTER or "(mail={username})"
+    return _ldap_value("LDAP_USER_FILTER") or "(mail={username})"
 
 
 def get_ldap_starttls() -> bool:
-    return LDAP_STARTTLS
+    return _ldap_value("LDAP_STARTTLS")
 
 
 def get_ldap_tls_verify() -> bool:
-    return LDAP_TLS_VERIFY
+    return _ldap_value("LDAP_TLS_VERIFY")
 
 
 def get_ldap_email_attr() -> str:
-    return LDAP_EMAIL_ATTR or "mail"
+    return _ldap_value("LDAP_EMAIL_ATTR") or "mail"
 
 
 def ldap_configured() -> bool:
@@ -811,7 +846,14 @@ def ldap_configured() -> bool:
     )
 
 
-def set_ldap(
+def _ldap_target(url: str, bind_dn: str, starttls: bool, tls_verify: bool) -> tuple:
+    parsed = urlsplit(url)
+    port = parsed.port if parsed.port is not None else (636 if parsed.scheme == "ldaps" else 389)
+    return (parsed.scheme, parsed.hostname, port, bind_dn, starttls and parsed.scheme != "ldaps", tls_verify)
+
+
+@_serialized
+def resolve_ldap_settings(
     *,
     enabled: bool,
     url: str,
@@ -822,16 +864,28 @@ def set_ldap(
     starttls: bool,
     tls_verify: bool,
     email_attr: str,
-) -> None:
-    # Stage the whole change. A failed persistence attempt must not switch the
-    # running connection or invalidate the last usable directory snapshot.
+) -> dict:
     runtime = {
         "LDAP_ENABLED": bool(enabled), "LDAP_URL": url.strip(), "LDAP_BIND_DN": bind_dn.strip(),
         "LDAP_BASE_DN": base_dn.strip(), "LDAP_USER_FILTER": user_filter.strip() or "(mail={username})",
         "LDAP_STARTTLS": bool(starttls), "LDAP_TLS_VERIFY": bool(tls_verify),
         "LDAP_EMAIL_ATTR": email_attr.strip() or "mail",
     }
-    if bind_password:
-        runtime["LDAP_BIND_PASSWORD"] = bind_password
-    with _ldap_settings_lock:
-        _commit_settings(runtime)
+    try:
+        old_target = _ldap_target(LDAP_URL, LDAP_BIND_DN, LDAP_STARTTLS, LDAP_TLS_VERIFY)
+    except ValueError:
+        # A previously saved invalid address must still be replaceable.
+        old_target = None
+    try:
+        new_target = _ldap_target(runtime["LDAP_URL"], runtime["LDAP_BIND_DN"], starttls, tls_verify)
+    except ValueError as exc:
+        raise ValueError("Проверьте адрес и порт LDAP-сервера.") from exc
+    if LDAP_BIND_PASSWORD and old_target != new_target and runtime["LDAP_BIND_DN"] and not bind_password:
+        raise ValueError("Введите пароль для нового подключения LDAP.")
+    runtime["LDAP_BIND_PASSWORD"] = bind_password or (LDAP_BIND_PASSWORD if old_target == new_target else "")
+    return runtime
+
+
+@_serialized
+def set_ldap(**settings) -> None:
+    _commit_settings(resolve_ldap_settings(**settings))

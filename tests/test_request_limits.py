@@ -82,7 +82,7 @@ def test_rate_limit_precedes_body_read_and_model_validation(monkeypatch, path):
 def test_valid_body_at_limit_is_replayed_and_rate_counted_once(monkeypatch):
     calls = []
     monkeypatch.setattr(auth, "rate_allow", lambda key: calls.append(key) or True)
-    monkeypatch.setattr(auth, "authenticate_platform_user", lambda email, password: {"id": "one", "email": email})
+    monkeypatch.setattr(auth, "authenticate_platform_user", lambda email, password: {"id": "one", "email": email, "auth_version": 0})
     monkeypatch.setattr(auth, "create_user_session", lambda *args: "test-session")
     monkeypatch.setattr(store, "record_audit", lambda *args, **kwargs: None)
     monkeypatch.setattr(store, "get_user", lambda user_id: {"id": user_id, "email": "one@example.com", "archive_limit": 5})

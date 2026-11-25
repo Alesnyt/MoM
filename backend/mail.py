@@ -10,8 +10,9 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate
 
-from . import config, control, protocol_email, retention, store, summary_format, word_protocol
+from . import config, protocol_email, retention, store, summary_format, word_protocol
 from .analyze import StoredProtocolResult
+from .protocol_publication import complete_protocol as complete_protocol
 from .speakers import SpeakerError, clean_speaker_email, participant_labels
 
 log = logging.getLogger("mom.mail")
@@ -140,8 +141,7 @@ def send_mail(
     attachment: tuple[str, bytes] | None = None, envelope_to: list[str] | None = None,
     message_id: str | None = None,
 ) -> dict[str, tuple[int, bytes]]:
-    host = config.get_smtp_host()
-    from_addr = config.get_smtp_from()
+    host, port, user, password, from_addr, starttls = config.smtp_delivery_settings()
     if not host or not from_addr:
         raise RuntimeError("Сначала укажите SMTP-сервер и адрес отправителя")
     recipients = [to] if isinstance(to, str) else to
@@ -153,9 +153,6 @@ def send_mail(
     if message_id:
         message["Message-ID"] = message_id
 
-    port = config.get_smtp_port()
-    user = config.get_smtp_user()
-    password = config.get_smtp_password()
     client: smtplib.SMTP | None = None
     try:
         try:
@@ -163,7 +160,7 @@ def send_mail(
                 client = smtplib.SMTP_SSL(host, port, timeout=20, context=ssl.create_default_context())
             else:
                 client = smtplib.SMTP(host, port, timeout=20)
-                if config.get_smtp_starttls():
+                if starttls:
                     client.ehlo()
                     client.starttls(context=ssl.create_default_context())
                     client.ehlo()
@@ -215,22 +212,6 @@ def _legacy_draft_recipients(meeting: dict) -> list[str]:
         if normalized not in recipients:
             recipients.append(normalized)
     return recipients
-
-
-def complete_protocol(meeting: dict, **fields) -> None:
-    meeting_id = meeting["id"]
-    user_id = meeting.get("user_id")
-    with store.connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        # Recheck cancellation under the same lock that publishes the result.
-        if control.is_stopped(meeting_id):
-            raise control.ProcessingStopped()
-        store.update_meeting(
-            meeting_id, connection=conn, **fields, status="done", error=None, progress=100,
-            status_message="Готово",
-        )
-        removed = store.prune_user_meetings(user_id, connection=conn) if user_id else []
-    retention.remove_pruned(removed)
 
 
 def queue_protocol_mail(conn, meeting: dict, packet: ProtocolMail, recipients: list[str]) -> None:

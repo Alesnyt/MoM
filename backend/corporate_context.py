@@ -34,28 +34,49 @@ def normalize(value: str) -> str:
     return " ".join(_WORDS.findall(value.casefold().replace("ё", "е")))
 
 
+def _metadata(conn=None) -> dict:
+    return {"enabled": True, "use_ad": True, "sync_ad": True, "sync_time": DEFAULT_SYNC_TIME,
+            "revision": 0, "people_count": 0, **(store.get_app_setting("corporate_context", connection=conn) or {})}
+
+
 def _read() -> dict:
-    return {"enabled": True, "use_ad": True, "sync_ad": True, "sync_time": DEFAULT_SYNC_TIME, "revision": 0, "terms": [], "people": [],
-            **(store.get_app_setting("corporate_context") or {})}
+    # The signature, count and roster must all belong to the same publication.
+    with store.connect() as conn:
+        conn.execute("BEGIN")
+        return {**_metadata(conn), "people": store.get_app_setting("directory_people", connection=conn) or []}
 
 
-def _write(conn, data: dict) -> None:
+def _put_payload(conn, key: str, payload: str) -> None:
+    conn.execute("INSERT INTO app_settings(key,payload) VALUES (?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", (key, payload))
+
+
+def migrate_roster(conn) -> None:
+    # Existing installations store the roster inside corporate_context.
+    data = store.get_app_setting("corporate_context", connection=conn)
+    if data and "people" in data:
+        people = data.pop("people")
+        data["people_count"] = len(people)
+        _put_payload(conn, "directory_people", json.dumps(people, ensure_ascii=False))
+        _put_payload(conn, "corporate_context", json.dumps(data, ensure_ascii=False))
+
+
+def _write_metadata(conn, data: dict) -> None:
     data["revision"] = data.get("revision", 0) + 1
-    conn.execute("INSERT INTO app_settings(key,payload) VALUES ('corporate_context',?) "
-                 "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
-                 (json.dumps(data, ensure_ascii=False),))
-    # A tiny cross-process invalidation key avoids decoding a 50k-person JSON on every keystroke.
-    conn.execute("INSERT INTO app_settings(key,payload) VALUES ('corporate_context_version',?) "
-                 "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", (json.dumps(secrets.token_hex(16)),))
+    _put_payload(conn, "corporate_context", json.dumps(data, ensure_ascii=False))
+    _put_payload(conn, "corporate_context_version", json.dumps(secrets.token_hex(16)))
 
 
 def _update(**changes) -> dict:
+    people = changes.pop("people", None)
+    roster = json.dumps(people, ensure_ascii=False) if people is not None else None
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT payload FROM app_settings WHERE key='corporate_context'").fetchone()
-        data = json.loads(row[0]) if row else {}
-        data.update(changes)
-        _write(conn, data)
+        data = {**_metadata(conn), **changes}
+        if roster is not None:
+            data["people_count"] = len(people)
+            _put_payload(conn, "directory_people", roster)
+        _write_metadata(conn, data)
     return data
 
 
@@ -72,11 +93,11 @@ def directory_signature(policy: dict | None = None) -> str:
 
 
 def snapshot(query: str = "", *, overview: bool = False) -> dict:
-    data = _read()
+    data = _metadata()
     signature = directory_signature()
     matches = data.get("directory_signature") == signature
     directory = {"enabled": data["enabled"], "use_ad": data["use_ad"], "directory_current": matches,
-                 "people_count": len(data["people"]) if matches else 0, "synced_at": data.get("synced_at")}
+                 "people_count": data["people_count"] if matches else 0, "synced_at": data.get("synced_at")}
     if overview:
         from .term_discovery import pending_groups
         with store.connect() as conn:
@@ -153,7 +174,7 @@ def save_settings(enabled: bool | None, sync_ad: bool | None, actor: str, *, syn
                   use_ad: bool | None = None, overview: bool = False) -> dict:
     if sync_time is not None and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", sync_time):
         raise ValueError("Укажите время синхронизации в формате ЧЧ:ММ")
-    data = _read()
+    data = _metadata()
     changes = {key: value for key, value in {"enabled": enabled, "sync_ad": sync_ad, "use_ad": use_ad}.items()
                if value is not None}
     if sync_time is not None:
@@ -264,12 +285,12 @@ def import_dictionary(filename: str, content: bytes, actor: str) -> dict:
     return snapshot()
 
 
-def _sync_job(data: dict | None = None) -> dict:
-    saved = store.get_app_setting("ldap_sync_job")
+def _sync_job(data: dict | None = None, conn=None) -> dict:
+    saved = store.get_app_setting("ldap_sync_job", connection=conn)
     if saved is not None:
         return saved
     # Carry scheduling/error information across upgrades; the last complete roster stays intact.
-    data = data if data is not None else _read()
+    data = data if data is not None else _metadata(conn)
     return {key: data[key] for key in ("last_attempt", "attempt_signature", "sync_error", "sync_id", "sync_until")
             if key in data}
 
@@ -311,10 +332,20 @@ def request_sync(actor: str) -> dict:
 
 def _claim_sync(scheduled: bool) -> tuple[str, str] | None:
     """Persistent queue plus a renewable lease shared by every web/worker process."""
+    if scheduled:
+        # A disabled timer should not contend with meeting or session writers.
+        # Check for an explicit manual request in the same read snapshot.
+        with store.connect() as conn:
+            conn.execute("BEGIN")
+            data = _metadata(conn)
+            if not data["sync_ad"] or not config.ldap_configured():
+                if _sync_job(data, conn).get("status") != "queued":
+                    return None
     signature, now = directory_signature(), time.time()
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        data, job = _read(), _sync_job()
+        data = _metadata(conn)
+        job = _sync_job(data, conn)
         if job.get("sync_until", 0) > now:
             if scheduled:
                 return None
@@ -336,6 +367,7 @@ def _claim_sync(scheduled: bool) -> tuple[str, str] | None:
 
 
 def _publish_directory(token: str, signature: str, people: list[dict]) -> bool:
+    roster = json.dumps(people, ensure_ascii=False)
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         job = _sync_job()
@@ -343,9 +375,10 @@ def _publish_directory(token: str, signature: str, people: list[dict]) -> bool:
             return False
         if signature != directory_signature():
             raise ValueError("Настройки AD изменились во время синхронизации. Запустите её снова")
-        data = _read()
-        data.update(people=people, directory_signature=signature, synced_at=store.utc_now(), sync_error=None)
-        _write(conn, data)
+        data = _metadata(conn)
+        data.update(people_count=len(people), directory_signature=signature, synced_at=store.utc_now(), sync_error=None)
+        _put_payload(conn, "directory_people", roster)
+        _write_metadata(conn, data)
         job.update(status="succeeded", sync_id=None, sync_until=0, finished_at=store.utc_now(), sync_error=None, failed_at=None)
         job["progress"] = {**job.get("progress", {}), "phase": "done", "received": len(people)}
         _write_job(conn, job)

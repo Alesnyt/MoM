@@ -60,10 +60,11 @@ def test_stored_hash_cannot_authenticate_or_revoke_session(db, kind):
         other_lookup = auth.get_user_session
         expected = {'username': 'boss'}
     else:
-        raw = auth.create_user_session('u', 'u@example.com')
+        user = store.create_user('u@example.com', 'hash')
+        raw = auth.create_user_session(user['id'], user['email'], 0)
         lookup, logout = auth.get_user_session, auth.drop_user_session
         other_lookup = auth.get_session
-        expected = {'user_id': 'u', 'email': 'u@example.com'}
+        expected = {'user_id': user['id'], 'email': user['email']}
     with store.connect() as conn:
         stored = conn.execute('SELECT token FROM sessions WHERE token = ?',
                               (store.session_id(raw),)).fetchone()['token']
@@ -117,3 +118,26 @@ def test_session_cleanup_runs_off_event_loop_and_stops(db, monkeypatch):
     asyncio.run(retention.run_session_cleanup(asyncio.Event()))
     assert len(calls) == 1 and calls[0] != event_thread
     assert store.purge_expired_sessions() == 0
+
+
+
+@pytest.mark.parametrize("change", ["password", "mode", "delete"])
+def test_session_issuance_requires_authenticated_credential_version(db, change):
+    profile = store.create_user("check@example.com", "previous")
+    user = store.get_user_auth(profile["email"])
+    def issue():
+        return auth.create_user_session(user["id"], user["email"], user["auth_version"])
+    existing = issue()
+    if change == "delete":
+        store.delete_user(user["id"])
+    elif change == "password":
+        store.update_user(user["id"], password_hash="replacement")
+    else:
+        store.update_user(user["id"], auth_mode="ldap")
+    assert auth.get_user_session(existing) is None
+    with pytest.raises(store.CredentialsChanged):
+        issue()
+    if change != "delete":
+        current = store.get_user_auth(profile["email"])
+        fresh = auth.create_user_session(current["id"], current["email"], current["auth_version"])
+        assert auth.get_user_session(fresh)["user_id"] == user["id"]

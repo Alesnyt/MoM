@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import config
@@ -11,6 +12,8 @@ _recordings_cache: dict = {"at": 0.0, "bytes": 0}
 _cache_lock = threading.Lock()
 _scan_lock = threading.Lock()
 _generation = 0
+_reservation_lock = threading.Lock()
+_reserved_bytes = 0
 
 
 def invalidate_recordings() -> None:
@@ -113,18 +116,53 @@ def snapshot() -> dict:
 
 
 def ensure_space(extra: int = 0) -> None:
+    with _reservation_lock:
+        _check_space(extra)
+
+
+def _check_space(extra: int) -> None:
     free = free_bytes()
     incoming = max(0, int(extra))
     minimum = config.MIN_FREE_BYTES
-    need = minimum + incoming
+    need = minimum + incoming + _reserved_bytes
     if free >= need:
         return
-    if incoming:
+    if incoming or _reserved_bytes:
         raise DiskError(
             f"Файл не помещается: свободно {format_bytes(free)}, "
-            f"для записи и запаса нужно {format_bytes(need)}."
+            f"с учётом параллельной обработки и запаса нужно {format_bytes(need)}."
         )
     raise DiskError(
         f"На диске свободно {format_bytes(free)}. "
         f"Нужно хотя бы {format_bytes(minimum)}, чтобы расшифровка не оборвалась."
     )
+
+
+class _Reservation:
+    def __init__(self):
+        self.remaining = 0
+
+    def ensure(self, size: int) -> None:
+        global _reserved_bytes
+        with _reservation_lock:
+            additional = max(0, size - self.remaining)
+            _check_space(additional)
+            self.remaining += additional
+            _reserved_bytes += additional
+
+    def consumed(self, size: int) -> None:
+        global _reserved_bytes
+        with _reservation_lock:
+            used = min(self.remaining, size)
+            self.remaining -= used
+            _reserved_bytes -= used
+
+
+@contextmanager
+def reserve_space(estimate: int):
+    reservation = _Reservation()
+    reservation.ensure(estimate)
+    try:
+        yield reservation
+    finally:
+        reservation.consumed(reservation.remaining)

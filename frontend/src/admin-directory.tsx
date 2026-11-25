@@ -31,6 +31,18 @@ export function LdapPanel({ health, onChange }: { health: Health | null; onChang
     setEmailAttr(health.ldap.email_attr || "mail");
   }, [health]);
 
+  const settings = {
+    enabled,
+    url: url.trim(),
+    bind_dn: bindDn.trim(),
+    bind_password: bindPassword,
+    base_dn: baseDn.trim(),
+    user_filter: userFilter.trim() || "(mail={username})",
+    starttls,
+    tls_verify: tlsVerify,
+    email_attr: emailAttr.trim() || "mail",
+  };
+
   return (
     <>
     <form
@@ -40,17 +52,7 @@ export function LdapPanel({ health, onChange }: { health: Health | null; onChang
         setError(null);
         setNote(null);
         setBusy("save");
-        void saveLdap({
-          enabled,
-          url: url.trim(),
-          bind_dn: bindDn.trim(),
-          bind_password: bindPassword,
-          base_dn: baseDn.trim(),
-          user_filter: userFilter.trim() || "(mail={username})",
-          starttls,
-          tls_verify: tlsVerify,
-          email_attr: emailAttr.trim() || "mail",
-        })
+        void saveLdap(settings)
           .then((next) => {
             setBindPassword("");
             onChange(next);
@@ -96,7 +98,7 @@ export function LdapPanel({ health, onChange }: { health: Health | null; onChang
             className="title-input"
             type="password"
             autoComplete="new-password"
-            placeholder={ldap?.has_password ? "Задан, оставьте пустым чтобы не менять" : "Пароль"}
+            placeholder={ldap?.has_password ? "Задан для сохранённого сервера и учётной записи" : "Пароль"}
             value={bindPassword}
             onChange={(event) => setBindPassword(event.target.value)}
           />
@@ -156,12 +158,12 @@ export function LdapPanel({ health, onChange }: { health: Health | null; onChang
             setError(null);
             setNote(null);
             setBusy("test");
-            void testLdap(probe.trim())
+            void testLdap(probe.trim(), settings)
               .then((result) =>
                 setNote(
                   result.entries
                     ? `Найдена одна запись${result.mail ? `: ${result.mail}` : ""}`
-                    : "Служебная учётная запись подключилась. Чтение сотрудников проверяется при обновлении кэша ниже.",
+                    : "Подключение и доступ к указанной базе поиска проверены.",
                 ),
               )
               .catch((err: Error) => setError(err.message))

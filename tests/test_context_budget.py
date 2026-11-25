@@ -54,6 +54,36 @@ def test_chunks_preserve_every_character_and_repeat_source_for_long_turn():
     assert ''.join(analyze._transcript_chunks(plain, 50)) == plain
 
 
+def test_exact_chunking_verifies_line_boundaries_without_recounting_growing_prefix():
+    text = 'Обсуждение\n' * 2000
+    scanned = 0
+    def count(value):
+        nonlocal scanned
+        scanned += len(value)
+        # Combining lines costs more than counting each line independently.
+        return len(value) + 2 * value.count('\nО')
+
+    budget = 2800
+    chunks = analyze._transcript_chunks(text, budget, count)
+    assert ''.join(chunks) == text
+    assert scanned < 5 * len(text)
+    assert all(count(chunk) <= budget for chunk in chunks)
+
+
+def test_protocol_tokenizer_runs_off_event_loop(monkeypatch):
+    import threading
+    loop_thread = threading.get_ident()
+    def count(text):
+        assert threading.get_ident() != loop_thread
+        return len(text)
+    monkeypatch.setattr(context_budget, 'token_counter', lambda: count)
+    monkeypatch.setattr(prompts, 'snapshot', lambda: {'protocol_prompt': 'Составь протокол.'})
+    async def create(**kwargs):
+        return response({'summary': 'Готово'})
+    result = asyncio.run(analyze.analyze_long_transcript(client_for(create), 'Текст встречи', None))
+    assert result['summary'] == 'Готово'
+
+
 def test_local_tokenizer_never_truncates_or_downloads_and_reloads_updated_file(tmp_path, monkeypatch):
     from tokenizers import Tokenizer, models, pre_tokenizers
     tokenizer = Tokenizer(models.WordLevel({'[UNK]': 0, 'слово': 1}, unk_token='[UNK]'))
