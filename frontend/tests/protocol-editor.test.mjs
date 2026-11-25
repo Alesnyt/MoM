@@ -86,11 +86,11 @@ test('failed proofread or a save conflict retains edits and cancel discards them
   assert.ok(view.getByText(initial.result.summary));
 });
 
-test('archive updates during editing keep the draft paired with the revision it came from', async () => {
+test('archive updates preserve the draft and require explicit resolution against the new revision', async () => {
   let sent;
   globalThis.fetch = async (_, options) => {
     sent = JSON.parse(options.body);
-    return reply({ detail: 'Протокол уже изменился' }, 409);
+    return reply({ ...initial, result_revision: 'revision3', result: sent.result });
   };
   const props = { tab: 'mom', onTab() {}, onUpdated() {} };
   const view = render(React.createElement(MeetingPane, { ...props, meeting: initial }));
@@ -98,11 +98,16 @@ test('archive updates during editing keep the draft paired with the revision it 
   pasteSummary(await view.findByLabelText('Саммари'), 'Моя версия');
   view.rerender(React.createElement(MeetingPane, { ...props, meeting: { ...initial, status: 'queued', result: null } }));
   view.rerender(React.createElement(MeetingPane, { ...props, meeting: { ...initial, result_revision: 'revision2',
-    result: { ...initial.result, summary: 'Протокол собран заново' } } }));
+    result: { ...initial.result, summary: 'Протокол собран заново', decisions: ['Новое решение'] } } }));
   assert.equal(view.getByLabelText('Саммари').textContent, 'Моя версия');
+  assert.equal(view.getByText('Сохранить протокол').disabled, true);
+  assert.ok(view.getByText('Протокол собран заново'));
+  fireEvent.click(view.getByText('Перенести мои изменённые разделы в новую версию'));
+  assert.equal(view.getByLabelText('Решение 1').value, 'Новое решение');
   fireEvent.click(view.getByText('Сохранить протокол'));
-  await view.findByRole('alert');
-  assert.equal(sent.revision, 'revision1');
+  await view.findByText('Правки протокола сохранены.');
+  assert.equal(sent.revision, 'revision2');
+  assert.equal(sent.result.summary, 'Моя версия');
 });
 
 test('a manual protocol is rebuilt only after confirming the displayed revision', () => {

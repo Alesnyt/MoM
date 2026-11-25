@@ -39,7 +39,9 @@ def speaker_spans(turns: list[dict[str, Any]], *, max_seconds: float = 20.0) -> 
     spans: list[dict[str, float]] = []
     step = min(24.5, max(MIN_SLICE_SECONDS, float(max_seconds)))
     for turn in merged:
-        cursor = float(turn["start"])
+        # Two active voices share the same mono samples. Keep the original turn
+        # map for attribution and feed every overlapping sample to ASR only once.
+        cursor = max(float(turn["start"]), spans[-1]["end"] if spans else 0.0)
         end = float(turn["end"])
         made = False
         while cursor < end:

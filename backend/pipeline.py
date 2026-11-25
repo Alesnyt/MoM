@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import shutil
 import threading
@@ -13,6 +15,7 @@ from . import diagnostics, disk, remote_asr, store
 from .background import run_sync
 from .name_review import review_names
 from .analyze import (
+    ProtocolContentError,
     analyze_long_transcript,
     make_client,
     local_asr_slot,
@@ -20,9 +23,9 @@ from .analyze import (
     transcribe_file,
 )
 from . import prompts, config, corporate_context, calendar_service
-from .audio import AudioError, extract_audio_async, extract_wav, format_duration, split_audio_async
+from .audio import AudioError, extract_audio_async, extract_wav, format_duration, pcm_frame_count, split_audio_async, write_pcm_part
 from .config import AUDIO_DIR, CHUNK_SECONDS, MAX_WHISPER_BYTES, UPLOAD_DIR
-from .mail import complete_protocol
+from .protocol_publication import complete_protocol
 from .diarize import DiarizeUnavailable, apply_diarization, available as diarization_available, diarize_turns
 from . import control
 from .gigaam_asr import transcribe_spans
@@ -233,8 +236,11 @@ async def _process_meeting(meeting_id: str) -> None:
     if not meeting:
         log.warning("Встреча не найдена")
         return
+    resume = has_saved_transcript(meeting)
+    asr_model = config.get_asr_model()
+    needs_llm_client = resume or (not config.is_local_asr(asr_model) and asr_model != config.REMOTE_ASR)
     api_key = config.get_api_key()
-    if not api_key:
+    if needs_llm_client and not api_key:
         await run_sync(store.finish_processing_error,
             meeting_id,
             status_message="Нет ключа OpenAI",
@@ -242,16 +248,14 @@ async def _process_meeting(meeting_id: str) -> None:
         )
         return
 
-    asr_model = config.get_asr_model()
     with stage_timer("context_load"):
         context = await run_sync(corporate_context.for_meeting, meeting)
     calendar_context = meeting.get("calendar_context")
     calendar_hint = calendar_service.search_text(calendar_context)
     use_wav = config.is_local_asr(asr_model) or asr_model == config.REMOTE_ASR
     audio_path = AUDIO_DIR / f"{meeting_id}{'.wav' if use_wav else '.mp3'}"
-    client = make_client(api_key)
+    client = make_client(api_key) if needs_llm_client else None
     progress = _Progress(meeting_id)
-    resume = has_saved_transcript(meeting)
     step = "старт"
     log.info("старт file=%s resume=%s", meeting.get("filename") or "", resume)
 
@@ -301,10 +305,12 @@ async def _process_meeting(meeting_id: str) -> None:
                 step = "спикеры"
                 log.info("шаг: спикеры до расшифровки")
                 await run_sync(progress.set, 20, "Размечаю спикеров", status="transcribing", force=True)
+                recognition_turns = []
                 try:
                     async with local_asr_slot():
                         with stage_timer("diarization"):
-                            known_turns = await run_sync(diarize_turns, audio_path, prepared=audio_path)
+                            known_turns = await run_sync(diarize_turns, audio_path, prepared=audio_path,
+                                                         recognition_turns=recognition_turns)
                 except DiarizeUnavailable as exc:
                     known_turns = []
                     known_note = str(exc)
@@ -317,7 +323,7 @@ async def _process_meeting(meeting_id: str) -> None:
                     log.exception("Разметка спикеров не удалась")
                 if control.is_stopped(meeting_id):
                     raise control.ProcessingStopped()
-                spans = speaker_spans(known_turns or [])
+                spans = speaker_spans(recognition_turns or known_turns or [])
                 if spans:
                     step = "расшифровка"
                     log.info("шаг: расшифровка по голосам, реплик %s", len(spans))
@@ -345,6 +351,7 @@ async def _process_meeting(meeting_id: str) -> None:
                 log.info("шаг: расшифровка model=%s", asr_model)
                 hints = await run_sync(context.hotwords, meeting["title"] + "\n" + calendar_hint)
                 payload = await _transcribe(client, audio_path, meeting_id, duration, progress, asr_model=asr_model,
+                                            **({"checkpoint": True} if asr_model == config.REMOTE_ASR else {}),
                                             **({"hotwords": hints} if hints else {}))
                 if known_turns is not None:
                     voiced = assign_speakers(payload.get("segments") or [], known_turns)
@@ -373,7 +380,7 @@ async def _process_meeting(meeting_id: str) -> None:
             if control.is_stopped(meeting_id):
                 raise control.ProcessingStopped()
 
-            await run_sync(store.update_meeting,
+            await run_sync(_publish_transcript,
                 meeting_id,
                 transcript=transcript,
                 transcript_segments={
@@ -468,9 +475,18 @@ async def _process_meeting(meeting_id: str) -> None:
                 log.warning("Не удалось удалить временный WAV %s", audio_path.name, exc_info=True)
 
 
+def _publish_transcript(meeting_id: str, **fields) -> None:
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if control.pending(conn, meeting_id):
+            raise control.ProcessingStopped()
+        store.update_meeting(meeting_id, connection=conn, **fields)
+        conn.execute("DELETE FROM asr_checkpoints WHERE meeting_id=?", (meeting_id,))
+
+
 async def _transcribe(
     client, audio_path: Path, meeting_id: str, duration: float, progress: _Progress,
-    *, asr_model: str | None = None, hotwords: str = "",
+    *, asr_model: str | None = None, hotwords: str = "", checkpoint: bool = False,
 ) -> dict:
     asr_model = asr_model or config.get_asr_model()
 
@@ -496,9 +512,9 @@ async def _transcribe(
 
     with stage_timer("asr_cloud"):
         if asr_model == config.REMOTE_ASR:
-            async with remote_asr.connect(config.get_asr_connection()) as service:
-                return await _transcribe_parts(service.transcribe, audio_path, meeting_id, progress,
-                                               MAX_WHISPER_BYTES, CHUNK_SECONDS)
+            connection = config.get_asr_connection()
+            async with remote_asr.connect(connection) as service:
+                return await _transcribe_remote(service, connection, audio_path, meeting_id, progress, checkpoint)
 
         async def recognize(path: Path) -> dict:
             if path == audio_path:
@@ -509,6 +525,53 @@ async def _transcribe(
         return await _transcribe_parts(recognize, audio_path, meeting_id, progress,
                                        2 * 1024 * 1024 if qwen else MAX_WHISPER_BYTES,
                                        2 * 60 if qwen else CHUNK_SECONDS)
+
+
+def _audio_fingerprint(path: Path, connection, frames_per_part: int) -> str:
+    # Hash the actual audio and request parameters. A reissued key for the same
+    # service/model may resume, while changed inputs must start a new result.
+    with path.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256")
+    digest.update(json.dumps(["pcm16k-v1", connection.base_url, connection.model, frames_per_part]).encode())
+    return digest.hexdigest()
+
+
+async def _transcribe_remote(service, connection, path: Path, meeting_id: str, progress, checkpoint: bool) -> dict:
+    frames = await run_sync(pcm_frame_count, path)
+    # Multipart payload limits apply to the encoded audio, including its header.
+    per_part = min(16000 * CHUNK_SECONDS, max(1, (MAX_WHISPER_BYTES - 44) // 2))
+    count = max(1, (frames + per_part - 1) // per_part)
+    fingerprint = await run_sync(_audio_fingerprint, path, connection, per_part) if checkpoint else None
+    chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"
+    partial = chunks_dir / "part.wav"
+    results = []
+    try:
+        for index in range(count):
+            first = index * per_part
+            await run_sync(progress.set, 16 + 70 * index // count,
+                           f"Расшифровываю фрагмент {index + 1} из {count}",
+                           status="transcribing", force=True)
+            result = await run_sync(store.asr_checkpoint, meeting_id, fingerprint, index) if checkpoint else None
+            part_frames = min(per_part, frames - first)
+            pcm_bytes = 44 + frames * 2
+            if result is None:
+                if count == 1:
+                    diagnostics.record_remote_part(reused=False, pcm_bytes=pcm_bytes)
+                    result = await service.transcribe(path)
+                else:
+                    await run_sync(chunks_dir.mkdir, parents=True, exist_ok=True)
+                    await run_sync(write_pcm_part, path, partial, first, part_frames)
+                    diagnostics.record_remote_part(reused=False, pcm_bytes=pcm_bytes + 44 + part_frames * 2)
+                    result = await service.transcribe(partial)
+                    await run_sync(partial.unlink)
+                if checkpoint:
+                    await run_sync(store.save_asr_checkpoint, meeting_id, fingerprint, index, result)
+            else:
+                diagnostics.record_remote_part(reused=True, pcm_bytes=pcm_bytes)
+            results.append((first / 16000, result))
+        return results[0][1] if count == 1 else merge_transcripts(results)
+    finally:
+        await run_sync(shutil.rmtree, chunks_dir, ignore_errors=True)
 
 
 async def _transcribe_parts(recognize, audio_path: Path, meeting_id: str, progress: _Progress,
@@ -534,7 +597,7 @@ async def _transcribe_parts(recognize, audio_path: Path, meeting_id: str, progre
 
 
 def public_error(exc: BaseException) -> str:
-    if isinstance(exc, (AudioError, remote_asr.AsrServiceError)):
+    if isinstance(exc, (AudioError, disk.DiskError, remote_asr.AsrServiceError, ProtocolContentError)):
         return str(exc) or "Не удалось обработать аудио"
     text = str(exc)
     lowered = text.lower()

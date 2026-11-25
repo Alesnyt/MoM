@@ -130,3 +130,22 @@ def test_asr_fallback_does_not_retry_its_failure(tmp_path, monkeypatch):
     with pytest.raises(RateLimitError):
         asyncio.run(asr_request(tmp_path, monkeypatch, create))
     assert create.await_count == 2
+
+
+@pytest.mark.parametrize("content", ["{}", '{"title":"Встреча"}', '{"unknown":["text"]}',
+                                     '{"summary":" ", "action_items":[{"task":" "}]}'])
+def test_empty_protocol_is_a_failed_generation(content):
+    with pytest.raises(analyze.ProtocolContentError):
+        analyze._parse_result(content)
+    assert analyze._parse_result('{"summary":"Обсудили план","action_items":[]}')["summary"] == "Обсудили план"
+
+
+@pytest.mark.parametrize("reason,content,refusal", [("stop", None, None), ("stop", "", "declined"),
+                                                  ("content_filter", '{"summary":"часть"}', None)])
+def test_refused_or_empty_responses_are_not_published(reason, content, refusal):
+    message = SimpleNamespace(content=content, refusal=refusal)
+    response = SimpleNamespace(choices=[SimpleNamespace(finish_reason=reason, message=message)])
+    create = AsyncMock(return_value=response)
+    with pytest.raises(analyze.ProtocolContentError):
+        asyncio.run(request("protocol", create))
+    assert create.await_count == 1

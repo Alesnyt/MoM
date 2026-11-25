@@ -116,15 +116,9 @@ def generate_password(length: int = 12) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-def create_user_session(user_id: str, email: str) -> str:
+def create_user_session(user_id: str, email: str, auth_version: int) -> str:
     token = secrets.token_urlsafe(32)
-    store.put_session(
-        token,
-        "user",
-        user_id=user_id,
-        email=email,
-        expires=time.time() + SESSION_SECONDS,
-    )
+    store.issue_user_session(token, user_id, email, auth_version, time.time() + SESSION_SECONDS)
     return token
 
 

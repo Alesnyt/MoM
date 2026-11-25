@@ -235,3 +235,27 @@ test('directory progress survives remount, updates in background and keeps faile
   assert.equal(view.queryByRole('progressbar'), null);
   assert.equal(view.getByRole('button', {name:'Синхронизировать AD'}).disabled, false);
 });
+
+
+test('LDAP probe uses unsaved directory credentials and search base without saving', async () => {
+  const {LdapPanel} = loadSource('admin-directory.tsx');
+  let submitted;
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/settings/ldap/test') {
+      submitted = JSON.parse(options.body);
+      return Response.json({ok: true});
+    }
+    assert.notEqual(url, '/api/settings/ldap');
+    return Response.json(initial);
+  };
+  const health = {ldap: {enabled: true, url: 'ldaps://old.example', base_dn: 'DC=old'}};
+  const view = render(React.createElement(LdapPanel, {health, onChange: assert.fail}));
+  fireEvent.change(view.getByLabelText('Адрес'), {target: {value: 'ldaps://new.example'}});
+  fireEvent.change(view.getByLabelText('База поиска для входа'), {target: {value: 'OU=New,DC=example'}});
+  fireEvent.change(view.getByLabelText('Пароль bind'), {target: {value: 'draft-only'}});
+  fireEvent.click(view.getByRole('button', {name: 'Проверить LDAP'}));
+  await view.findByText('Подключение и доступ к указанной базе поиска проверены.');
+  assert.equal(submitted.settings.url, 'ldaps://new.example');
+  assert.equal(submitted.settings.base_dn, 'OU=New,DC=example');
+  assert.equal(submitted.settings.bind_password, 'draft-only');
+});

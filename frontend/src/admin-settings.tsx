@@ -380,7 +380,7 @@ export function SettingsPanel({
                 className="title-input"
                 type="password"
                 autoComplete="new-password"
-                placeholder={health?.smtp?.has_password ? "Задан, оставьте пустым чтобы не менять" : "Пароль"}
+                placeholder={health?.smtp?.has_password ? "Задан для сохранённого сервера и учётной записи" : "Пароль"}
                 value={smtpPassword}
                 onChange={(event) => setSmtpPassword(event.target.value)}
               />

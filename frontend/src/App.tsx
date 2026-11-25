@@ -18,7 +18,7 @@ import {
 import { Composer, UserLogin, emptyComposerDraft } from "./composer";
 import { ApiError, onSessionExpired, sessionChanged } from "./http";
 import { connectionClass, connectionDetail, connectionLabel, formatDate, formatDuration, queueFromMeetings, queuePositionLabel } from "./format";
-import { MeetingPane, stepLabel } from "./meeting";
+import { MeetingPane, stepLabel, type ProtocolDraft } from "./meeting";
 import { startPolling } from "./poll";
 import { useServerHealth } from "./server-health";
 import type { AdminTab, AuthStatus, Health, Meeting, UserSession } from "./types";
@@ -27,30 +27,22 @@ function pathIsAdmin(): boolean {
   return window.location.pathname === "/admin" || window.location.pathname.startsWith("/admin/");
 }
 
-function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
+type ArchiveMeeting = Meeting & { detailsStale?: boolean };
+
+function mergeMeetings(prev: ArchiveMeeting[], rows: Meeting[]): ArchiveMeeting[] {
   const previous = new Map(prev.map((item) => [item.id, item]));
   return rows.map((row) => {
     const old = previous.get(row.id);
-    if (!old || old.status !== row.status) return row;
-    if (row.result == null && old.result) {
-      return {
-        ...row,
-        source_type: row.source_type ?? old.source_type,
-        calendar_context: row.calendar_context ?? old.calendar_context,
-        result: old.result,
-        result_revision: old.result_revision,
-        transcript: old.transcript,
-        speakers: row.speakers ?? old.speakers,
-        segments: row.segments ?? old.segments,
-        diarization_note: row.diarization_note ?? old.diarization_note,
-        name_review: row.name_review === undefined ? old.name_review : row.name_review,
-      };
-    }
+    if (!old) return row;
+    if (old.body_version !== undefined && row.body_version !== undefined && old.body_version > row.body_version) return old;
+    if (old.status !== row.status || (row.source_type !== undefined && row.segments != null)) return row;
     return {
       ...row,
+      detailsStale: old.detailsStale || old.body_version !== row.body_version,
       source_type: row.source_type ?? old.source_type,
       calendar_context: row.calendar_context ?? old.calendar_context,
       result: row.result ?? old.result,
+      result_revision: row.result == null ? old.result_revision : row.result_revision,
       transcript: row.transcript ?? old.transcript,
       speakers: row.speakers ?? old.speakers,
       segments: row.segments ?? old.segments,
@@ -61,12 +53,16 @@ function mergeMeetings(prev: Meeting[], rows: Meeting[]): Meeting[] {
 }
 
 export default function App() {
-  const [meetings, setMeetingRows] = useState<Meeting[]>([]);
+  const [meetings, setMeetingRows] = useState<ArchiveMeeting[]>([]);
   const dataVersion = useRef(0);
   const protocolDirty = useRef(false);
+  const protocolDraft = useRef<{ ownerId: string; meetingId: string; editor: ProtocolDraft } | null>(null);
   const onEditorDirty = useCallback((dirty: boolean) => { protocolDirty.current = dirty; }, []);
-  const canLeaveEditor = useCallback(() => !protocolDirty.current ||
-    window.confirm("Покинуть встречу и отбросить несохранённые правки протокола?"), []);
+  const canLeaveEditor = useCallback(() => {
+    if (protocolDirty.current && !window.confirm("Покинуть встречу и отбросить несохранённые правки протокола?")) return false;
+    protocolDraft.current = null;
+    return true;
+  }, []);
   const meetingVersions = useRef(new Map<string, number>());
   const setMeetings = useCallback((update: SetStateAction<Meeting[]>, meetingId?: string) => {
     dataVersion.current += 1;
@@ -269,12 +265,12 @@ export default function App() {
   }, [processingKey, userReady]);
 
   const needsDetails = selected && (
-    selected.segments == null || selected.source_type === undefined ||
+    selected.detailsStale || selected.segments == null || selected.source_type === undefined ||
     (selected.status === "review" && selected.transcript == null) ||
     (selected.status === "done" && selected.result == null)
   );
   const detailKey = userReady && selected && needsDetails &&
-    ["review", "done", "error"].includes(selected.status) ? `${selected.id}:${selected.status}` : "";
+    ["review", "done", "error"].includes(selected.status) ? `${selected.id}:${selected.status}:${selected.body_version ?? ""}` : "";
 
   useEffect(() => {
     if (!detailKey || !selectedId) return;
@@ -285,7 +281,8 @@ export default function App() {
     void getMeeting(selectedId, controller.signal)
       .then((full) => {
         if (controller.signal.aborted || generation !== userGeneration.current || version !== meetingVersions.current.get(selectedId)) return;
-        setMeetingRows((rows) => rows.map((row) => (row.id === full.id ? full : row)));
+        setMeetingRows((rows) => rows.map(row => row.id === full.id &&
+          (row.body_version ?? 0) <= (full.body_version ?? 0) ? full : row));
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted && generation === userGeneration.current && version === meetingVersions.current.get(selectedId)) {
@@ -563,7 +560,7 @@ export default function App() {
           </div>}
           {error && <div className="banner" role="alert">{error}</div>}
           {screen === "app" && expired.user && <div className="banner" role="alert">
-            Сессия истекла. Войдите снова. Черновик новой встречи сохранён в этой вкладке.
+            Сессия истекла. Войдите в тот же профиль, чтобы продолжить работу с черновиком в этой вкладке.
           </div>}
           {screen === "admin" && expired.admin && <div className="banner" role="alert">
             Сессия администратора истекла. Войдите снова.
@@ -613,6 +610,7 @@ export default function App() {
                     ...current?.openai,
                     configured: next.openai.configured,
                     connected: next.openai.connected,
+                    asr_ready: next.openai.asr_ready,
                     auth_rejected: next.openai.auth_rejected,
                     rate_limited: next.openai.rate_limited,
                     model_unavailable: next.openai.model_unavailable,
@@ -632,6 +630,7 @@ export default function App() {
                 sessionChanged("user");
                 const sameUser = Boolean(session.id) && draftOwner.current === session.id;
                 if (!sameUser) {
+                  protocolDraft.current = null;
                   setMeetings([]);
                   setSelectedId(null);
                   setDraft(emptyComposerDraft());
@@ -669,13 +668,20 @@ export default function App() {
               directoryEnabled={Boolean(health?.ldap?.configured)}
               onTab={setTab}
               onEditorDirty={onEditorDirty}
+              restoredDraft={protocolDraft.current && protocolDraft.current.ownerId === user?.id &&
+                protocolDraft.current.meetingId === selected.id ? protocolDraft.current.editor : null}
+              onDraftChange={editor => {
+                if (renderedUserGeneration !== userGeneration.current || !user?.id) return;
+                protocolDraft.current = editor ? { ownerId: user.id, meetingId: selected.id, editor } : null;
+              }}
               onRetry={revision => void onRetry(selected.id, revision)}
               onStop={() => void onStop(selected.id)}
               onRestart={() => void onRestart(selected.id)}
               onDelete={() => onDelete(selected.id)}
               onUpdated={(next) => {
                 if (renderedUserGeneration !== userGeneration.current) return;
-                setMeetings((rows) => rows.map((row) => (row.id === next.id ? next : row)), next.id);
+                setMeetings((rows) => rows.map(row => row.id === next.id &&
+                  (row.body_version ?? 0) <= (next.body_version ?? 0) ? next : row), next.id);
               }}
             />
           ) : (

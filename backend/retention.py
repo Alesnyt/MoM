@@ -1,14 +1,18 @@
 import asyncio
+from contextlib import contextmanager
 import logging
 import os
+import re
 from pathlib import Path
 import shutil
+import sqlite3
 import threading
 
 from . import background, config, control, disk, store
 
 log = logging.getLogger("mom.retention")
 _cleanup_lock = threading.Lock()
+_active_uploads: set[str] = set()
 
 
 def purge_files(meeting_id: str) -> None:
@@ -58,7 +62,7 @@ def cleanup_recording(meeting_id: str) -> bool:
             return True
         # A terminal DB status can precede the worker's file/client cleanup.
         # Leave the task pending until that worker releases its ownership.
-        if control.job_running(meeting_id):
+        if meeting_id in _active_uploads or control.job_running(meeting_id):
             return False
         # Never turn a corrupt/stale cleanup entry into deletion of live data.
         if store.get_meeting(meeting_id) is not None:
@@ -75,10 +79,43 @@ def cleanup_recording(meeting_id: str) -> bool:
         return True
 
 
-def discard_upload(meeting_id: str) -> None:
-    """An interrupted owner deletion must not leave an untracked upload."""
-    store.enqueue_recording_cleanup(meeting_id)
-    cleanup_recording(meeting_id)
+@contextmanager
+def incoming_recording(meeting_id: str):
+    """Create a durable cleanup ticket before writing any recording bytes."""
+    with _cleanup_lock:
+        store.enqueue_recording_cleanup(meeting_id)
+        _active_uploads.add(meeting_id)
+    try:
+        yield
+    finally:
+        with _cleanup_lock:
+            _active_uploads.discard(meeting_id)
+        # create_meeting clears the ticket in the INSERT transaction. If that
+        # transaction failed or this process stopped, the cleanup service owns it.
+        try:
+            cleanup_recording(meeting_id)
+        except (sqlite3.Error, OSError):
+            log.exception("Очистка незавершённой загрузки отложена до восстановления хранилища")
+        disk.invalidate_recordings()
+
+
+def reconcile_legacy_uploads(suffixes: set[str]) -> None:
+    """Queue unregistered originals from releases that predate upload tickets, once at startup."""
+    if store.get_app_setting("recording_uploads_reconciled"):
+        return
+    with os.scandir(config.UPLOAD_DIR) as entries:
+        candidates = {Path(entry.name).stem for entry in entries
+                      if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix in suffixes
+                      and re.fullmatch(r"[0-9a-f]{32}", Path(entry.name).stem)}
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        registered = {row[0] for row in conn.execute("SELECT id FROM meetings")}
+        missing = candidates - registered
+        conn.executemany("INSERT OR IGNORE INTO recording_cleanup (meeting_id, created_at) VALUES (?, ?)",
+                         [(mid, store.utc_now()) for mid in missing])
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,payload) VALUES ('recording_uploads_reconciled','true')")
+    if missing:
+        log.info("Поставлено на очистку незарегистрированных записей: %d", len(missing))
 
 
 def cleanup_pending_recordings() -> None:

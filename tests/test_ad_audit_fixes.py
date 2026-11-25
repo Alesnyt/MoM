@@ -69,10 +69,10 @@ def test_successful_save_is_applied_only_after_persistence_and_preserves_blank_p
         assert config.get_ldap_url() == old_url and os.environ['LDAP_URL'] == old_url
         real_write(values)
     monkeypatch.setattr(config, '_upsert_env', write)
-    config.set_ldap(**ldap_payload(bind_password=''))
+    config.set_ldap(**ldap_payload(url=old_url, base_dn='OU=People,DC=example,DC=com', bind_password=''))
     saved = dotenv_values(config.ENV_PATH, interpolate=False)
     assert observed == [old_url]
-    assert config.get_ldap_url() == os.environ['LDAP_URL'] == saved['LDAP_URL'] == 'ldaps://new-audit.invalid'
+    assert config.get_ldap_url() == os.environ['LDAP_URL'] == saved['LDAP_URL'] == old_url
     assert config.get_ldap_bind_password() == saved['LDAP_BIND_PASSWORD'] == 'local-test-only'
 
 
@@ -313,3 +313,92 @@ def test_cleanup_failure_does_not_hide_ldap_probe_read_error(db, monkeypatch):
     monkeypatch.setattr(ldap_auth, '_search', lambda *args: (_ for _ in ()).throw(TimeoutError('private timeout')))
     response = TestClient(main.app, raise_server_exceptions=False).post('/api/settings/ldap/test',json={'username':'anna@example.com'})
     assert response.status_code == 400 and 'не ответил' in response.json()['detail']
+
+
+
+@pytest.mark.parametrize("change", [
+    {"url": "ldaps://new.invalid"}, {"url": "ldaps://audit.invalid:3636"},
+    {"url": "ldap://audit.invalid:636", "starttls": True}, {"bind_dn": "another-service"},
+    {"tls_verify": False},
+])
+def test_saved_password_only_for_original_ldap_connection(db, change, monkeypatch):
+    payload = ldap_payload(url=config.get_ldap_url(), bind_password="")
+    payload.update(change)
+    monkeypatch.setattr(ldap_auth, "_service_connection", lambda: pytest.fail("unexpected connection"))
+    client = TestClient(main.app)
+    for path, body in [("/api/settings/ldap/test", {"settings": payload}), ("/api/settings/ldap", payload)]:
+        response = client.post(path, json=body)
+        assert response.status_code == 400 and "пароль" in response.json()["detail"]
+    assert config.get_ldap_url() == "ldaps://audit.invalid"
+    assert config.get_ldap_bind_password() == "local-test-only"
+
+
+def test_ldap_test_reads_draft_and_keeps_active_settings(db, monkeypatch):
+    observed = []
+    class Connection:
+        entries = []
+        result = {"result": 32}
+        def search(self, base, *args, **kwargs):
+            observed.append((config.get_ldap_url(), config.get_ldap_bind_dn(), config.get_ldap_bind_password(), base))
+            return False
+        def unbind(self):
+            pass
+    monkeypatch.setattr(ldap_auth, "_service_connection", lambda: (Connection(), None))
+    before = config.ENV_PATH.read_bytes()
+    settings = ldap_payload(base_dn="OU=Missing,DC=example,DC=com")
+    client = TestClient(main.app)
+    response = client.post("/api/settings/ldap/test", json={"settings": settings})
+    assert response.status_code == 400 and "База поиска" in response.json()["detail"]
+    assert observed == [(settings["url"], settings["bind_dn"], settings["bind_password"], settings["base_dn"])]
+    assert config.get_ldap_url() == "ldaps://audit.invalid" and config.ENV_PATH.read_bytes() == before
+
+
+def test_ldap_same_target_normalized_password_and_anonymous_switch(db):
+    same = ldap_payload(url="ldaps://AUDIT.invalid:636", bind_password="", base_dn="OU=One,DC=com")
+    assert config.resolve_ldap_settings(**same)["LDAP_BIND_PASSWORD"] == "local-test-only"
+    config.set_ldap(**{**same, "url": "ldaps://other.invalid", "bind_dn": ""})
+    assert config.get_ldap_bind_password() == ""
+
+
+@pytest.mark.parametrize("change", [
+    {"host": "new.invalid"}, {"port": 2525}, {"user": "next"}, {"starttls": False},
+])
+def test_smtp_saved_password_is_bound_to_target(db, monkeypatch, change):
+    original = {"host":"smtp.invalid", "port":587, "from_addr":"bot@example.com",
+                "user":"mailer", "password":"smtp-test", "starttls":True}
+    for field in ("HOST","PORT","USER","PASSWORD","FROM","STARTTLS"):
+        monkeypatch.setattr(config, "SMTP_"+field, getattr(config, "SMTP_"+field))
+        monkeypatch.delenv("SMTP_"+field, raising=False)
+    config.set_smtp(**original)
+    before = config.ENV_PATH.read_bytes()
+    response = TestClient(main.app).post("/api/settings/smtp", json={**original, **change, "password": ""})
+    assert response.status_code == 400 and "пароль" in response.json()["detail"]
+    assert config.ENV_PATH.read_bytes() == before
+    config.set_smtp(**{**original, "password":"", "from_addr":"new@example.com"})
+    assert config.get_smtp_password() == "smtp-test"
+    config.set_smtp(**{**original, **change, "password":"new-test"})
+    assert config.get_smtp_password() == "new-test"
+    config.set_smtp(**{**original, "user":"", "password":""})
+    assert config.get_smtp_password() == ""
+
+
+def test_legacy_roster_migration_and_metadata_reads(db, monkeypatch):
+    people = [{"name":"Test Person", "email":"person@example.com"}]
+    store.set_app_setting("corporate_context", {"people":people, "revision":7, "sync_ad":False,
+                          "directory_signature":cc.directory_signature(), "synced_at":"2026-01-01"})
+    store.init_db()
+    store.init_db()
+    assert cc._read()["people"] == people
+    assert cc._metadata()["revision"] == 7 and "people" not in cc._metadata()
+    assert cc.search_people("Test")[0] == people
+    original = store.get_app_setting
+    def small_setting(key, **kwargs):
+        assert key != "directory_people"
+        return original(key, **kwargs)
+    monkeypatch.setattr(store, "get_app_setting", small_setting)
+    assert cc.snapshot(overview=True)["people_count"] == 1
+    assert cc.snapshot()["people_count"] == 1
+    # WAL readers can perform the idle check while an unrelated writer is active.
+    with store.connect() as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        assert cc._claim_sync(True) is None

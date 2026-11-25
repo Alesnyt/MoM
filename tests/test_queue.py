@@ -183,3 +183,61 @@ def test_cancel_job_does_not_cancel_background_thread(db: Path) -> None:
         assert control.is_stopped("inflight")
     finally:
         control.release("inflight")
+
+
+@pytest.mark.parametrize("restart,expected", [(True, "queued"), (False, "error")])
+def test_crash_after_accepted_control_request(db, monkeypatch, restart, expected):
+    from backend import control, keys, main
+    owner = _user()
+    store.create_meeting("command", "Запись", "test.wav", owner)
+    store.claim_next_meeting(1)
+    monkeypatch.setattr(keys, "snapshot", lambda: {"asr_ready": True, "connected": False})
+    main._halt_processing("command", {"user_id": owner}, restart=restart)
+    control.release("command")  # A process restart loses the signal in RAM.
+    store.requeue_interrupted_meetings()
+    assert store.get_meeting("command")["status"] == expected
+    with store.connect() as conn:
+        assert not conn.execute("SELECT 1 FROM processing_requests").fetchone()
+    assert store.requeue_interrupted_meetings() == 0
+
+
+def test_rejected_stop_does_not_stop_worker(db, monkeypatch):
+    from backend import main, control
+    owner = _user()
+    store.create_meeting("rollback", "test", "test.wav", owner)
+    store.claim_next_meeting(1)
+    def fail(*args, **kwargs):
+        raise OSError("database temporarily unavailable")
+    monkeypatch.setattr(store, "update_meeting", fail)
+    with pytest.raises(OSError):
+        main._halt_processing("rollback", {"user_id": owner}, restart=False)
+    assert not control.is_stopped("rollback")
+    assert control.finish("rollback") == ""
+    with store.connect() as conn:
+        assert not conn.execute("SELECT 1 FROM processing_requests").fetchone()
+
+
+def test_publication_observes_committed_stop_before_memory_signal(db):
+    from backend import control, pipeline, protocol_publication
+    owner = _user()
+    store.create_meeting("inflight", "test", "test.wav", owner)
+    store.claim_next_meeting(1)
+    with store.connect() as conn:
+        conn.execute("INSERT INTO processing_requests VALUES('inflight','stop',1)")
+    with pytest.raises(control.ProcessingStopped):
+        protocol_publication.complete_protocol({"id": "inflight", "user_id": owner}, result={"summary":"Late"})
+    with pytest.raises(control.ProcessingStopped):
+        pipeline._publish_transcript("inflight", transcript="Late", status="review")
+
+
+def test_stale_stop_does_not_affect_a_later_attempt(db):
+    from backend import control
+    owner = _user()
+    store.create_meeting("new-attempt", "test", "test.wav", owner)
+    store.claim_next_meeting(1)
+    with store.connect() as conn:
+        conn.execute("INSERT INTO processing_requests VALUES('new-attempt','stop',0)")
+        assert not control.pending(conn, "new-attempt")
+    assert store.requeue_interrupted_meetings() == 1
+    assert store.claim_next_meeting(1) == "new-attempt"
+    assert store.get_meeting("new-attempt")["processing_attempt"] == 2

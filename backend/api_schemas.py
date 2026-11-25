@@ -118,6 +118,7 @@ class DirectoryScopeIn(BaseModel):
 
 class LdapTestIn(BaseModel):
     username: str = ""
+    settings: LdapIn | None = None
 
 
 class SpeakerNameIn(BaseModel):

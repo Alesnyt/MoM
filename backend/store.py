@@ -26,6 +26,10 @@ STATUSES = (
 )
 
 
+class CredentialsChanged(ValueError):
+    """The account changed during authentication or an administrative edit."""
+
+
 class MeetingOwnerMissing(ValueError):
     """The profile disappeared while a recording or transcript was uploaded."""
 
@@ -76,6 +80,8 @@ def init_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
         if "progress" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
+        if "processing_attempt" not in columns:
+            conn.execute("ALTER TABLE meetings ADD COLUMN processing_attempt INTEGER NOT NULL DEFAULT 0")
         if "user_id" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN user_id TEXT")
         if "queued_at" not in columns:
@@ -85,6 +91,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE meetings ADD COLUMN calendar_json TEXT")
         if "segments_json" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN segments_json TEXT")
+        if "body_version" not in columns:
+            conn.execute("ALTER TABLE meetings ADD COLUMN body_version INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_queue ON meetings(status, queued_at)")
         conn.execute(
             """
@@ -108,6 +116,21 @@ def init_db() -> None:
             last_error TEXT NOT NULL DEFAULT ''
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_recording_cleanup_due ON recording_cleanup(due_at)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS processing_requests (
+            meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+            action TEXT NOT NULL CHECK(action IN ('stop', 'restart')),
+            attempt INTEGER NOT NULL
+        )""")
+        if "attempt" not in {row[1] for row in conn.execute("PRAGMA table_info(processing_requests)")}:
+            conn.execute("ALTER TABLE processing_requests ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
+            conn.execute("""UPDATE processing_requests SET attempt=coalesce(
+                (SELECT processing_attempt FROM meetings WHERE id=processing_requests.meeting_id),0)""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS asr_checkpoints (
+            meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+            part INTEGER NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
+            PRIMARY KEY(meeting_id, part)
+        )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS protocol_mail (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
@@ -134,6 +157,8 @@ def init_db() -> None:
             PRIMARY KEY(meeting_id, request_id)
         )""")
         user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "auth_version" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0")
         if "auth_mode" not in user_columns:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'local'"
@@ -181,6 +206,8 @@ def init_db() -> None:
             payload TEXT NOT NULL
         )""")
 
+        from .corporate_context import migrate_roster
+        migrate_roster(conn)
         from .glossary import init_schema
         init_schema(conn)
         from .term_discovery import init_schema as init_discovery, regroup_existing
@@ -188,8 +215,8 @@ def init_db() -> None:
 
     regroup_existing()
 
-def get_app_setting(key: str) -> dict | None:
-    with connect() as conn:
+def get_app_setting(key: str, *, connection: sqlite3.Connection | None = None) -> Any:
+    with (connect() if connection is None else nullcontext(connection)) as conn:
         row = conn.execute("SELECT payload FROM app_settings WHERE key = ?", (key,)).fetchone()
     return json.loads(row["payload"]) if row else None
 
@@ -239,6 +266,7 @@ def create_meeting(meeting_id: str, title: str, filename: str, user_id: str, *, 
                 json.dumps(calendar_context, ensure_ascii=False) if calendar_context else None,
             ),
         )
+        conn.execute("DELETE FROM recording_cleanup WHERE meeting_id = ?", (meeting_id,))
     refresh_queue_messages()
     meeting = get_meeting(meeting_id)
     if not meeting:
@@ -307,6 +335,8 @@ def update_meeting(meeting_id: str, *, connection: sqlite3.Connection | None = N
             raise ValueError(f"Unknown field: {key}")
         sets.append(f"{key} = ?")
         values.append(value)
+    if fields.keys() & {"transcript", "result", "result_json", "transcript_segments", "segments_json"}:
+        sets.append("body_version = body_version + 1")
     values.append(meeting_id)
     with (connect() if connection is None else nullcontext(connection)) as conn:
         conn.execute(f"UPDATE meetings SET {', '.join(sets)} WHERE id = ?", values)
@@ -376,7 +406,7 @@ def queue_review_protocol(meeting_id: str, *, connection: sqlite3.Connection | N
     with (connect() if connection is None else nullcontext(connection)) as conn:
         cursor = conn.execute(
             """UPDATE meetings SET status='queued', status_message='Собираю протокол',
-               error=NULL, result_json=NULL, progress=88, queued_at=?
+               error=NULL, result_json=NULL, body_version=body_version+1, progress=88, queued_at=?
                WHERE id=? AND status='review'""",
             (utc_now(), meeting_id),
         )
@@ -389,7 +419,7 @@ _MAIL_PENDING = """CASE WHEN meetings.status = 'done' THEN EXISTS(SELECT 1 FROM 
 
 _LIST_COLUMNS = f"""
     id, title, filename, status, status_message, created_at,
-    duration_seconds, language, error, progress, queued_at, user_id,
+    duration_seconds, language, error, progress, queued_at, user_id, body_version,
     NULL AS transcript, NULL AS result_json, {_MAIL_PENDING}
 """
 
@@ -607,6 +637,7 @@ def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> s
             """
             UPDATE meetings
             SET status = 'extracting',
+                processing_attempt = processing_attempt + 1,
                 status_message = 'Начинаю обработку',
                 progress = 1,
                 error = NULL
@@ -617,6 +648,7 @@ def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> s
         if cursor.rowcount != 1:
             conn.execute("COMMIT")
             return None
+        conn.execute("DELETE FROM processing_requests WHERE meeting_id=?", (chosen,))
         conn.execute("COMMIT")
         record_timing("queue_wait", _seconds_since(selected["entered"]))
         return chosen
@@ -631,8 +663,44 @@ def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> s
         restrict_path(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
 
 
+def processing_request(conn, meeting_id: str) -> str | None:
+    row = conn.execute("""SELECT action FROM processing_requests JOIN meetings
+                          ON meetings.id=meeting_id AND processing_attempt=attempt
+                          WHERE meeting_id=?""", (meeting_id,)).fetchone()
+    return row[0] if row else None
+
+
+def apply_processing_request(conn, meeting: dict, action: str) -> None:
+    meeting_id = meeting["id"]
+    if action == "restart":
+        conn.execute("DELETE FROM asr_checkpoints WHERE meeting_id=?", (meeting_id,))
+        queue_reprocessing(meeting, connection=conn)
+    else:
+        finish_processing_error(meeting_id, connection=conn, status_message="Остановлено",
+                                error="Обработка остановлена", progress=0)
+    conn.execute("DELETE FROM processing_requests WHERE meeting_id=?", (meeting_id,))
+
+
+def asr_checkpoint(meeting_id: str, fingerprint: str, part: int) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT payload FROM asr_checkpoints WHERE meeting_id=? AND fingerprint=? AND part=?",
+                           (meeting_id, fingerprint, part)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def save_asr_checkpoint(meeting_id: str, fingerprint: str, part: int, result: dict) -> None:
+    with connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO asr_checkpoints(meeting_id, fingerprint, part, payload) VALUES (?,?,?,?)",
+                     (meeting_id, fingerprint, part, json.dumps(result, ensure_ascii=False)))
+
+
 def requeue_interrupted_meetings() -> int:
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        requests = conn.execute("""SELECT meetings.*, action FROM processing_requests JOIN meetings
+                                   ON meetings.id=meeting_id AND processing_attempt=attempt""").fetchall()
+        for row in requests:
+            apply_processing_request(conn, _serialize(row), row["action"])
         cursor = conn.execute(
             """
             UPDATE meetings
@@ -643,7 +711,7 @@ def requeue_interrupted_meetings() -> int:
             WHERE status IN ('extracting', 'transcribing', 'analyzing')
             """
         )
-        count = cursor.rowcount
+        count = cursor.rowcount + len(requests)
     refresh_queue_messages()
     return count
 
@@ -872,11 +940,12 @@ def get_user_auth(email: str) -> dict[str, Any] | None:
         "id": row["id"],
         "email": row["email"],
         "password_hash": row["password_hash"],
+        "auth_version": row["auth_version"],
         "auth_mode": (row["auth_mode"] if "auth_mode" in row.keys() else None) or "local",
     }
 
 
-def update_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
+def update_user(user_id: str, *, expected_mode: str | None = None, **fields: Any) -> dict[str, Any] | None:
     allowed = {"password_hash", "archive_limit", "auth_mode"}
     sets = []
     values: list[Any] = []
@@ -891,8 +960,17 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any] | None:
         values.append(value)
     if not sets:
         return get_user(user_id)
-    values.append(user_id)
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute("SELECT auth_mode FROM users WHERE id=?", (user_id,)).fetchone()
+        if not current:
+            return None
+        if expected_mode is not None and current["auth_mode"] != expected_mode:
+            raise CredentialsChanged("Способ входа изменился. Обновите список пользователей.")
+        if "password_hash" in fields or fields.get("auth_mode", current["auth_mode"]) != current["auth_mode"]:
+            sets.append("auth_version = auth_version + 1")
+            conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        values.append(user_id)
         conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", values)
     return get_user(user_id)
 
@@ -918,6 +996,17 @@ def put_session(
             """,
             (session_id(token), kind, username, user_id, email, expires),
         )
+
+
+def issue_user_session(token: str, user_id: str, email: str, auth_version: int, expires: float) -> None:
+    with connect() as conn:
+        created = conn.execute(
+            """INSERT INTO sessions(token,kind,user_id,email,expires)
+               SELECT ?, 'user', id, email, ? FROM users WHERE id=? AND email=? AND auth_version=?""",
+            (session_id(token), expires, user_id, email, auth_version),
+        )
+        if not created.rowcount:
+            raise CredentialsChanged("Учётные данные изменились. Войдите заново.")
 
 
 def get_session_row(token: str) -> dict[str, Any] | None:

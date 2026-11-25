@@ -195,3 +195,11 @@ def test_rename_preserves_protocol_metadata_and_literal_replacement():
         assert updated['extra_metadata'] == {'value': old}
         assert updated['mom']['agenda'] == [{'topic': new, 'discussion': new, 'outcome': new}]
         assert original['action_items'][0]['assignee'] == old
+
+
+def test_overlapping_speakers_share_one_recognition_interval_per_sample():
+    turns = [{"speaker": "A", "start": 0, "end": 8}, {"speaker": "B", "start": 5, "end": 8},
+             {"speaker": "C", "start": 7, "end": 11}]
+    spans = speaker_spans(turns)
+    assert spans == [{"start": 0, "end": 8}, {"start": 8, "end": 11}]
+    assert turns[1]["start"] == 5  # speaker attribution retains the original map

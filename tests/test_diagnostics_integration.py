@@ -93,7 +93,8 @@ def test_audio_then_protocol_persist_separate_private_runs(installation, monkeyp
     store.update_meeting(meeting_id, status="analyzing")
     asyncio.run(pipeline.process_meeting(meeting_id))
     assert store.get_meeting(meeting_id)["status"] == "done"
-    assert client.close.await_count == 2
+    # Local recognition does not construct an LLM client.
+    assert client.close.await_count == 1
     assert not diagnostics._active
     assert diagnostics.initialize()  # final records remain durable after restart initialization
     report = diagnostics.export_report()

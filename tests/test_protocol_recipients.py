@@ -573,3 +573,19 @@ def test_formatted_summary_roundtrip_with_nested_lists_and_group_delivery(delive
         num_ids = [p._p.xpath("w:pPr/w:numPr/w:numId")[0].get(qn("w:val")) for p in listed]
         assert num_ids[-1] == num_ids[-2] and num_ids[-1] != num_ids[5]
         assert any(p.text == "Последняя строка документа." for p in paragraphs)
+
+
+@pytest.mark.parametrize("state", ["pending", "sending"])
+def test_delete_waits_for_confirmed_mail(delivery, state):
+    client, meeting, _ = delivery
+    mid = meeting["id"]
+    mail.complete_protocol(meeting, result={"summary": "Готово"})
+    assert confirm(client, mid, ["reader@example.com"]).is_success
+    with store.connect() as conn:
+        conn.execute("UPDATE protocol_mail SET state=? WHERE meeting_id=?", (state, mid))
+    response = client.delete(f"/api/meetings/{mid}")
+    assert response.status_code == 409
+    with store.connect() as conn:
+        assert conn.execute("SELECT state FROM protocol_mail WHERE meeting_id=?", (mid,)).fetchone()[0] == state
+        conn.execute("UPDATE protocol_mail SET state='sent' WHERE meeting_id=?", (mid,))
+    assert client.delete(f"/api/meetings/{mid}").is_success

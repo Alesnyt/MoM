@@ -144,7 +144,7 @@ async def _run_job(meeting_id: str) -> None:
                 await asyncio.sleep(delay)
                 delay = min(background.MAX_RETRY_SECONDS, delay * 2)
     finally:
-        control.release(meeting_id)
+        await background.run_sync(control.release, meeting_id)
         notify_work()
 
 
@@ -172,8 +172,7 @@ async def _run_job_scoped(meeting_id: str) -> None:
                 error="Внутренняя ошибка очереди",
             )
     finally:
-        if control.is_stopped(meeting_id):
-            await background.run_sync(control.finish, meeting_id)
+        await background.run_sync(control.finish, meeting_id)
         meeting = await background.run_sync(store.get_meeting, meeting_id)
         if meeting and (meeting["status"] == "error" or (meeting["status"] == "done" and meeting.get("error"))):
             if meeting["status_message"] != "Остановлено":

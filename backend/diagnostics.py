@@ -455,6 +455,17 @@ def record_stage(stage: str, seconds: float, outcome: str = "ok") -> None:
         pass
 
 
+def record_remote_part(*, reused: bool, pcm_bytes: int) -> None:
+    run = _current.get()
+    if run is None:
+        return
+    key = "asr_parts_reused" if reused else "asr_parts_submitted"
+    with run.lock:
+        if not run.finished:
+            run.data[key] = run.data.get(key, 0) + 1
+            run.data["peak_asr_pcm_bytes"] = max(run.data.get("peak_asr_pcm_bytes", 0), pcm_bytes)
+
+
 def record_llm(phase: str, metrics: dict) -> None:
     run = _current.get()
     if run is None or phase not in LLM_PHASES:
@@ -623,7 +634,8 @@ def _safe_environment(raw: Any) -> dict:
 def _safe_data(raw: dict) -> dict:
     """Apply the allowlist again when reading: even injected DB text cannot leak."""
     result = _numbers(raw, frozenset({"elapsed_seconds", "audio_seconds", "queue_wait_seconds", "size_bytes", "resource_sample_count",
-                                    "peak_process_rss_bytes", "peak_process_cpu_percent", "min_host_available_memory_bytes"}))
+                                    "peak_process_rss_bytes", "peak_process_cpu_percent", "min_host_available_memory_bytes",
+                                    "asr_parts_reused", "asr_parts_submitted", "peak_asr_pcm_bytes"}))
     result.update(phase=_enum(raw.get("phase"), PHASES, "audio"), status=_enum(raw.get("status"), STATUSES),
                   elapsed_is_partial=raw.get("elapsed_is_partial") is True,
                   settings=_safe_settings(raw.get("settings")), environment=_safe_environment(raw.get("environment")))
@@ -648,7 +660,8 @@ def _safe_data(raw: dict) -> dict:
     result["resources"] = [_numbers(item, RESOURCE_NUMBERS) for item in raw.get("resources", [])[:MAX_SAMPLES]] if isinstance(raw.get("resources"), list) else []
     result["dropped"] = _numbers(raw.get("dropped"), frozenset({"events", "llm", "resources"}))
     audio = result.get("audio_seconds")
-    asr = result["stages"].get("asr", {}).get("seconds")
+    recognition = result["stages"].get("asr") or result["stages"].get("asr_cloud") or {}
+    asr = recognition.get("seconds")
     ratio = _number(asr / audio) if audio and asr is not None else None
     result["asr_rtf"] = round(ratio, 6) if ratio is not None else None
     result["model_loads"] = {name: result["stages"].get(name, {}).get("count", 0)

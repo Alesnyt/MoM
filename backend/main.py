@@ -252,6 +252,7 @@ def _health(*, full: bool = False) -> dict:
 async def lifespan(_app: FastAPI):
     ensure_dirs()
     store.init_db()
+    await run_in_threadpool(retention.reconcile_legacy_uploads, ALLOWED_SUFFIXES)
     await run_in_threadpool(diagnostics.initialize)
     store.requeue_interrupted_meetings()
     config.migrate_token_plan_asr()
@@ -404,7 +405,13 @@ def user_login(payload: UserLoginIn, request: Request, response: Response) -> di
     if not record:
         store.record_audit(email or "пользователь", "user.login.fail", email, "неверный email или пароль")
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
-    token = auth.create_user_session(record["id"], record["email"])
+    try:
+        token = auth.create_user_session(record["id"], record["email"], record["auth_version"])
+    except store.CredentialsChanged as exc:
+        raise HTTPException(401, str(exc)) from exc
+    user = store.get_user(record["id"])
+    if user is None:
+        raise HTTPException(401, "Профиль удалён. Войдите заново.")
     store.record_audit(record["email"], "user.login", record["email"], "вход в профиль")
     response.set_cookie(auth.USER_COOKIE, token, **_cookie_kw(request))
     # Only a successful LDAP login may hand its password to this session's
@@ -413,7 +420,6 @@ def user_login(payload: UserLoginIn, request: Request, response: Response) -> di
         calendar_service.start_ldap(token, record, payload.password)
     except Exception:
         log.warning("Автоподключение календаря не запущено; вход в MoM выполнен")
-    user = store.get_user(record["id"])
     return {
         "authenticated": True,
         "id": user["id"],
@@ -513,31 +519,28 @@ def admin_update_user(
     actor = _actor_name(_admin)
     if payload.archive_limit is not None:
         fields["archive_limit"] = payload.archive_limit
-        if payload.archive_limit != current.get("archive_limit"):
-            store.record_audit(
-                actor,
-                "user.limit",
-                current["email"],
-                f"архив {current.get('archive_limit')} → {payload.archive_limit}",
-            )
     if payload.auth_mode is not None:
         mode = _normalize_auth_mode(payload.auth_mode)
-        fields["auth_mode"] = mode
-        if mode == "ldap":
-            fields["password_hash"] = auth.ldap_password_placeholder()
-        elif current.get("auth_mode") != "local":
-            generated = auth.generate_password()
-            fields["password_hash"] = auth.hash_password(generated)
-        if mode != current.get("auth_mode"):
-            auth.drop_user_sessions_for(user_id)
-            store.record_audit(
-                actor,
-                "user.auth",
-                current["email"],
-                f"{current.get('auth_mode') or 'local'} → {mode}",
-            )
+        if mode != current["auth_mode"]:
+            fields["auth_mode"] = mode
+            if mode == "ldap":
+                fields["password_hash"] = auth.ldap_password_placeholder()
+            else:
+                generated = auth.generate_password()
+                fields["password_hash"] = auth.hash_password(generated)
     if fields:
-        store.update_user(user_id, **fields)
+        try:
+            updated = store.update_user(user_id, expected_mode=current["auth_mode"], **fields)
+        except store.CredentialsChanged as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if updated is None:
+            raise HTTPException(404, "Пользователь не найден")
+        if "auth_mode" in fields:
+            store.record_audit(actor, "user.auth", current["email"],
+                               f"{current['auth_mode']} → {fields['auth_mode']}")
+        if "archive_limit" in fields and fields["archive_limit"] != current["archive_limit"]:
+            store.record_audit(actor, "user.limit", current["email"],
+                               f"архив {current['archive_limit']} → {fields['archive_limit']}")
     if payload.archive_limit is not None:
         retention.trim_archive(user_id, actor)
     user = store.get_user(user_id)
@@ -554,8 +557,12 @@ def admin_reset_password(user_id: str, _admin: dict = Depends(require_admin)) ->
     if user.get("auth_mode") == "ldap":
         raise HTTPException(status_code=409, detail="Пароль этого пользователя хранится в каталоге")
     password = auth.generate_password()
-    store.update_user(user_id, password_hash=auth.hash_password(password))
-    auth.drop_user_sessions_for(user_id)
+    try:
+        updated = store.update_user(user_id, expected_mode="local", password_hash=auth.hash_password(password))
+    except store.CredentialsChanged as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if updated is None:
+        raise HTTPException(404, "Пользователь не найден")
     store.record_audit(_actor_name(_admin), "user.password", user["email"], "выдан новый локальный пароль")
     return {"password": password}
 
@@ -759,15 +766,10 @@ def save_theme(payload: ThemeIn, _admin: dict = Depends(require_admin)) -> dict:
 
 @app.post("/api/settings/smtp")
 def save_smtp(payload: SmtpIn, _admin: dict = Depends(require_admin)) -> dict:
-    config.set_smtp(
-        host=payload.host,
-        port=payload.port,
-        user=payload.user,
-        password=payload.password,
-        from_addr=payload.from_addr,
-        starttls=payload.starttls,
-        public_url=payload.public_url,
-    )
+    try:
+        config.set_smtp(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     host = payload.host.strip()
     sender = payload.from_addr.strip()
     store.record_audit(
@@ -789,6 +791,8 @@ def save_ldap(payload: LdapIn, _admin: dict = Depends(require_admin)) -> dict:
             user_filter=payload.user_filter, starttls=payload.starttls,
             tls_verify=payload.tls_verify, email_attr=payload.email_attr,
         )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except OSError as exc:
         log.exception("Не удалось сохранить настройки AD")
         raise HTTPException(status_code=503, detail="Не удалось записать настройки AD. "
@@ -830,7 +834,14 @@ def directory_structure(base_dn: str = Query(default="", max_length=2000),
 @app.post("/api/settings/ldap/test")
 def test_ldap(payload: LdapTestIn, _admin: dict = Depends(require_admin)) -> dict:
     try:
-        return ldap_auth.test_connection(payload.username)
+        if payload.settings is None:
+            return ldap_auth.test_connection(payload.username)
+        _check_ldap_settings(payload.settings.model_copy(update={"enabled": True}))
+        options = config.resolve_ldap_settings(**payload.settings.model_dump())
+        with config.ldap_settings_scope(options):
+            return ldap_auth.test_connection(payload.username, check_base=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except ldap_auth.LdapError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -949,6 +960,7 @@ async def create_meeting(
     user: dict = Depends(require_user),
 ) -> dict:
     # Dependencies run before any multipart parsing or temporary file creation.
+    _require_model_ready(protocol=False)
     received_at = time.perf_counter()
     async with upload.audio_form(request, _disk_or_507) as form:
         received_seconds = time.perf_counter() - received_at
@@ -978,16 +990,18 @@ def _calendar_selection(request: Request, user: dict, event_id) -> dict | None:
         raise HTTPException(exc.status,str(exc)) from exc
 
 
+def _require_model_ready(*, protocol: bool) -> None:
+    status = keys.snapshot()
+    if protocol and not status["connected"]:
+        raise HTTPException(400, status.get("message") or "Проверьте подключение модели протокола.")
+    if not protocol and not status.get("asr_ready", status["connected"]):
+        raise HTTPException(400, "Проверьте подключение модели распознавания в разделе «Расшифровка».")
+
+
 def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: str | None, user: dict,
                                 *, calendar_context: dict | None = None) -> dict:
     if not ffmpeg_available():
         raise HTTPException(status_code=500, detail="Установите ffmpeg и ffprobe")
-    if not keys.snapshot()["connected"]:
-        status = keys.snapshot()
-        raise HTTPException(
-            status_code=400,
-            detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-        )
 
     original = file.filename or "recording.webm"
     suffix = Path(original).suffix.lower() or ".webm"
@@ -997,9 +1011,9 @@ def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: st
             detail="Нужен файл записи: webm, mkv, mp4, mp3, wav, m4a или ogg",
         )
 
-    try:
-        meeting_id = uuid.uuid4().hex
-        dest = UPLOAD_DIR / f"{meeting_id}{suffix}"
+    meeting_id = uuid.uuid4().hex
+    with retention.incoming_recording(meeting_id):
+        staged = UPLOAD_DIR / f"{meeting_id}.uploading"
         size = 0
         limit = config.MAX_UPLOAD_BYTES
         declared = 0
@@ -1008,7 +1022,7 @@ def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: st
             declared = int(raw_length)
         _disk_or_507(declared)
         try:
-            with dest.open("wb") as out:
+            with staged.open("xb") as out:
                 while True:
                     chunk = file.file.read(1024 * 1024)
                     if not chunk:
@@ -1022,34 +1036,26 @@ def _create_audio_meeting(request: Request, file: StarletteUploadFile, title: st
                     if size % (8 * 1024 * 1024) < len(chunk):
                         _disk_or_507()
                     out.write(chunk)
-        except HTTPException:
-            dest.unlink(missing_ok=True)
-            raise
         except OSError as exc:
-            dest.unlink(missing_ok=True)
             if exc.errno == errno.ENOSPC:
                 raise HTTPException(status_code=507, detail="Диск заполнился во время загрузки") from exc
             raise
         if size == 0:
-            dest.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail="Пустой файл")
-        if not looks_like_audio(dest):
-            dest.unlink(missing_ok=True)
+        if not looks_like_audio(staged):
             raise HTTPException(
                 status_code=400,
                 detail="Файл не похож на запись (webm, mkv, mp4, mp3, wav, m4a или ogg)",
             )
 
+        staged.replace(UPLOAD_DIR / f"{meeting_id}{suffix}")
         display_title = (title or "").strip() or (calendar_context or {}).get("title") or Path(original).stem
         try:
             meeting = store.create_meeting(meeting_id, display_title, original, user["user_id"], calendar_context=calendar_context)
         except store.MeetingOwnerMissing as exc:
-            retention.discard_upload(meeting_id)
             raise HTTPException(401, "Профиль удалён во время загрузки. Войдите заново.") from exc
         worker.notify_work()
         return meeting
-    finally:
-        disk.invalidate_recordings()
 
 
 @app.post("/api/meetings/{meeting_id}/retry")
@@ -1069,12 +1075,8 @@ def retry_meeting(
                 raise HTTPException(409, "Откройте актуальную версию протокола и подтвердите замену ручных правок.")
             if not (meeting.get("transcript") or "").strip():
                 raise HTTPException(409, "Для пересборки протокола нужна сохранённая расшифровка.")
-        if not keys.snapshot()["connected"]:
-            status = keys.snapshot()
-            raise HTTPException(
-                status_code=400,
-                detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-            )
+        resume = store.is_manual_protocol(meeting.get("result")) or meeting.get("source_type") == "text" or meeting["status"] == "error"
+        _require_model_ready(protocol=bool(resume and meeting.get("transcript")))
         _check_mail_queue(connection, meeting_id)
         store.queue_reprocessing(meeting, connection=connection,
                                  resume_transcript=meeting["status"] == "error")
@@ -1137,12 +1139,7 @@ def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dic
             raise HTTPException(status_code=409, detail="Протокол собирается после готовой расшифровки")
         if not (meeting.get("transcript") or "").strip():
             raise HTTPException(status_code=409, detail="Нет расшифровки")
-        if not keys.snapshot()["connected"]:
-            status = keys.snapshot()
-            raise HTTPException(
-                status_code=400,
-                detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-            )
+        _require_model_ready(protocol=True)
         if payload and payload.recipients:
             raise HTTPException(400, "Выберите получателей в готовом протоколе и подтвердите отправку.")
         if not store.queue_review_protocol(meeting_id, connection=connection):
@@ -1155,32 +1152,29 @@ def start_protocol(meeting_id: str, payload: ProtocolIn | None = None, user: dic
 def _halt_processing(meeting_id: str, user: dict, *, restart: bool) -> dict:
     from . import control
 
-    with store.edit_meeting(meeting_id) as (connection, row):
-        meeting = _owned(row, user)
-        if meeting["status"] not in store.ACTIVE_STATUSES:
-            raise HTTPException(status_code=409, detail="Эта встреча сейчас не обрабатывается")
-        if restart and not keys.snapshot()["connected"]:
-            status = keys.snapshot()
-            raise HTTPException(
-                status_code=400,
-                detail=status["message"] or "Сначала подключите ключ в разделе «Администрирование»",
-            )
-        if meeting["status"] == "queued":
-            # No worker can claim this row until the transition commits. Applying
-            # queued requests here avoids cancellation flags leaking into a new job.
+    with control.command_lock:
+        with store.edit_meeting(meeting_id) as (connection, row):
+            meeting = _owned(row, user)
+            if meeting["status"] not in store.ACTIVE_STATUSES:
+                raise HTTPException(status_code=409, detail="Эта встреча сейчас не обрабатывается")
             if restart:
-                store.queue_reprocessing(meeting, connection=connection)
+                _require_model_ready(protocol=bool(meeting.get("transcript") and
+                    (store.is_manual_protocol(meeting.get("result")) or meeting.get("source_type") == "text")))
+            if meeting["status"] == "queued":
+                # No worker can claim this row until the transition commits. Applying
+                # queued requests here avoids cancellation flags leaking into a new job.
+                store.apply_processing_request(connection, meeting, "restart" if restart else "stop")
             else:
-                store.finish_processing_error(meeting_id, connection=connection, status_message="Остановлено",
-                                              error="Обработка остановлена", progress=0)
-        else:
-            # A claimed job may not yet have reached control.bind_job. Its worker
-            # must acknowledge the stop; finishing here could requeue an owned job.
+                # A claimed job may not yet have reached control.bind_job. Its worker
+                # must acknowledge the stop; finishing here could requeue an owned job.
+                connection.execute("INSERT OR REPLACE INTO processing_requests(meeting_id, action, attempt) VALUES (?,?,?)",
+                                   (meeting_id, "restart" if restart else "stop", meeting["processing_attempt"]))
+                store.update_meeting(
+                    meeting_id, connection=connection,
+                    status_message="Останавливаю, чтобы запустить заново…" if restart else "Останавливаю…",
+                )
+        if meeting["status"] != "queued":
             control.request_stop(meeting_id, restart=restart)
-            store.update_meeting(
-                meeting_id, connection=connection,
-                status_message="Останавливаю, чтобы запустить заново…" if restart else "Останавливаю…",
-            )
     store.refresh_queue_messages()
     worker.notify_work()
     updated = store.get_meeting(meeting_id)
@@ -1213,6 +1207,7 @@ def delete_meeting(meeting_id: str, user: dict = Depends(require_user)) -> dict:
                 status_code=409,
                 detail="Нельзя удалить встречу, пока она в очереди или в обработке",
             )
+        _check_mail_queue(connection, meeting_id)
         if not store.delete_meeting(meeting_id, connection=connection):
             raise HTTPException(status_code=404, detail="Встреча не найдена")
     retention.cleanup_recording(meeting_id)

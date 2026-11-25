@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { apiRequest } from "./http";
+import { ApiError, apiRequest } from "./http";
+import { getMeeting } from "./api";
 import { priorityLabel } from "./format";
 import type { ActionItem, AgendaItem, Meeting, MeetingResult } from "./types";
 
@@ -8,6 +9,8 @@ const SummaryEditor = lazy(() => import("./summary-editor").then(module => ({ de
 type Suggestion = { field: string; before: string; after: string; reason: string };
 type Props = {
   meetingId: string; initial: MeetingResult; revision: string; summaryOnly?: boolean;
+  draft: MeetingResult; setDraft: (next: MeetingResult) => void; conflict: boolean;
+  onCurrentVersion: (meeting: Meeting) => void;
   onSaved: (meeting: Meeting) => void; onCancel: () => void; onDirtyChange?: (dirty: boolean) => void;
 };
 const lists = [
@@ -20,8 +23,8 @@ function replaceAt<T>(values: T[], index: number, updated: T) {
   return values.map((item, i) => i === index ? updated : item);
 }
 
-export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = false, onSaved, onCancel, onDirtyChange }: Props) {
-  const [draft, setDraft] = useState(initial);
+export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = false, draft, setDraft, conflict,
+  onCurrentVersion, onSaved, onCancel, onDirtyChange }: Props) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
@@ -45,7 +48,7 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
   }
 
   async function submit(mode: "check" | "save") {
-    if (request.current) return;
+    if (request.current || conflict) return;
     const controller = new AbortController();
     request.current = controller;
     setBusy(mode);
@@ -68,6 +71,12 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
       }
     } catch (err) {
       if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Не удалось выполнить запрос.");
+      if (err instanceof ApiError && err.status === 409 && !controller.signal.aborted) {
+        try {
+          const current = await getMeeting(meetingId, controller.signal);
+          if (!controller.signal.aborted) onCurrentVersion(current);
+        } catch { /* Keep the draft and the original conflict message. */ }
+      }
     } finally {
       if (request.current === controller) {
         request.current = null;
@@ -117,10 +126,10 @@ export function ProtocolEditor({ meetingId, initial, revision, summaryOnly = fal
     <h2>{summaryOnly ? "Редактирование саммари" : "Редактирование протокола"}</h2>
     {summaryOnly && <fieldset className="editor-body" disabled={busy !== null}>{summaryField}</fieldset>}
     <div className="editor-tools">
-      <button type="submit" className="primary" disabled={!dirty || busy !== null}>
+      <button type="submit" className="primary" disabled={!dirty || busy !== null || conflict}>
         {busy === "save" ? "Сохраняю…" : summaryOnly ? "Сохранить саммари" : "Сохранить протокол"}
       </button>
-      <button type="button" className="ghost" disabled={busy !== null} onClick={() => void submit("check")}>
+      <button type="button" className="ghost" disabled={busy !== null || conflict} onClick={() => void submit("check")}>
         {busy === "check" ? "Проверяю русский язык…" : "Проверить русский язык"}
       </button>
       <button type="button" className="ghost" disabled={busy === "save"} onClick={() => {

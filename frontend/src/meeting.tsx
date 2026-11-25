@@ -10,6 +10,26 @@ import { ProtocolRecipients } from "./recipients";
 import type { Meeting, MeetingResult, MeetingStatus, Tab } from "./types";
 
 type EditMode = "protocol" | "summary";
+export type ProtocolDraft = { mode: EditMode; initial: MeetingResult; revision: string; value: MeetingResult };
+
+// Carry forward only sections actually edited by this user. The server keeps
+// ownership of evidence and other fields that aren't part of the editor.
+function applyDraft(editor: ProtocolDraft, current: MeetingResult): MeetingResult {
+  const changed = (key: keyof MeetingResult) => JSON.stringify(editor.initial[key]) !== JSON.stringify(editor.value[key]);
+  const fields = ["title", "date_hint", "participants", "key_points", "decisions", "action_items"] as const;
+  const result = { ...current, ...Object.fromEntries(fields.filter(changed).map(key => [key, editor.value[key]])) };
+  if (changed("summary") || changed("summary_format")) {
+    result.summary = editor.value.summary;
+    result.summary_format = editor.value.summary_format;
+  }
+  result.mom = {
+    agenda: JSON.stringify(editor.initial.mom.agenda) === JSON.stringify(editor.value.mom.agenda)
+      ? current.mom.agenda : editor.value.mom.agenda,
+    next_meeting: editor.initial.mom.next_meeting === editor.value.mom.next_meeting
+      ? current.mom.next_meeting : editor.value.mom.next_meeting,
+  };
+  return result;
+}
 
 export const STEPS: { id: MeetingStatus; label: string }[] = [
   { id: "extracting", label: "Аудио" },
@@ -30,6 +50,8 @@ export function MeetingPane({
   onDelete,
   onUpdated,
   onEditorDirty,
+  restoredDraft,
+  onDraftChange,
 }: {
   meeting: Meeting;
   tab: Tab;
@@ -43,6 +65,8 @@ export function MeetingPane({
   onDelete: () => void;
   onUpdated: (meeting: Meeting) => void;
   onEditorDirty?: (dirty: boolean) => void;
+  restoredDraft?: ProtocolDraft | null;
+  onDraftChange?: (draft: ProtocolDraft | null) => void;
 }) {
   const processing = meeting.status !== "done" && meeting.status !== "error" && meeting.status !== "review";
   const rawResult = isProtocolResult(meeting.result) ? meeting.result : null;
@@ -53,7 +77,11 @@ export function MeetingPane({
     return role ? `${name} — ${role}` : name;
   }) };
   const wide = meeting.status === "review" || (meeting.status === "done" && (tab === "transcript" || !result));
-  const [editing, setEditing] = useState<{ mode: EditMode; initial: MeetingResult; revision: string } | null>(null);
+  const [editing, setEditor] = useState<ProtocolDraft | null>(restoredDraft ?? null);
+  function setEditing(next: ProtocolDraft | null) {
+    setEditor(next);
+    onDraftChange?.(next);
+  }
   const [mailNote, setMailNote] = useState<string | null>(null);
   const wordContent = useRef<HTMLElement>(null);
   const [downloading, setDownloading] = useState(false);
@@ -63,7 +91,7 @@ export function MeetingPane({
     if (!rawResult || !meeting.result_revision) return;
     setMailNote(null);
     onTab(mode === "summary" ? "overview" : "mom");
-    setEditing({ mode, initial: rawResult, revision: meeting.result_revision });
+    setEditing({ mode, initial: rawResult, revision: meeting.result_revision, value: rawResult });
   }
 
   function openSource(turn: number) {
@@ -217,8 +245,21 @@ export function MeetingPane({
           <TranscriptView meeting={meeting} onUpdated={onUpdated} directoryEnabled={directoryEnabled} />
         </div>
       )}
+      {editing && rawResult && meeting.result_revision && editing.revision !== meeting.result_revision && (
+        <section className="banner" aria-label="Версии протокола">
+          <p>Протокол изменился. Сравните сохранённую версию с вашим черновиком перед записью.</p>
+          <details><summary>Показать сохранённую версию</summary>
+            <Minutes meeting={meeting} result={rawResult} contentRef={null} />
+          </details>
+          <button type="button" className="ghost" onClick={() => {
+            setEditing({ ...editing, initial: rawResult, revision: meeting.result_revision!, value: applyDraft(editing, rawResult) });
+          }}>Перенести мои изменённые разделы в новую версию</button>
+        </section>
+      )}
       {editing &&
-        <ProtocolEditor meetingId={meeting.id} initial={editing.initial} revision={editing.revision} summaryOnly={editing.mode === "summary"}
+        <ProtocolEditor key={editing.revision} meetingId={meeting.id} initial={editing.initial} revision={editing.revision} summaryOnly={editing.mode === "summary"}
+          draft={editing.value} setDraft={value => setEditing({ ...editing, value })} onCurrentVersion={onUpdated}
+          conflict={Boolean(rawResult && meeting.result_revision && editing.revision !== meeting.result_revision)}
           onDirtyChange={onEditorDirty} onCancel={() => setEditing(null)}
           onSaved={next => {
             onUpdated(next);

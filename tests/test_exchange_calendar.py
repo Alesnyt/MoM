@@ -289,7 +289,9 @@ def test_prompt_keeps_invitation_glossary_and_speaker_roles_together(db,monkeypa
 
 def ldap_profile(db,monkeypatch):
     from backend import ldap_auth
-    user=store.update_user(db[0]['id'],auth_mode='ldap')
+    store.update_user(db[0]['id'],auth_mode='ldap')
+    user=store.get_user_auth(db[0]['email'])
+    store.put_session('owner-token','user',user_id=user['id'],email=user['email'],expires=__import__('time').time()+3600)
     monkeypatch.setattr(ldap_auth,'calendar_identity',lambda email:{'username':'owner@ad.example.com','mailbox':'primary@example.com'})
     return user
 
@@ -391,6 +393,8 @@ def test_auto_connect_skips_local_users_disabled_integration_and_bounds_concurre
 def test_two_ldap_users_receive_only_their_own_calendars(db,monkeypatch):
     from backend import ldap_auth
     users=[store.update_user(user['id'],auth_mode='ldap') for user in db]
+    for token,user in zip(['owner-token','other-token'],users):
+        store.put_session(token,'user',user_id=user['id'],email=user['email'],expires=__import__('time').time()+3600)
     monkeypatch.setattr(ldap_auth,'calendar_identity',lambda email:{'username':email,'mailbox':email})
     original=FakeClient.events
     def own(self,*args):

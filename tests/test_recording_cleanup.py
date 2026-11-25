@@ -337,3 +337,50 @@ def test_cleanup_service_processes_pending_work_after_start(db, monkeypatch):
     monkeypatch.setattr(retention.background, "pause", pause_then_stop)
     asyncio.run(retention.run_file_cleanup(asyncio.Event()))
     assert cleanup_row() is None
+
+
+def test_failed_meeting_insert_never_leaves_untracked_audio(db, monkeypatch):
+    _, user = db
+
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated database failure")
+
+    monkeypatch.setattr(store, "create_meeting", unavailable)
+    with pytest.raises(sqlite3.OperationalError, match="simulated"):
+        authorized_client(user).post("/api/meetings", files={"file": ("new.wav", b"recording", "audio/wav")})
+    assert list(config.UPLOAD_DIR.iterdir()) == []
+    assert store.pending_recording_cleanup() == []
+
+
+def test_upload_cleanup_ticket_survives_crash_and_protects_active_files(db):
+    _, user = db
+    mid = "new-audio"
+    path = config.UPLOAD_DIR / f"{mid}.wav"
+    with retention.incoming_recording(mid):
+        path.write_bytes(b"active")
+        retention.cleanup_pending_recordings()
+        assert path.exists() and cleanup_row(mid)
+        store.create_meeting(mid, "Live", "live.wav", user["id"])
+    assert path.exists() and not cleanup_row(mid)
+
+    # An uncommitted upload on disk at process startup has no in-memory owner.
+    abandoned = "crashed-upload"
+    store.enqueue_recording_cleanup(abandoned)
+    partial = config.UPLOAD_DIR / f"{abandoned}.uploading"
+    partial.write_bytes(b"partial")
+    retention.cleanup_pending_recordings()
+    assert not partial.exists() and not cleanup_row(abandoned)
+    assert path.exists()
+
+
+def test_legacy_upload_reconciliation_only_queues_unowned_mom_files(db):
+    _, user = db
+    owned = recording(user, "a" * 32)
+    missing = config.UPLOAD_DIR / ("b" * 32 + ".webm")
+    unrelated = config.UPLOAD_DIR / "internal-test.wav"
+    missing.write_bytes(b"orphan")
+    unrelated.write_bytes(b"fixture")
+    retention.reconcile_legacy_uploads(main.ALLOWED_SUFFIXES)
+    assert store.pending_recording_cleanup() == [missing.stem]
+    retention.cleanup_pending_recordings()
+    assert owned.exists() and unrelated.exists() and not missing.exists()
