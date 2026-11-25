@@ -61,7 +61,7 @@ test('searches anywhere in model names and keeps selection until a model is chos
   assert.deepEqual(selectableModels(), models);
   assert.equal(catalogRequests, 1);
   fireEvent.click(view.getByRole('button', { name: 'Сохранить и проверить модель' }));
-  await waitFor(() => assert.deepEqual(saves, [{ chat_model: 'google/gemini-flash-lite', asr_model: 'local-whisper' }]));
+  await waitFor(() => assert.deepEqual(saves, [{ chat_model: 'google/gemini-flash-lite' }]));
 });
 
 test('keeps manual entry when the provider has no catalog', async () => {
@@ -129,4 +129,35 @@ test('cancelling a new key check leaves the already saved key in place', async (
   assert.equal(signal.aborted, true);
   assert.ok(view.getByText('Проверка отменена. Ключ сохранён.'));
   assert.equal(view.queryByRole('alert'), null);
+});
+
+test('chooses the single speech model, tests the draft and saves separate credentials', async () => {
+  const speech = { base_url: 'https://speech.example/v1', api_key: 'speech-secret', model: 'gigaam-v3-local' };
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    const draft = JSON.parse(options.body);
+    requests.push([url, draft]);
+    if (url.endsWith('/models')) return Response.json({ models: ['gigaam-v3-local'] });
+    if (url.endsWith('/test')) return Response.json({ ok: true });
+    return Response.json({ ...health, asr: { engine: 'remote-api', base_url: speech.base_url, model: speech.model, key_set: true } });
+  };
+  const view = render(React.createElement(AdminSection, {
+    auth: { configured: true, authenticated: true }, health, tab: 'asr', onTab() {}, onAuth() {}, onHealth() {},
+  }));
+  fireEvent.click(view.getByRole('button', { name: /Свой API/ }));
+  fireEvent.change(view.getByLabelText('Адрес API расшифровки'), { target: { value: speech.base_url } });
+  fireEvent.change(view.getByLabelText('Bearer-ключ'), { target: { value: speech.api_key } });
+  fireEvent.click(view.getByRole('button', { name: 'Загрузить модели' }));
+  const model = await view.findByRole('combobox', { name: 'Модель расшифровки' });
+  assert.equal(model.value, speech.model);
+  fireEvent.click(view.getByRole('button', { name: 'Проверить модель' }));
+  await view.findByText('Модель приняла тестовый аудиофайл.');
+  fireEvent.click(view.getByRole('button', { name: 'Сохранить расшифровку' }));
+  await view.findByText('Настройки расшифровки сохранены.');
+  assert.equal(view.getByLabelText('Bearer-ключ').value, '');
+  assert.deepEqual(requests, [
+    ['/api/settings/asr/models', { ...speech, model: '' }],
+    ['/api/settings/asr/test', speech],
+    ['/api/settings/asr', { engine: 'remote-api', ...speech }],
+  ]);
 });

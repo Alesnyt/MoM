@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 # Docker keeps the writable configuration in its directory-mounted data volume.
@@ -27,6 +28,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "").strip()
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "").strip()
+REMOTE_ASR = "remote-api"
+ASR_API_BASE_URL = os.getenv("ASR_API_BASE_URL", "").strip()
+ASR_API_KEY = os.getenv("ASR_API_KEY", "").strip()
+ASR_API_MODEL = os.getenv("ASR_API_MODEL", "").strip()
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
 SETUP_TOKEN = os.getenv("SETUP_TOKEN", "").strip()
@@ -62,6 +67,13 @@ def _commit_settings(runtime: dict) -> None:
 
 
 @dataclass(frozen=True)
+class AsrConnection:
+    base_url: str
+    key: str = field(repr=False)
+    model: str
+
+
+@dataclass(frozen=True)
 class ModelSettings:
     api_key: str = field(repr=False)
     base_url: str
@@ -70,6 +82,7 @@ class ModelSettings:
     provider: str
     token_plan: bool
     whisper_size: str
+    asr_connection: AsrConnection
 
 
 _model_settings: ContextVar[ModelSettings | None] = ContextVar("model_settings", default=None)
@@ -82,7 +95,7 @@ def model_settings_scope():
     # change the model, provider options or endpoint halfway through a meeting.
     with _runtime_lock:
         snapshot = ModelSettings(get_api_key(), get_base_url(), get_chat_model(), get_asr_model(),
-                                 detect_provider(), is_token_plan(), local_whisper_size())
+                                 detect_provider(), is_token_plan(), local_whisper_size(), get_asr_connection())
     token = _model_settings.set(snapshot)
     try:
         yield snapshot
@@ -420,7 +433,7 @@ def migrate_token_plan_asr() -> None:
     if not is_token_plan():
         return
     current = get_asr_model()
-    if is_local_asr(current) or current == "qwen-audio-3.0-asr-flash":
+    if is_local_asr(current) or current in {REMOTE_ASR, "qwen-audio-3.0-asr-flash"}:
         return
     apply_connection(get_base_url(), get_chat_model(), default_asr_model())
 
@@ -568,6 +581,8 @@ def set_openai_api_key(key: str) -> None:
             payload["OPENAI_MODEL"] = "gpt-4o"
         if (WHISPER_MODEL or "").startswith("qwen"):
             payload["WHISPER_MODEL"] = LOCAL_ASR_MODEL
+    if WHISPER_MODEL == REMOTE_ASR:
+        payload.pop("WHISPER_MODEL", None)
     _commit_settings(payload)
 
 
@@ -579,6 +594,69 @@ def apply_connection(base_url: str, chat_model: str, asr_model: str) -> None:
     if is_whisper_asr(asr_model):
         payload["LOCAL_WHISPER_SIZE"] = local_whisper_size(asr_model)
     _commit_settings(payload)
+
+
+def normalize_asr_url(value: str) -> str:
+    url = value.strip().rstrip("/")
+    try:
+        parts = urlsplit(url)
+        valid = (parts.scheme in {"https", "http"} and parts.hostname and parts.port != 0
+                 and parts.username is None and parts.password is None
+                 and not any(c.isspace() or ord(c) < 32 or c in "?#\\"
+                             for c in url))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Укажите HTTP(S)-адрес API без пароля, параметров и фрагмента.")
+    if url.endswith("/audio/transcriptions"):
+        return url.removesuffix("/audio/transcriptions")
+    return url if parts.path else url + "/v1"
+
+
+def get_asr_connection() -> AsrConnection:
+    if (snapshot := _model_settings.get()) is not None:
+        return snapshot.asr_connection
+    with _runtime_lock:
+        return AsrConnection(ASR_API_BASE_URL, ASR_API_KEY, ASR_API_MODEL)
+
+
+@_serialized
+def resolve_asr_connection(base_url: str, key: str, model: str = "") -> AsrConnection:
+    url = normalize_asr_url(base_url)
+    key = key.strip()
+    if not key and ASR_API_KEY and ASR_API_BASE_URL and url == normalize_asr_url(ASR_API_BASE_URL):
+        key = ASR_API_KEY
+    if not key or not key.isascii() or any(not 33 <= ord(c) <= 126 for c in key):
+        raise ValueError("Введите Bearer-ключ для этого адреса без префикса Bearer.")
+    return AsrConnection(url, key, model.strip())
+
+
+@_serialized
+def save_asr(engine: str, base_url: str = "", key: str = "", model: str = "") -> None:
+    engine = engine.strip()
+    if not engine:
+        raise ValueError("Укажите модель расшифровки.")
+    payload = {"WHISPER_MODEL": engine}
+    if engine == REMOTE_ASR:
+        connection = resolve_asr_connection(base_url, key, model)
+        if not connection.model:
+            raise ValueError("Выберите модель расшифровки или укажите её имя.")
+        payload.update(ASR_API_BASE_URL=connection.base_url, ASR_API_KEY=connection.key,
+                       ASR_API_MODEL=connection.model)
+    elif is_whisper_asr(engine):
+        payload["LOCAL_WHISPER_SIZE"] = local_whisper_size(engine)
+    _commit_settings(payload)
+
+
+@_serialized
+def asr_admin_settings() -> dict:
+    connection = get_asr_connection()
+    return {"engine": canonical_asr_model(), "base_url": connection.base_url,
+            "model": connection.model, "key_set": bool(connection.key)}
+
+
+def save_chat_model(model: str) -> None:
+    _commit_settings({"OPENAI_MODEL": model})
 
 
 def clear_openai_api_key() -> None:

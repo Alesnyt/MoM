@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import diagnostics, disk, store
+from . import diagnostics, disk, remote_asr, store
 from .background import run_sync
 from .name_review import review_names
 from .analyze import (
@@ -247,8 +247,8 @@ async def _process_meeting(meeting_id: str) -> None:
         context = await run_sync(corporate_context.for_meeting, meeting)
     calendar_context = meeting.get("calendar_context")
     calendar_hint = calendar_service.search_text(calendar_context)
-    local_audio = config.is_local_asr(asr_model)
-    audio_path = AUDIO_DIR / f"{meeting_id}{'.wav' if local_audio else '.mp3'}"
+    use_wav = config.is_local_asr(asr_model) or asr_model == config.REMOTE_ASR
+    audio_path = AUDIO_DIR / f"{meeting_id}{'.wav' if use_wav else '.mp3'}"
     client = make_client(api_key)
     progress = _Progress(meeting_id)
     resume = has_saved_transcript(meeting)
@@ -286,7 +286,7 @@ async def _process_meeting(meeting_id: str) -> None:
                 return
             await run_sync(progress.set, 5, "Извлекаю звуковую дорожку", status="extracting", force=True)
             with stage_timer("audio_prepare"):
-                if local_audio:
+                if use_wav:
                     duration = await run_sync(extract_wav, src, audio_path)
                 else:
                     duration = await extract_audio_async(src, audio_path)
@@ -361,7 +361,7 @@ async def _process_meeting(meeting_id: str) -> None:
                                 audio_path,
                                 payload,
                                 lambda message: progress.set(86, message, status="transcribing", force=True),
-                                prepared=audio_path if local_audio else None,
+                                prepared=audio_path if use_wav else None,
                             )
             with stage_timer("context_apply"):
                 voiced = await run_sync(context.apply, voiced)
@@ -460,7 +460,7 @@ async def _process_meeting(meeting_id: str) -> None:
                 await close()
         except Exception:
             log.warning("Не удалось закрыть клиент LLM", exc_info=True)
-        if local_audio and not resume:
+        if use_wav and not resume:
             try:
                 await run_sync(audio_path.unlink, missing_ok=True)
                 disk.invalidate_recordings()
@@ -495,39 +495,46 @@ async def _transcribe(
         )
 
     with stage_timer("asr_cloud"):
-        limit = 2 * 1024 * 1024 if config.is_qwen() else MAX_WHISPER_BYTES
-        chunk_seconds = 2 * 60 if config.is_qwen() else CHUNK_SECONDS
-        size = (await run_sync(audio_path.stat)).st_size
-        if size <= limit:
-            return await transcribe_file(
-                client,
-                audio_path,
-                asr_model,
-                duration=duration,
-                on_progress=on_asr,
-            )
+        if asr_model == config.REMOTE_ASR:
+            async with remote_asr.connect(config.get_asr_connection()) as service:
+                return await _transcribe_parts(service.transcribe, audio_path, meeting_id, progress,
+                                               MAX_WHISPER_BYTES, CHUNK_SECONDS)
 
-        chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"
-        try:
-            chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
-            merged = []
-            for index, (offset, chunk) in enumerate(chunks):
-                base = 16 + int(index / max(1, len(chunks)) * 70)
-                await run_sync(progress.set,
-                    base,
-                    f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
-                    status="transcribing",
-                    force=True,
-                )
-                payload = await transcribe_file(client, chunk, asr_model)
-                merged.append((float(offset), payload))
-            return merge_transcripts(merged)
-        finally:
-            await run_sync(shutil.rmtree, chunks_dir, ignore_errors=True)
+        async def recognize(path: Path) -> dict:
+            if path == audio_path:
+                return await transcribe_file(client, path, asr_model, duration=duration, on_progress=on_asr)
+            return await transcribe_file(client, path, asr_model)
+
+        qwen = config.is_qwen()
+        return await _transcribe_parts(recognize, audio_path, meeting_id, progress,
+                                       2 * 1024 * 1024 if qwen else MAX_WHISPER_BYTES,
+                                       2 * 60 if qwen else CHUNK_SECONDS)
+
+
+async def _transcribe_parts(recognize, audio_path: Path, meeting_id: str, progress: _Progress,
+                            limit: int, chunk_seconds: int) -> dict:
+    if (await run_sync(audio_path.stat)).st_size <= limit:
+        return await recognize(audio_path)
+    chunks_dir = AUDIO_DIR / f"{meeting_id}_chunks"
+    try:
+        chunks = await split_audio_async(audio_path, chunks_dir, chunk_seconds)
+        merged = []
+        for index, (offset, chunk) in enumerate(chunks):
+            base = 16 + int(index / max(1, len(chunks)) * 70)
+            await run_sync(progress.set,
+                base,
+                f"Расшифровываю фрагмент {index + 1} из {len(chunks)}",
+                status="transcribing",
+                force=True,
+            )
+            merged.append((float(offset), await recognize(chunk)))
+        return merge_transcripts(merged)
+    finally:
+        await run_sync(shutil.rmtree, chunks_dir, ignore_errors=True)
 
 
 def public_error(exc: BaseException) -> str:
-    if isinstance(exc, AudioError):
+    if isinstance(exc, (AudioError, remote_asr.AsrServiceError)):
         return str(exc) or "Не удалось обработать аудио"
     text = str(exc)
     lowered = text.lower()

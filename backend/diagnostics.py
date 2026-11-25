@@ -310,6 +310,8 @@ def _settings() -> dict:
     family, ref = _model_name(model)
     asr = config.get_asr_model()
     engine = "gigaam" if config.is_gigaam_asr(asr) else "whisper" if config.is_local_asr(asr) else "api"
+    if asr == config.REMOTE_ASR:
+        asr = config.get_asr_connection().model
     result = {
         "llm_family": family, "llm_model_ref": ref,
         "asr_engine": engine, "asr_model_ref": hashlib.sha256(asr.encode()).hexdigest()[:16],

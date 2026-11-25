@@ -7,7 +7,7 @@ export const WHISPER_SIZES = [
   { id: "large-v3", label: "large-v3 — максимум качества" },
 ] as const;
 
-export type AsrEngine = "whisper" | "gigaam" | "cloud";
+export type AsrEngine = "whisper" | "gigaam" | "cloud" | "remote";
 
 export type AsrChoice = {
   engine: AsrEngine;
@@ -18,6 +18,7 @@ export type AsrChoice = {
 
 export function parseAsrModel(model: string): AsrChoice {
   const name = (model || "").trim().toLowerCase();
+  if (name === "remote-api") return { engine: "remote", whisperSize: "small", gigaamVariant: "ctc", cloudModel: "" };
   if (name.startsWith("gigaam") || name === "sber" || name.startsWith("sber-")) {
     return {
       engine: "gigaam",
@@ -38,6 +39,7 @@ export function parseAsrModel(model: string): AsrChoice {
 }
 
 export function encodeAsrModel(choice: AsrChoice): string {
+  if (choice.engine === "remote") return "remote-api";
   if (choice.engine === "gigaam") {
     return choice.gigaamVariant === "large" ? "gigaam-multilingual-large" : "gigaam-multilingual";
   }
@@ -50,6 +52,7 @@ export function encodeAsrModel(choice: AsrChoice): string {
 export function formatAsrLabel(model: string | null | undefined): string {
   if (!model) return "";
   const asr = parseAsrModel(model);
+  if (asr.engine === "remote") return "Свой API";
   if (asr.engine === "gigaam") {
     return asr.gigaamVariant === "large"
       ? "Сбер GigaAM Multilingual 600M"

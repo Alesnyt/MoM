@@ -1,6 +1,6 @@
 """Request contracts shared by the API domain routers."""
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class SettingsIn(BaseModel):
@@ -69,6 +69,16 @@ class PromptsIn(BaseModel):
 class ModelsIn(BaseModel):
     chat_model: str | None = None
     asr_model: str | None = None
+
+
+class AsrApiIn(BaseModel):
+    base_url: str = Field(default="", max_length=2048)
+    api_key: SecretStr = SecretStr("")
+    model: str = Field(default="", max_length=512)
+
+
+class AsrSettingsIn(AsrApiIn):
+    engine: str = Field(min_length=1, max_length=512)
 
 
 class ThemeIn(BaseModel):
