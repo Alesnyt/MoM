@@ -93,14 +93,17 @@ def run_smoke(image, proxy_image):
                     return json.load(response)
 
             def ready():
+                problem = "No HTTP response"
                 for _ in range(90):
                     try:
-                        if call("/api/health")["ok"]:
+                        health = call("/api/health")
+                        if health["ok"]:
                             return
-                    except (OSError, urllib.error.URLError):
-                        pass
+                        problem = str(health.get("worker", {}).get("services", []))
+                    except (OSError, urllib.error.URLError) as exc:
+                        problem = str(exc)
                     time.sleep(1)
-                raise RuntimeError("Corporate MoM did not become ready")
+                raise RuntimeError(f"Corporate MoM did not become ready on port {port}: {problem}")
 
             ready()
             call("/api/auth/setup", {"username": "testadmin", "password": "container-test-password",
@@ -127,7 +130,7 @@ def run_smoke(image, proxy_image):
             assert meeting["status"] == "review" and TEXT in meeting["transcript"] and meeting["segments"]
             docker("rm", "-fv", app)
             launch()
-            docker("restart", nginx)  # Refresh nginx's upstream address after replacing the app.
+            docker("exec", nginx, "nginx", "-s", "reload")  # Refresh the upstream without changing the published port.
             ready()
             assert call("/api/meetings/" + mid)["status"] == "review"
             assert call("/api/settings/asr/models", {**connection, "api_key": ""})["models"] == [MODEL]
