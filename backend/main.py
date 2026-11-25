@@ -1167,8 +1167,8 @@ def _halt_processing(meeting_id: str, user: dict, *, restart: bool) -> dict:
             else:
                 # A claimed job may not yet have reached control.bind_job. Its worker
                 # must acknowledge the stop; finishing here could requeue an owned job.
-                connection.execute("INSERT OR REPLACE INTO processing_requests(meeting_id, action) VALUES (?,?)",
-                                   (meeting_id, "restart" if restart else "stop"))
+                connection.execute("INSERT OR REPLACE INTO processing_requests(meeting_id, action, attempt) VALUES (?,?,?)",
+                                   (meeting_id, "restart" if restart else "stop", meeting["processing_attempt"]))
                 store.update_meeting(
                     meeting_id, connection=connection,
                     status_message="Останавливаю, чтобы запустить заново…" if restart else "Останавливаю…",

@@ -80,6 +80,8 @@ def init_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
         if "progress" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
+        if "processing_attempt" not in columns:
+            conn.execute("ALTER TABLE meetings ADD COLUMN processing_attempt INTEGER NOT NULL DEFAULT 0")
         if "user_id" not in columns:
             conn.execute("ALTER TABLE meetings ADD COLUMN user_id TEXT")
         if "queued_at" not in columns:
@@ -116,8 +118,14 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_recording_cleanup_due ON recording_cleanup(due_at)")
         conn.execute("""CREATE TABLE IF NOT EXISTS processing_requests (
             meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
-            action TEXT NOT NULL CHECK(action IN ('stop', 'restart'))
+            action TEXT NOT NULL CHECK(action IN ('stop', 'restart')),
+            attempt INTEGER NOT NULL
         )""")
+        if "attempt" not in {row[1] for row in conn.execute("PRAGMA table_info(processing_requests)")}:
+            conn.execute("ALTER TABLE processing_requests ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
+            conn.execute("""UPDATE processing_requests SET attempt=coalesce(
+                (SELECT processing_attempt FROM meetings WHERE id=processing_requests.meeting_id),0)""")
+
         conn.execute("""CREATE TABLE IF NOT EXISTS asr_checkpoints (
             meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
             part INTEGER NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
@@ -629,6 +637,7 @@ def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> s
             """
             UPDATE meetings
             SET status = 'extracting',
+                processing_attempt = processing_attempt + 1,
                 status_message = 'Начинаю обработку',
                 progress = 1,
                 error = NULL
@@ -639,6 +648,7 @@ def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> s
         if cursor.rowcount != 1:
             conn.execute("COMMIT")
             return None
+        conn.execute("DELETE FROM processing_requests WHERE meeting_id=?", (chosen,))
         conn.execute("COMMIT")
         record_timing("queue_wait", _seconds_since(selected["entered"]))
         return chosen
@@ -651,6 +661,13 @@ def claim_next_meeting(max_jobs: int, *, exclude_ids: tuple[str, ...] = ()) -> s
     finally:
         conn.close()
         restrict_path(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def processing_request(conn, meeting_id: str) -> str | None:
+    row = conn.execute("""SELECT action FROM processing_requests JOIN meetings
+                          ON meetings.id=meeting_id AND processing_attempt=attempt
+                          WHERE meeting_id=?""", (meeting_id,)).fetchone()
+    return row[0] if row else None
 
 
 def apply_processing_request(conn, meeting: dict, action: str) -> None:
@@ -680,7 +697,8 @@ def save_asr_checkpoint(meeting_id: str, fingerprint: str, part: int, result: di
 def requeue_interrupted_meetings() -> int:
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        requests = conn.execute("SELECT meetings.*, action FROM processing_requests JOIN meetings ON meetings.id=meeting_id").fetchall()
+        requests = conn.execute("""SELECT meetings.*, action FROM processing_requests JOIN meetings
+                                   ON meetings.id=meeting_id AND processing_attempt=attempt""").fetchall()
         for row in requests:
             apply_processing_request(conn, _serialize(row), row["action"])
         cursor = conn.execute(

@@ -223,8 +223,21 @@ def test_publication_observes_committed_stop_before_memory_signal(db):
     store.create_meeting("inflight", "test", "test.wav", owner)
     store.claim_next_meeting(1)
     with store.connect() as conn:
-        conn.execute("INSERT INTO processing_requests VALUES('inflight','stop')")
+        conn.execute("INSERT INTO processing_requests VALUES('inflight','stop',1)")
     with pytest.raises(control.ProcessingStopped):
         protocol_publication.complete_protocol({"id": "inflight", "user_id": owner}, result={"summary":"Late"})
     with pytest.raises(control.ProcessingStopped):
         pipeline._publish_transcript("inflight", transcript="Late", status="review")
+
+
+def test_stale_stop_does_not_affect_a_later_attempt(db):
+    from backend import control
+    owner = _user()
+    store.create_meeting("new-attempt", "test", "test.wav", owner)
+    store.claim_next_meeting(1)
+    with store.connect() as conn:
+        conn.execute("INSERT INTO processing_requests VALUES('new-attempt','stop',0)")
+        assert not control.pending(conn, "new-attempt")
+    assert store.requeue_interrupted_meetings() == 1
+    assert store.claim_next_meeting(1) == "new-attempt"
+    assert store.get_meeting("new-attempt")["processing_attempt"] == 2

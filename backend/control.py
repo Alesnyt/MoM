@@ -32,9 +32,7 @@ def is_stopped(meeting_id: str) -> bool:
 
 
 def pending(connection, meeting_id: str) -> bool:
-    return is_stopped(meeting_id) or connection.execute(
-        "SELECT 1 FROM processing_requests WHERE meeting_id=?", (meeting_id,)
-    ).fetchone() is not None
+    return is_stopped(meeting_id) or store.processing_request(connection, meeting_id) is not None
 
 
 def bind_job(meeting_id: str, task: object) -> None:
@@ -81,9 +79,9 @@ def _finish_locked(meeting_id: str) -> str:
     action = "restart" if restart else "stop"
     with store.edit_meeting(meeting_id) as (conn, meeting):
         if meeting:
-            saved = conn.execute("SELECT action FROM processing_requests WHERE meeting_id=?", (meeting_id,)).fetchone()
+            saved = store.processing_request(conn, meeting_id)
             if saved:
-                action = saved[0]
+                action = saved
             if saved or action == "restart" or meeting["status"] != "done":
                 store.apply_processing_request(conn, meeting, action)
     _applied.add(meeting_id)
