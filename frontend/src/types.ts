@@ -208,6 +208,7 @@ export type Health = {
   ui?: boolean;
   theme?: "classic" | "t2";
   openai: OpenAIStatus;
+  asr?: { engine: string; base_url: string; model: string; key_set: boolean };
   queue?: QueueStatus;
   smtp?: SmtpStatus;
   ldap?: LdapStatus;

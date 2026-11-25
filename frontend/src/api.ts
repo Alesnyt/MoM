@@ -352,14 +352,37 @@ export async function listChatModels(): Promise<string[]> {
   return data.manual ? [] : (data.models ?? []);
 }
 
-export async function saveModels(chatModel: string, asrModel: string): Promise<Health> {
+export async function saveModels(chatModel: string): Promise<Health> {
   const response = await apiRequest("/api/settings/models", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_model: chatModel, asr_model: asrModel }),
+    body: JSON.stringify({ chat_model: chatModel }),
   });
   return response.json();
+}
+
+export type AsrApiDraft = { base_url: string; api_key: string; model: string };
+
+async function asrRequest(path: string, fields: Partial<AsrApiDraft> & { engine?: string }) {
+  return apiRequest(`/api/settings/asr${path}`, {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+}
+
+export async function listAsrModels(draft: AsrApiDraft): Promise<string[]> {
+  const response = await asrRequest("/models", draft);
+  const data = await response.json();
+  return data.models;
+}
+
+export async function testAsr(draft: AsrApiDraft): Promise<void> {
+  await asrRequest("/test", draft);
+}
+
+export async function saveAsr(engine: string, draft?: AsrApiDraft): Promise<Health> {
+  return (await asrRequest("", { engine, ...draft })).json();
 }
 
 export async function verifyApiKey(signal: AbortSignal): Promise<Health> {

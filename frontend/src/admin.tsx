@@ -239,7 +239,7 @@ function adminHeading(tab: AdminTab): { title: string; lead: string } {
   if (tab === "asr") {
     return {
       title: "Расшифровка",
-      lead: "Движок распознавания речи: локальный Whisper, Сбер GigaAM или облако.",
+      lead: "Выберите движок распознавания речи или подключите свой сервер по API.",
     };
   }
   if (tab === "queue") {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { deleteApiKey, saveApiKey, listChatModels, saveModels, saveQueue, saveSmtp, saveTheme, testSmtp, verifyApiKey } from "./api";
-import { encodeAsrModel, formatAsrLabel, parseAsrModel, WHISPER_SIZES, type AsrEngine } from "./asr";
+import { AsrSettings } from "./admin-asr";
 import { connectionClass, connectionLabel, formatDate } from "./format";
 import type { AdminTab, Health } from "./types";
 
@@ -59,7 +59,6 @@ export function SettingsPanel({
   const [apiKey, setApiKey] = useState("");
   const [chatModel, setChatModel] = useState(health?.openai.chat_model || "");
   const [chatCatalog, setChatCatalog] = useState<string[] | null>(null);
-  const [asrModel, setAsrModel] = useState(health?.openai.asr_model || "");
   const [smtpHost, setSmtpHost] = useState(health?.smtp?.host || "");
   const [smtpPort, setSmtpPort] = useState(String(health?.smtp?.port || 587));
   const [smtpUser, setSmtpUser] = useState(health?.smtp?.user || "");
@@ -74,13 +73,11 @@ export function SettingsPanel({
   const [verificationNote, setVerificationNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const openai = health?.openai;
-  const asr = parseAsrModel(asrModel);
 
   useEffect(() => () => verification.current?.abort(), []);
 
   useEffect(() => {
     if (health?.openai.chat_model) setChatModel(health.openai.chat_model);
-    if (health?.openai.asr_model) setAsrModel(health.openai.asr_model);
     if (health?.smtp) {
       setSmtpHost(health.smtp.host || "");
       setSmtpPort(String(health.smtp.port || 587));
@@ -138,7 +135,7 @@ export function SettingsPanel({
       if (key !== undefined || model !== undefined) {
         setBusy("save");
         const saved = key !== undefined ? await saveApiKey(key)
-          : await saveModels(model!, asrModel.trim() || health?.openai.asr_model || "local-whisper");
+          : await saveModels(model!);
         if (controller.signal.aborted) return;
         onChange(saved);
         if (key !== undefined) setApiKey("");
@@ -167,16 +164,6 @@ export function SettingsPanel({
   }
 
   const cancelButton = <button className="ghost" type="button" onClick={cancelVerification}>Отменить проверку</button>;
-
-  function setEngine(engine: AsrEngine) {
-    setAsrModel(
-      encodeAsrModel({
-        ...asr,
-        engine,
-        cloudModel: asr.cloudModel || "whisper-1",
-      }),
-    );
-  }
 
   return (
     <>
@@ -286,113 +273,7 @@ export function SettingsPanel({
         </>
       )}
 
-      {topic === "asr" && (
-        <form
-          className="key-box"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void run("models", () =>
-              saveModels(chatModel.trim() || health?.openai.chat_model || "qwen3.7-plus", asrModel.trim()),
-            );
-          }}
-        >
-          <p>
-            Сейчас: {formatAsrLabel(openai?.asr_model) || "не задано"}. Token Plan, Gemini и OpenRouter не включают облачный ASR
-            в этом приложении — берите Whisper или GigaAM. Кто говорил, размечается отдельно: в .env нужен HF_TOKEN и пакет из
-            requirements-diarize.txt. Имена спикеров потом правятся во вкладке «Транскрипт».
-          </p>
-          <div className="choice-grid">
-            <button
-              type="button"
-              className={`choice-card ${asr.engine === "whisper" ? "active" : ""}`}
-              onClick={() => setEngine("whisper")}
-            >
-              <strong>Whisper</strong>
-              <small>Локально, CPU, меньше RAM</small>
-            </button>
-            <button
-              type="button"
-              className={`choice-card ${asr.engine === "gigaam" ? "active" : ""}`}
-              onClick={() => setEngine("gigaam")}
-            >
-              <strong>GigaAM</strong>
-              <small>Сбер, локально, 2026</small>
-            </button>
-            <button
-              type="button"
-              className={`choice-card ${asr.engine === "cloud" ? "active" : ""}`}
-              onClick={() => setEngine("cloud")}
-            >
-              <strong>Облако</strong>
-              <small>Qwen ASR или whisper-1</small>
-            </button>
-          </div>
-          <div className="field-stack" style={{ marginTop: 14 }}>
-            {asr.engine === "whisper" && (
-              <label className="field-label">
-                Модель Whisper
-                <select
-                  className="title-input"
-                  value={asr.whisperSize}
-                  onChange={(event) => {
-                    setAsrModel(encodeAsrModel({ ...asr, whisperSize: event.target.value }));
-                  }}
-                >
-                  {WHISPER_SIZES.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            {asr.engine === "gigaam" && (
-              <>
-                <label className="field-label">
-                  Модель GigaAM
-                  <select
-                    className="title-input"
-                    value={asr.gigaamVariant}
-                    onChange={(event) => {
-                      setAsrModel(
-                        encodeAsrModel({
-                          ...asr,
-                          gigaamVariant: event.target.value === "large" ? "large" : "ctc",
-                        }),
-                      );
-                    }}
-                  >
-                    <option value="ctc">220M CTC — быстрее, меньше RAM</option>
-                    <option value="large">600M CTC — точнее, тяжелее</option>
-                  </select>
-                </label>
-                <p>
-                  Пакеты и код модели уже в приложении. При первой расшифровке с Hugging Face скачиваются только веса.
-                </p>
-              </>
-            )}
-            {asr.engine === "cloud" && (
-              <label className="field-label">
-                Облачная модель
-                <input
-                  className="title-input"
-                  placeholder="qwen3-asr-flash или whisper-1"
-                  value={asr.cloudModel}
-                  onChange={(event) => {
-                    setAsrModel(encodeAsrModel({ ...asr, cloudModel: event.target.value }));
-                  }}
-                />
-                <small>Qwen ASR в текущем подключении возвращает текст без таймкодов. Для автоматической разметки спикеров выберите Whisper или GigaAM.</small>
-              </label>
-            )}
-          </div>
-          <div className="composer-row">
-            <button className="primary" type="submit" disabled={busy !== null || !asrModel.trim()}>
-              {busy === "models" ? "Сохраняю…" : "Сохранить расшифровку"}
-            </button>
-          </div>
-        </form>
-      )}
+      {topic === "asr" && <AsrSettings health={health} onChange={onChange} />}
 
       {topic === "queue" && (
         <form

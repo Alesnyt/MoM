@@ -311,7 +311,8 @@ def split_wav(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
 
 def split_audio(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    pattern = dest_dir / "chunk_%03d.mp3"
+    extension = ".wav" if src.suffix.lower() == ".wav" else ".mp3"
+    pattern = dest_dir / f"chunk_%03d{extension}"
     manifest = dest_dir / "segments.csv"
     _run(
         [
@@ -334,7 +335,7 @@ def split_audio(src: Path, dest_dir: Path, chunk_seconds: int) -> list[Path]:
             str(pattern),
         ]
     )
-    chunks = sorted(dest_dir.glob("chunk_*.mp3"))
+    chunks = sorted(dest_dir.glob(f"chunk_*{extension}"))
     if not chunks:
         raise AudioError("Не удалось разрезать аудио на фрагменты")
     return chunks

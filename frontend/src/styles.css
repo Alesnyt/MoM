@@ -1188,6 +1188,17 @@ select.title-input {
   margin-top: 10px;
 }
 
+.asr-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+@media (min-width: 721px) {
+  .asr-fields .choice-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+}
+
 .choice-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

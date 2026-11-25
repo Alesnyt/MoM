@@ -21,11 +21,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from . import directory_search, protocol_editor, request_origin
+from . import directory_search, protocol_editor, remote_asr, request_origin
 from .request_limits import RequestLimitsMiddleware
 from pydantic import ValidationError
 from .api_schemas import (
     SettingsIn,
+    AsrApiIn,
+    AsrSettingsIn,
     ContextSettingsIn,
     GlossaryImportIn,
     GlossaryEnabledIn,
@@ -239,6 +241,7 @@ def _health(*, full: bool = False) -> dict:
         "theme": config.get_ui_theme(),
         "max_upload_bytes": config.MAX_UPLOAD_BYTES,
         "openai": keys.snapshot() if full else keys.public_snapshot(),
+        **({"asr": config.asr_admin_settings()} if full else {}),
         "queue": store.queue_stats(),
         "smtp": smtp_snapshot(full=full),
         "ldap": ldap_snapshot(full=full),
@@ -683,11 +686,54 @@ def save_models(payload: ModelsIn, _admin: dict = Depends(require_admin)) -> dic
     asr = (payload.asr_model or config.get_asr_model()).strip()
     if not chat or not asr:
         raise HTTPException(status_code=400, detail="Укажите модели чата и расшифровки")
-    config.apply_connection(config.get_base_url(), chat, asr)
+    if payload.asr_model is None:
+        config.save_chat_model(chat)
+    else:
+        if asr == config.REMOTE_ASR and not config.get_asr_connection().model:
+            raise HTTPException(400, "Сначала настройте API во вкладке «Расшифровка».")
+        config.apply_connection(config.get_base_url(), chat, asr)
     if chat != previous:
         keys.reset_status("Подключение ещё не проверено")
     store.record_audit(_actor_name(_admin), "models.save", "llm", f"чат {chat}, расшифровка {asr}")
     return _health(full=True)
+
+
+@app.post("/api/settings/asr")
+def save_asr_settings(payload: AsrSettingsIn, _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        config.save_asr(payload.engine, payload.base_url, payload.api_key.get_secret_value(), payload.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    store.record_audit(_actor_name(_admin), "asr.save", "asr", "Настройки расшифровки сохранены")
+    return _health(full=True)
+
+
+def _asr_draft(payload: AsrApiIn) -> config.AsrConnection:
+    try:
+        return config.resolve_asr_connection(payload.base_url, payload.api_key.get_secret_value(), payload.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/settings/asr/models")
+async def asr_models(payload: AsrApiIn, _admin: dict = Depends(require_admin)) -> dict:
+    try:
+        async with remote_asr.connect(_asr_draft(payload), timeout=config.VERIFY_TIMEOUT_SECONDS) as service:
+            return {"models": await service.models()}
+    except remote_asr.AsrServiceError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/settings/asr/test")
+async def test_asr_settings(payload: AsrApiIn, _admin: dict = Depends(require_admin)) -> dict:
+    if not payload.model.strip():
+        raise HTTPException(400, "Укажите модель расшифровки.")
+    try:
+        async with remote_asr.connect(_asr_draft(payload), timeout=config.VERIFY_TIMEOUT_SECONDS) as service:
+            await service.probe()
+    except remote_asr.AsrServiceError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"ok": True}
 
 
 @app.get("/api/settings/chat-models")
