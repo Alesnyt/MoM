@@ -35,7 +35,8 @@ const summary = {
   stages: { asr: { samples: 5, median_seconds: 12, p95_seconds: 19 } },
   recent_runs: [{ run: 'run-1', meeting: 'meeting-1', phase: 'audio', status: 'review',
     started_at: '2026-11-16T10:00:00Z', elapsed_seconds: 70, audio_seconds: 600,
-    asr_rtf: 0.1, llm_calls: 0, peak_rss_bytes: 1024 ** 3 }],
+    asr_rtf: 0.1, llm_calls: 0, peak_rss_bytes: 1024 ** 3,
+    after_idle_rss_bytes: 512 * 1024 ** 2, gigaam_fragments: 42, gigaam_source_seconds: 123 }],
 };
 
 function mockApi(handler) {
@@ -71,6 +72,10 @@ test('diagnostics shows persistent run summaries and exports the selected period
   fireEvent.click(section.getByText('Последние запуски'));
   assert.ok(section.getByText('meeting-1'));
   assert.ok(section.getByText('Готово к разметке'));
+  const history = within(section.getByRole('table', { name: 'История обработок' }));
+  assert.ok(history.getByText('42 · 2:03'));
+  assert.ok(history.getByText('После выгрузки'));
+  assert.ok(history.getByText(/512/));
   fireEvent.change(section.getByRole('combobox', { name: 'Период отчёта' }), { target: { value: '14' } });
   await waitFor(() => assert.ok(calls.includes('/api/admin/diagnostics?days=14')));
   await waitFor(() => assert.equal(section.getByRole('button', { name: 'Скачать отчёт' }).disabled, false));

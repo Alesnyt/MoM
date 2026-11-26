@@ -302,7 +302,7 @@ async def _process_meeting(meeting_id: str) -> None:
                 log.info("шаг: спикеры до расшифровки")
                 await run_sync(progress.set, 20, "Размечаю спикеров", status="transcribing", force=True)
                 try:
-                    async with local_asr_slot():
+                    async with local_asr_slot("diarization"):
                         with stage_timer("diarization"):
                             known_turns = await run_sync(diarize_turns, audio_path, prepared=audio_path)
                 except DiarizeUnavailable as exc:
@@ -326,7 +326,7 @@ async def _process_meeting(meeting_id: str) -> None:
                     def on_slice(pct: int, message: str) -> None:
                         progress.set(30 + int(max(0, min(100, pct)) * 0.55), message, status="transcribing")
 
-                    async with local_asr_slot():
+                    async with local_asr_slot("gigaam"):
                         with stage_timer("asr"):
                             payload = await run_sync(
                                 transcribe_spans,
@@ -354,7 +354,7 @@ async def _process_meeting(meeting_id: str) -> None:
                     step = "спикеры"
                     log.info("шаг: спикеры")
                     await run_sync(progress.set, 86, "Размечаю спикеров", status="transcribing", force=True)
-                    async with local_asr_slot():
+                    async with local_asr_slot("diarization"):
                         with stage_timer("diarization"):
                             voiced = await run_sync(
                                 apply_diarization,

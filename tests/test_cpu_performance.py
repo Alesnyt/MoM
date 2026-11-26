@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from backend import analyze, audio, config, gigaam_asr, performance
+from backend import analyze, audio, config, diagnostics, gigaam_asr, performance
 from backend.logctx import meeting_scope
 
 
@@ -207,7 +207,16 @@ def test_short_gigaam_reply_preserves_samples_and_timestamp_without_neighbour_sp
     write_wav(src, b"\xff\x7f" * 16000 + b"\x00\x40" * 3200 + b"\xff\x7f" * 16000)
     model = RecordingModel(torch)
     monkeypatch.setattr(gigaam_asr, "_load", lambda *a: model)
-    result = gigaam_asr.transcribe_spans(src, [{"start": 1.0, "end": 1.2}])
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    run = diagnostics.begin_run("pcm-test", "audio")
+    with diagnostics.run_scope(run):
+        result = gigaam_asr.transcribe_spans(src, [{"start": 1.0, "end": 1.2}, {"start": 10, "end": 11}])
+        gigaam_asr.transcribe_gigaam_sync(src)
+    diagnostics.finish_run(run, status="review")
+    stats = diagnostics.export_report()["runs"][0]["gigaam_fragments"]
+    assert (stats["count"], stats["under_one_second"]) == (2, 1)
+    assert stats["source_seconds"] == pytest.approx(2.4)
+    assert stats["model_input_seconds"] == pytest.approx(2.65)
     assert result['segments'] == [{'start':1.0, 'end':1.2, 'text':'реплика 1'}]
     signal = model.inputs[0][0]
     assert signal.numel() == 7200

@@ -170,16 +170,21 @@ function DiagnosticsPanel() {
         </details>}
         {summary.recent_runs.length > 0 && <details className="diagnostics-details">
           <summary>Последние запуски</summary>
-          <p className="progress-hint">Обозначения встреч обезличены. Память относится ко всему MoM, включая параллельные обработки.</p>
+          <p className="progress-hint">Пик памяти учитывает MoM и дочерние процессы. Память основного процесса после простоя появляется у последней обработки аудио, когда очередь выгрузит модели.</p>
           <div className="audit-table-scroll" tabIndex={0} role="region" aria-label="Последние запуски диагностики">
             <table className="monitor-jobs" aria-label="История обработок">
               <thead><tr><th scope="col">Начало</th><th scope="col">Встреча</th><th scope="col">Обработка</th><th scope="col">Результат</th>
-                <th scope="col">Время</th><th scope="col">Запросов LLM</th><th scope="col">Пик памяти MoM</th></tr></thead>
+                <th scope="col">Время</th><th scope="col">Фрагменты GigaAM</th><th scope="col">Запросов LLM</th>
+                <th scope="col">Повторов LLM</th><th scope="col">Пик памяти MoM</th><th scope="col">После выгрузки</th></tr></thead>
               <tbody>{summary.recent_runs.map((run) => <tr key={run.run}>
                 <td><time dateTime={run.started_at}>{formatDate(run.started_at)}</time></td>
                 <td>{run.meeting}</td><td>{runPhaseLabels[run.phase] ?? "Обработка"}</td><td>{runStatusLabels[run.status] ?? "Неизвестно"}</td>
                 <td>{run.elapsed_seconds === null ? "—" : formatClock(run.elapsed_seconds)}</td>
-                <td>{run.llm_calls}</td><td>{run.peak_rss_bytes === null ? "—" : formatBytes(run.peak_rss_bytes)}</td>
+                <td>{run.gigaam_fragments == null ? "—" : number.format(run.gigaam_fragments)}
+                  {run.gigaam_source_seconds != null && ` · ${formatClock(run.gigaam_source_seconds)}`}</td>
+                <td>{run.llm_calls}</td><td>{run.sdk_retries ?? "—"}</td>
+                <td>{run.peak_rss_bytes == null ? "—" : formatBytes(run.peak_rss_bytes)}</td>
+                <td>{run.after_idle_rss_bytes == null ? "—" : formatBytes(run.after_idle_rss_bytes)}</td>
               </tr>)}</tbody>
             </table>
           </div>

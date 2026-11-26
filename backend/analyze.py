@@ -12,7 +12,7 @@ from typing import Any, Literal
 from openai import APIStatusError, AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import config, prompts, calendar_service, context_budget, llm_metrics
+from . import config, prompts, calendar_service, context_budget, diagnostics, llm_metrics
 from .performance import stage_timer
 from .background import run_sync
 from .speakers import has_timestamps
@@ -25,12 +25,18 @@ _local_asr_lock = asyncio.Lock()
 
 
 @asynccontextmanager
-async def local_asr_slot():
+async def local_asr_slot(model_stage: str | None = None):
     """Serialize local ASR and diarization, including GigaAM speaker spans."""
     with stage_timer("local_slot_wait"):
         await _local_asr_lock.acquire()
     try:
-        yield
+        if model_stage:
+            await run_sync(diagnostics.record_model_memory, f"before_{model_stage}")
+        try:
+            yield
+        finally:
+            if model_stage:
+                await run_sync(diagnostics.record_model_memory, f"after_{model_stage}")
     finally:
         _local_asr_lock.release()
 
@@ -57,7 +63,7 @@ def make_client(
         kwargs["default_headers"] = {"x-goog-api-key": api_key}
     elif config.is_openrouter_key(api_key) or (url and "openrouter.ai" in url):
         kwargs["default_headers"] = {"HTTP-Referer": "https://github.com/Alesnyt/MoM", "X-Title": "MoM"}
-    client = AsyncOpenAI(**kwargs)
+    client = llm_metrics.ObservedAsyncOpenAI(**kwargs)
     llm_metrics.instrument_client(client)
     return client
 
@@ -180,9 +186,10 @@ async def _transcribe_local(
 ) -> dict[str, Any]:
     if _local_asr_lock.locked() and on_progress:
         await run_sync(on_progress, 1, "Жду свободный слот распознавания")
-    async with local_asr_slot():
+    gigaam = config.is_gigaam_asr(model)
+    async with local_asr_slot("gigaam" if gigaam else "whisper"):
         with stage_timer("asr"):
-            if config.is_gigaam_asr(model):
+            if gigaam:
                 from .gigaam_asr import transcribe_gigaam_sync
 
                 return await run_sync(transcribe_gigaam_sync, path, language, duration, on_progress)
